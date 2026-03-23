@@ -1,0 +1,8 @@
+{
+  "name": "AI Tech Interviewer",
+  "description": "AI-powered mock interviews for IT professionals covering Frontend, Backend, Database, and Data Governance.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
