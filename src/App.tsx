@@ -37,6 +37,36 @@ const MOCK_APPLICATIONS = [
   { id: 'A002', name: '林小明', job: '高级前端工程师', resumeScore: 78, interviewScore: 65, aiEval: '基础尚可，但高级架构经验不足。', status: '已淘汰' },
 ];
 
+const MOCK_DEPTS = [
+  { id: 'D1', name: '集团总部', level: 0, manager: '张总', count: 120 },
+  { id: 'D2', name: '华北交付中心', level: 1, manager: '李总', count: 45 },
+  { id: 'D3', name: '研发一部', level: 2, manager: '王经理', count: 20 },
+  { id: 'D4', name: '华南交付中心', level: 1, manager: '赵总', count: 38 },
+];
+
+const MOCK_USERS = [
+  { id: 'U1', name: '系统管理员', username: 'admin', dept: '集团总部', role: '平台管理员', status: '正常' },
+  { id: 'U2', name: '李交付', username: 'li.jiaofu', dept: '华北交付中心', role: '交付经理', status: '正常' },
+  { id: 'U3', name: '赵招聘', username: 'zhao.zhaopin', dept: '研发一部', role: '招聘人员', status: '正常' },
+];
+
+const MOCK_ROLES = [
+  { id: 'R1', name: '平台管理员', desc: '拥有系统所有模块的最高权限', users: 1 },
+  { id: 'R2', name: '交付经理', desc: '负责客户维护与招聘项目管理', users: 12 },
+  { id: 'R3', name: '招聘人员', desc: '负责岗位发布、简历筛查与面试跟进', users: 45 },
+];
+
+const MOCK_MENUS = [
+  { id: 'M1', name: '项目管理', type: '目录', icon: 'Briefcase', path: '/projects', level: 0 },
+  { id: 'M1-1', name: '客户管理', type: '菜单', icon: 'Building2', path: '/projects/clients', level: 1 },
+  { id: 'M1-2', name: '招聘项目', type: '菜单', icon: 'Briefcase', path: '/projects/list', level: 1 },
+  { id: 'M2', name: '招聘管理', type: '目录', icon: 'Users', path: '/recruitment', level: 0 },
+  { id: 'M2-1', name: '岗位查询', type: '菜单', icon: 'Search', path: '/recruitment/jobs', level: 1 },
+  { id: 'M2-2', name: '简历筛查 (AI)', type: '菜单', icon: 'FileText', path: '/recruitment/resume', level: 1 },
+  { id: 'M2-3', name: '应聘管理', type: '菜单', icon: 'UserCheck', path: '/recruitment/applications', level: 1 },
+  { id: 'M3', name: '系统管理', type: '目录', icon: 'Settings', path: '/system', level: 0 },
+];
+
 // --- Components ---
 
 export default function App() {
@@ -569,44 +599,226 @@ function ApplicationManagementView() {
   );
 }
 
-// --- System Management Placeholder Views ---
+// --- System Management Views ---
 
 function SystemDeptView() {
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8 text-center">
-      <Network className="w-16 h-16 text-slate-300 mx-auto mb-4" />
-      <h3 className="text-lg font-bold text-slate-900 mb-2">部门管理</h3>
-      <p className="text-slate-500 max-w-md mx-auto">支持按树形结构设置企业部门层级，如：集团总部 -&gt; 华北交付中心 -&gt; 研发一部。</p>
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <div className="relative">
+          <Search className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input type="text" placeholder="搜索部门名称..." className="pl-10 pr-4 py-2 border border-slate-200 rounded-lg w-80 focus:ring-2 focus:ring-indigo-500 outline-none" />
+        </div>
+        <button className="bg-indigo-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-indigo-700 transition-colors shadow-sm">
+          <Plus className="w-4 h-4" /> 新增部门
+        </button>
+      </div>
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
+            <tr>
+              <th className="px-6 py-4 font-medium">部门名称</th>
+              <th className="px-6 py-4 font-medium">负责人</th>
+              <th className="px-6 py-4 font-medium">成员数量</th>
+              <th className="px-6 py-4 font-medium text-right">操作</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {MOCK_DEPTS.map(dept => (
+              <tr key={dept.id} className="hover:bg-slate-50 transition-colors">
+                <td className="px-6 py-4 font-medium text-slate-900 flex items-center gap-2" style={{ paddingLeft: `${dept.level * 2 + 1.5}rem` }}>
+                  {dept.level > 0 && <span className="w-4 h-px bg-slate-300 inline-block mr-1"></span>}
+                  <Network className="w-4 h-4 text-indigo-400" />
+                  {dept.name}
+                </td>
+                <td className="px-6 py-4 text-slate-600">{dept.manager}</td>
+                <td className="px-6 py-4 text-slate-600">{dept.count} 人</td>
+                <td className="px-6 py-4 text-right space-x-3">
+                  <button className="text-indigo-600 hover:text-indigo-800 font-medium">添加子部门</button>
+                  <button className="text-indigo-600 hover:text-indigo-800 font-medium">编辑</button>
+                  <button className="text-red-600 hover:text-red-800 font-medium">删除</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
 function SystemUserView() {
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8 text-center">
-      <UserCog className="w-16 h-16 text-slate-300 mx-auto mb-4" />
-      <h3 className="text-lg font-bold text-slate-900 mb-2">后台用户管理</h3>
-      <p className="text-slate-500 max-w-md mx-auto">管理系统登录用户，为用户分配所属部门及对应角色（如交付经理、招聘人员）。</p>
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <div className="flex gap-4">
+          <div className="relative">
+            <Search className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input type="text" placeholder="搜索用户名或姓名..." className="pl-10 pr-4 py-2 border border-slate-200 rounded-lg w-64 focus:ring-2 focus:ring-indigo-500 outline-none" />
+          </div>
+          <select className="border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none text-slate-600">
+            <option>全部部门</option>
+            <option>华北交付中心</option>
+            <option>研发一部</option>
+          </select>
+        </div>
+        <button className="bg-indigo-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-indigo-700 transition-colors shadow-sm">
+          <Plus className="w-4 h-4" /> 新增用户
+        </button>
+      </div>
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
+            <tr>
+              <th className="px-6 py-4 font-medium">姓名</th>
+              <th className="px-6 py-4 font-medium">登录账号</th>
+              <th className="px-6 py-4 font-medium">所属部门</th>
+              <th className="px-6 py-4 font-medium">角色</th>
+              <th className="px-6 py-4 font-medium">状态</th>
+              <th className="px-6 py-4 font-medium text-right">操作</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {MOCK_USERS.map(user => (
+              <tr key={user.id} className="hover:bg-slate-50 transition-colors">
+                <td className="px-6 py-4 font-bold text-slate-900 flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-xs">
+                    {user.name[0]}
+                  </div>
+                  {user.name}
+                </td>
+                <td className="px-6 py-4 text-slate-600">{user.username}</td>
+                <td className="px-6 py-4 text-slate-600">{user.dept}</td>
+                <td className="px-6 py-4">
+                  <span className="px-2.5 py-1 bg-indigo-50 text-indigo-700 text-xs font-medium rounded-md border border-indigo-100">{user.role}</span>
+                </td>
+                <td className="px-6 py-4">
+                  <span className="flex items-center gap-1.5 text-emerald-600 font-medium">
+                    <div className="w-2 h-2 rounded-full bg-emerald-500"></div> {user.status}
+                  </span>
+                </td>
+                <td className="px-6 py-4 text-right space-x-3">
+                  <button className="text-indigo-600 hover:text-indigo-800 font-medium">编辑</button>
+                  <button className="text-red-600 hover:text-red-800 font-medium">停用</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
 function SystemRoleView() {
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8 text-center">
-      <Shield className="w-16 h-16 text-slate-300 mx-auto mb-4" />
-      <h3 className="text-lg font-bold text-slate-900 mb-2">角色权限管理</h3>
-      <p className="text-slate-500 max-w-md mx-auto">仅平台管理员可见。可自定义角色，并配置角色对应的菜单访问权限和按钮操作权限。</p>
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <div className="relative">
+          <Search className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input type="text" placeholder="搜索角色名称..." className="pl-10 pr-4 py-2 border border-slate-200 rounded-lg w-80 focus:ring-2 focus:ring-indigo-500 outline-none" />
+        </div>
+        <button className="bg-indigo-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-indigo-700 transition-colors shadow-sm">
+          <Plus className="w-4 h-4" /> 新增角色
+        </button>
+      </div>
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
+            <tr>
+              <th className="px-6 py-4 font-medium">角色名称</th>
+              <th className="px-6 py-4 font-medium">角色描述</th>
+              <th className="px-6 py-4 font-medium">关联用户数</th>
+              <th className="px-6 py-4 font-medium text-right">操作</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {MOCK_ROLES.map(role => (
+              <tr key={role.id} className="hover:bg-slate-50 transition-colors">
+                <td className="px-6 py-4 font-bold text-slate-900">
+                  <div className="flex items-center gap-2">
+                    <Shield className="w-4 h-4 text-indigo-500" />
+                    {role.name}
+                  </div>
+                </td>
+                <td className="px-6 py-4 text-slate-600">{role.desc}</td>
+                <td className="px-6 py-4 text-slate-600">{role.users} 人</td>
+                <td className="px-6 py-4 text-right space-x-3">
+                  <button className="text-indigo-600 hover:text-indigo-800 font-medium">菜单权限</button>
+                  <button className="text-indigo-600 hover:text-indigo-800 font-medium">数据权限</button>
+                  <button className="text-indigo-600 hover:text-indigo-800 font-medium">编辑</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
 function SystemMenuView() {
+  const getIcon = (name: string) => {
+    switch (name) {
+      case 'Briefcase': return <Briefcase className="w-4 h-4" />;
+      case 'Building2': return <Building2 className="w-4 h-4" />;
+      case 'Users': return <Users className="w-4 h-4" />;
+      case 'Search': return <Search className="w-4 h-4" />;
+      case 'FileText': return <FileText className="w-4 h-4" />;
+      case 'UserCheck': return <UserCheck className="w-4 h-4" />;
+      case 'Settings': return <Settings className="w-4 h-4" />;
+      default: return <MenuIcon className="w-4 h-4" />;
+    }
+  };
+
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8 text-center">
-      <MenuIcon className="w-16 h-16 text-slate-300 mx-auto mb-4" />
-      <h3 className="text-lg font-bold text-slate-900 mb-2">菜单管理</h3>
-      <p className="text-slate-500 max-w-md mx-auto">维护后台系统的左侧导航菜单结构、图标及路由配置。</p>
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <div className="relative">
+          <Search className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input type="text" placeholder="搜索菜单名称..." className="pl-10 pr-4 py-2 border border-slate-200 rounded-lg w-80 focus:ring-2 focus:ring-indigo-500 outline-none" />
+        </div>
+        <button className="bg-indigo-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-indigo-700 transition-colors shadow-sm">
+          <Plus className="w-4 h-4" /> 新增菜单
+        </button>
+      </div>
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
+            <tr>
+              <th className="px-6 py-4 font-medium">菜单名称</th>
+              <th className="px-6 py-4 font-medium">图标</th>
+              <th className="px-6 py-4 font-medium">类型</th>
+              <th className="px-6 py-4 font-medium">路由路径</th>
+              <th className="px-6 py-4 font-medium text-right">操作</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {MOCK_MENUS.map(menu => (
+              <tr key={menu.id} className="hover:bg-slate-50 transition-colors">
+                <td className="px-6 py-4 font-medium text-slate-900" style={{ paddingLeft: `${menu.level * 2 + 1.5}rem` }}>
+                  <div className="flex items-center gap-2">
+                    {menu.level > 0 && <span className="w-4 h-px bg-slate-300 inline-block mr-1"></span>}
+                    {menu.name}
+                  </div>
+                </td>
+                <td className="px-6 py-4 text-slate-500">{getIcon(menu.icon)}</td>
+                <td className="px-6 py-4">
+                  <span className={`px-2 py-1 rounded text-xs font-medium ${menu.type === '目录' ? 'bg-slate-100 text-slate-700' : 'bg-blue-50 text-blue-700'}`}>
+                    {menu.type}
+                  </span>
+                </td>
+                <td className="px-6 py-4 font-mono text-slate-500">{menu.path}</td>
+                <td className="px-6 py-4 text-right space-x-3">
+                  <button className="text-indigo-600 hover:text-indigo-800 font-medium">添加下级</button>
+                  <button className="text-indigo-600 hover:text-indigo-800 font-medium">编辑</button>
+                  <button className="text-red-600 hover:text-red-800 font-medium">删除</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
