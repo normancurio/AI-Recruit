@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Building2, Briefcase, Users, FileText, UserCheck, 
@@ -8,64 +8,18 @@ import {
   LogOut, Bell, LayoutDashboard
 } from 'lucide-react';
 
-// --- Types & Mock Data ---
+// --- Types ---
 type Role = 'admin' | 'delivery_manager' | 'recruiter';
 
-const MOCK_CLIENTS = [
-  { id: 'C001', name: '北京字节跳动科技有限公司', creditCode: '91110108592343245G', industry: '互联网', contact: '张总', phone: '13800000001' },
-  { id: 'C002', name: '阿里巴巴（中国）网络技术有限公司', creditCode: '91330100719167708Y', industry: '电子商务', contact: '王总', phone: '13800000002' },
-];
-
-const MOCK_PROJECTS = [
-  { 
-    id: 'P001', name: '2026春季核心研发招聘', client: '北京字节跳动科技有限公司', dept: '华北交付中心', manager: '李交付', status: '进行中',
-    jobs: [
-      { id: 'J001', title: '高级前端工程师', demand: 5, location: '北京', skills: 'React, TypeScript', level: '高级', salary: '30k-50k', recruiters: ['赵招聘', '钱招聘'] },
-      { id: 'J002', title: 'Java架构师', demand: 2, location: '北京', skills: 'Java, Spring Cloud', level: '专家', salary: '50k-80k', recruiters: ['钱招聘'] }
-    ]
-  }
-];
-
-const MOCK_RESUMES = [
-  { id: 'R001', name: '陈大文', job: '高级前端工程师', matchScore: 95, status: 'AI分析完成', uploadTime: '2026-03-25 10:00' },
-  { id: 'R002', name: '林小明', job: '高级前端工程师', matchScore: 78, status: 'AI分析完成', uploadTime: '2026-03-25 11:30' },
-  { id: 'R003', name: '王五', job: 'Java架构师', matchScore: 45, status: '不匹配', uploadTime: '2026-03-25 14:20' },
-];
-
-const MOCK_APPLICATIONS = [
-  { id: 'A001', name: '陈大文', job: '高级前端工程师', resumeScore: 95, interviewScore: 88, aiEval: '技术扎实，沟通顺畅，强烈建议推进。', status: '待初试' },
-  { id: 'A002', name: '林小明', job: '高级前端工程师', resumeScore: 78, interviewScore: 65, aiEval: '基础尚可，但高级架构经验不足。', status: '已淘汰' },
-];
-
-const MOCK_DEPTS = [
-  { id: 'D1', name: '集团总部', level: 0, manager: '张总', count: 120 },
-  { id: 'D2', name: '华北交付中心', level: 1, manager: '李总', count: 45 },
-  { id: 'D3', name: '研发一部', level: 2, manager: '王经理', count: 20 },
-  { id: 'D4', name: '华南交付中心', level: 1, manager: '赵总', count: 38 },
-];
-
-const MOCK_USERS = [
-  { id: 'U1', name: '系统管理员', username: 'admin', dept: '集团总部', role: '平台管理员', status: '正常' },
-  { id: 'U2', name: '李交付', username: 'li.jiaofu', dept: '华北交付中心', role: '交付经理', status: '正常' },
-  { id: 'U3', name: '赵招聘', username: 'zhao.zhaopin', dept: '研发一部', role: '招聘人员', status: '正常' },
-];
-
-const MOCK_ROLES = [
-  { id: 'R1', name: '平台管理员', desc: '拥有系统所有模块的最高权限', users: 1 },
-  { id: 'R2', name: '交付经理', desc: '负责客户维护与招聘项目管理', users: 12 },
-  { id: 'R3', name: '招聘人员', desc: '负责岗位发布、简历筛查与面试跟进', users: 45 },
-];
-
-const MOCK_MENUS = [
-  { id: 'M1', name: '项目管理', type: '目录', icon: 'Briefcase', path: '/projects', level: 0 },
-  { id: 'M1-1', name: '客户管理', type: '菜单', icon: 'Building2', path: '/projects/clients', level: 1 },
-  { id: 'M1-2', name: '招聘项目', type: '菜单', icon: 'Briefcase', path: '/projects/list', level: 1 },
-  { id: 'M2', name: '招聘管理', type: '目录', icon: 'Users', path: '/recruitment', level: 0 },
-  { id: 'M2-1', name: '岗位查询', type: '菜单', icon: 'Search', path: '/recruitment/jobs', level: 1 },
-  { id: 'M2-2', name: '简历筛查 (AI)', type: '菜单', icon: 'FileText', path: '/recruitment/resume', level: 1 },
-  { id: 'M2-3', name: '应聘管理', type: '菜单', icon: 'UserCheck', path: '/recruitment/applications', level: 1 },
-  { id: 'M3', name: '系统管理', type: '目录', icon: 'Settings', path: '/system', level: 0 },
-];
+export interface Client { id: string; name: string; creditCode: string; industry: string; contact: string; phone: string; }
+export interface Job { id: string; project_id: string; title: string; demand: number; location: string; skills: string; level: string; salary: string; recruiters: string[]; }
+export interface Project { id: string; name: string; client: string; dept: string; manager: string; status: string; jobs: Job[]; }
+export interface Resume { id: string; name: string; job: string; matchScore: number; status: string; uploadTime: string; }
+export interface Application { id: string; name: string; job: string; resumeScore: number; interviewScore: number; aiEval: string; status: string; }
+export interface Dept { id: string; name: string; level: number; manager: string; count: number; }
+export interface User { id: string; name: string; username: string; dept: string; role: string; status: string; }
+export interface SysRole { id: string; name: string; desc: string; users: number; }
+export interface Menu { id: string; name: string; type: string; icon: string; path: string; level: number; }
 
 // --- Components ---
 
@@ -270,6 +224,12 @@ export default function App() {
 // --- View Components ---
 
 function ClientManagementView() {
+  const [clients, setClients] = useState<Client[]>([]);
+
+  useEffect(() => {
+    fetch('/api/clients').then(res => res.json()).then(setClients);
+  }, []);
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
@@ -297,7 +257,7 @@ function ClientManagementView() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {MOCK_CLIENTS.map(client => (
+            {clients.map(client => (
               <tr key={client.id} className="hover:bg-slate-50 transition-colors">
                 <td className="px-6 py-4 font-medium text-slate-900">{client.name}</td>
                 <td className="px-6 py-4 font-mono text-slate-500">{client.creditCode}</td>
@@ -318,6 +278,11 @@ function ClientManagementView() {
 
 function ProjectManagementView({ role }: { role: Role }) {
   const [expandedProject, setExpandedProject] = useState<string | null>('P001');
+  const [projects, setProjects] = useState<Project[]>([]);
+
+  useEffect(() => {
+    fetch('/api/projects').then(res => res.json()).then(setProjects);
+  }, []);
 
   return (
     <div className="space-y-6">
@@ -333,7 +298,7 @@ function ProjectManagementView({ role }: { role: Role }) {
       </div>
 
       <div className="space-y-4">
-        {MOCK_PROJECTS.map(project => (
+        {projects.map(project => (
           <div key={project.id} className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
             {/* Project Header */}
             <div 
@@ -406,6 +371,18 @@ function ProjectManagementView({ role }: { role: Role }) {
 }
 
 function JobQueryView() {
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [projectName, setProjectName] = useState('');
+
+  useEffect(() => {
+    fetch('/api/projects').then(res => res.json()).then((data: Project[]) => {
+      if (data.length > 0) {
+        setJobs(data[0].jobs);
+        setProjectName(data[0].name);
+      }
+    });
+  }, []);
+
   return (
     <div className="space-y-6">
       <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-4 flex items-start gap-3">
@@ -417,12 +394,12 @@ function JobQueryView() {
       </div>
 
       <div className="grid grid-cols-3 gap-6">
-        {MOCK_PROJECTS[0].jobs.map(job => (
+        {jobs.map(job => (
           <div key={job.id} className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 hover:shadow-md transition-shadow cursor-pointer group">
             <div className="flex justify-between items-start mb-4">
               <div>
                 <h3 className="text-lg font-bold text-slate-900 group-hover:text-indigo-600 transition-colors">{job.title}</h3>
-                <p className="text-sm text-slate-500 mt-1">{MOCK_PROJECTS[0].name}</p>
+                <p className="text-sm text-slate-500 mt-1">{projectName}</p>
               </div>
               <span className="px-2.5 py-1 bg-blue-50 text-blue-700 text-xs font-medium rounded-md">需求 {job.demand} 人</span>
             </div>
@@ -447,6 +424,12 @@ function JobQueryView() {
 }
 
 function ResumeScreeningView() {
+  const [resumes, setResumes] = useState<Resume[]>([]);
+
+  useEffect(() => {
+    fetch('/api/resumes').then(res => res.json()).then(setResumes);
+  }, []);
+
   return (
     <div className="space-y-6">
       <div className="flex gap-6">
@@ -476,10 +459,10 @@ function ResumeScreeningView() {
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden h-full flex flex-col">
             <div className="p-6 border-b border-slate-100 flex justify-between items-center">
               <h3 className="font-bold text-slate-900">AI 筛查结果</h3>
-              <span className="text-sm text-slate-500">共解析 3 份简历</span>
+              <span className="text-sm text-slate-500">共解析 {resumes.length} 份简历</span>
             </div>
             <div className="flex-1 overflow-auto p-6 space-y-4">
-              {MOCK_RESUMES.map(resume => (
+              {resumes.map(resume => (
                 <div key={resume.id} className="border border-slate-200 rounded-lg p-4 flex items-center gap-6 hover:border-indigo-300 transition-colors">
                   <div className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center flex-shrink-0">
                     <FileText className="w-6 h-6 text-slate-500" />
@@ -524,6 +507,12 @@ function ResumeScreeningView() {
 }
 
 function ApplicationManagementView() {
+  const [applications, setApplications] = useState<Application[]>([]);
+
+  useEffect(() => {
+    fetch('/api/applications').then(res => res.json()).then(setApplications);
+  }, []);
+
   return (
     <div className="space-y-6">
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
@@ -554,7 +543,7 @@ function ApplicationManagementView() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {MOCK_APPLICATIONS.map(app => (
+            {applications.map(app => (
               <tr key={app.id} className="hover:bg-slate-50 transition-colors">
                 <td className="px-6 py-4 font-bold text-slate-900">
                   <div className="flex items-center gap-3">
@@ -602,6 +591,12 @@ function ApplicationManagementView() {
 // --- System Management Views ---
 
 function SystemDeptView() {
+  const [depts, setDepts] = useState<Dept[]>([]);
+
+  useEffect(() => {
+    fetch('/api/depts').then(res => res.json()).then(setDepts);
+  }, []);
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
@@ -624,7 +619,7 @@ function SystemDeptView() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {MOCK_DEPTS.map(dept => (
+            {depts.map(dept => (
               <tr key={dept.id} className="hover:bg-slate-50 transition-colors">
                 <td className="px-6 py-4 font-medium text-slate-900 flex items-center gap-2" style={{ paddingLeft: `${dept.level * 2 + 1.5}rem` }}>
                   {dept.level > 0 && <span className="w-4 h-px bg-slate-300 inline-block mr-1"></span>}
@@ -648,6 +643,12 @@ function SystemDeptView() {
 }
 
 function SystemUserView() {
+  const [users, setUsers] = useState<User[]>([]);
+
+  useEffect(() => {
+    fetch('/api/users').then(res => res.json()).then(setUsers);
+  }, []);
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
@@ -679,7 +680,7 @@ function SystemUserView() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {MOCK_USERS.map(user => (
+            {users.map(user => (
               <tr key={user.id} className="hover:bg-slate-50 transition-colors">
                 <td className="px-6 py-4 font-bold text-slate-900 flex items-center gap-3">
                   <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-xs">
@@ -711,6 +712,12 @@ function SystemUserView() {
 }
 
 function SystemRoleView() {
+  const [roles, setRoles] = useState<SysRole[]>([]);
+
+  useEffect(() => {
+    fetch('/api/roles').then(res => res.json()).then(setRoles);
+  }, []);
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
@@ -733,7 +740,7 @@ function SystemRoleView() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {MOCK_ROLES.map(role => (
+            {roles.map(role => (
               <tr key={role.id} className="hover:bg-slate-50 transition-colors">
                 <td className="px-6 py-4 font-bold text-slate-900">
                   <div className="flex items-center gap-2">
@@ -758,6 +765,12 @@ function SystemRoleView() {
 }
 
 function SystemMenuView() {
+  const [menus, setMenus] = useState<Menu[]>([]);
+
+  useEffect(() => {
+    fetch('/api/menus').then(res => res.json()).then(setMenus);
+  }, []);
+
   const getIcon = (name: string) => {
     switch (name) {
       case 'Briefcase': return <Briefcase className="w-4 h-4" />;
@@ -794,7 +807,7 @@ function SystemMenuView() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {MOCK_MENUS.map(menu => (
+            {menus.map(menu => (
               <tr key={menu.id} className="hover:bg-slate-50 transition-colors">
                 <td className="px-6 py-4 font-medium text-slate-900" style={{ paddingLeft: `${menu.level * 2 + 1.5}rem` }}>
                   <div className="flex items-center gap-2">
