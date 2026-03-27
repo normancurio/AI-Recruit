@@ -1,0 +1,41 @@
+.result-page {
+  display: flex;
+  align-items: center;
+}
+
+.card {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  text-align: center;
+}
+
+.title {
+  font-size: 48px;
+  font-weight: 700;
+  color: #065f46;
+}
+
+.score {
+  font-size: 30px;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.desc {
+  font-size: 28px;
+  color: #475569;
+  line-height: 1.7;
+}
+
+.primary-btn {
+  margin-top: 20px;
+  height: 88px;
+  line-height: 88px;
+  border-radius: 999px;
+  background: #0f172a;
+  color: #ffffff;
+  font-size: 30px;
+  font-weight: 600;
+}

@@ -1,0 +1,68 @@
+.login-page {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.title {
+  font-size: 48px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.subtitle {
+  font-size: 28px;
+  color: #64748b;
+}
+
+.form-card {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.label {
+  font-size: 26px;
+  color: #334155;
+}
+
+.input {
+  height: 84px;
+  border: 2px solid #e2e8f0;
+  border-radius: 16px;
+  padding: 0 20px;
+  font-size: 28px;
+  box-sizing: border-box;
+}
+
+.primary-btn {
+  margin-top: 8px;
+  height: 88px;
+  line-height: 88px;
+  border-radius: 999px;
+  background: #4f46e5;
+  color: #ffffff;
+  font-size: 30px;
+  font-weight: 600;
+}
+
+.interviewer-btn {
+  height: 84px;
+  line-height: 84px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #0f172a;
+  font-size: 28px;
+}
