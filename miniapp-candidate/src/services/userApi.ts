@@ -55,7 +55,9 @@ export async function bindMyPhoneByWechat(params: { openid: string; encryptedDat
     method: 'POST',
     data: params
   })
-  if (res.statusCode >= 400 || !res.data?.data) throw new Error('bind phone by wechat failed')
+  if (res.statusCode >= 400 || !res.data?.data) {
+    throw new Error(httpErrorMessage(res, '手机号授权失败'))
+  }
   return res.data.data
 }
 

@@ -2,7 +2,7 @@ import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
 import { Button, Text, View } from '@tarojs/components'
 
-import { acceptInvitation, bindMyPhoneByWechat, getMyInvitations, getMyProfile } from '../../services/userApi'
+import { acceptInvitation, getMyInvitations, getMyProfile } from '../../services/userApi'
 
 import './index.scss'
 
@@ -17,8 +17,6 @@ export default function InvitePage() {
   const [loading, setLoading] = useState(false)
   const [invites, setInvites] = useState<Invitation[]>([])
   const [error, setError] = useState('')
-  const [phoneBound, setPhoneBound] = useState(false)
-  const [bindingPhone, setBindingPhone] = useState(false)
 
   useDidShow(async () => {
     const openid = (Taro.getStorageSync('wx_openid') as string) || ''
@@ -28,7 +26,18 @@ export default function InvitePage() {
     }
     try {
       const me = await getMyProfile(openid)
-      setPhoneBound(Boolean(me.phone))
+      if (me.role === 'interviewer') {
+        Taro.reLaunch({ url: '/pages/interviewer/index' })
+        return
+      }
+      // 业务守卫：候选人未绑定手机号时，不允许直接停留在邀请页，回登录页重新完成登录/授权。
+      if (!me.phone) {
+        Taro.removeStorageSync('candidate_profile')
+        Taro.removeStorageSync('candidate_job')
+        Taro.showToast({ title: '请先完成登录并绑定手机号', icon: 'none' })
+        Taro.reLaunch({ url: '/pages/login/index' })
+        return
+      }
       const list = await getMyInvitations(openid)
       setInvites(list)
       setError('')
@@ -36,35 +45,6 @@ export default function InvitePage() {
       setError('加载邀请失败')
     }
   })
-
-  const onGetPhoneNumber = async (e: any) => {
-    const openid = (Taro.getStorageSync('wx_openid') as string) || ''
-    if (!openid) return
-    const detail = e?.detail || {}
-    if (detail.errMsg && String(detail.errMsg).includes('deny')) {
-      Taro.showToast({ title: '你拒绝了手机号授权', icon: 'none' })
-      return
-    }
-    const encryptedData = String(detail.encryptedData || '')
-    const iv = String(detail.iv || '')
-    if (!encryptedData || !iv) {
-      Taro.showToast({ title: '未获取到手机号信息', icon: 'none' })
-      return
-    }
-    try {
-      setBindingPhone(true)
-      const r = await bindMyPhoneByWechat({ openid, encryptedData, iv })
-      setPhoneBound(true)
-      if (r.role === 'interviewer') {
-        Taro.showToast({ title: '识别为面试官，已跳转', icon: 'none' })
-        Taro.reLaunch({ url: '/pages/interviewer/index' })
-      }
-    } catch (err) {
-      Taro.showToast({ title: '手机号绑定失败，请重试', icon: 'none' })
-    } finally {
-      setBindingPhone(false)
-    }
-  }
 
   const handleAccept = async (invite: Invitation) => {
     const openid = (Taro.getStorageSync('wx_openid') as string) || ''
@@ -95,35 +75,21 @@ export default function InvitePage() {
         <Text className='title'>我收到一个面试邀请</Text>
         {error ? <Text className='error'>{error}</Text> : null}
 
-        {!phoneBound && (
-          <View className='phone-block'>
-            <Text className='hint'>为便于识别面试官/候选人身份，请先授权绑定手机号。</Text>
-            <Button
-              className='secondary-btn'
-              openType='getPhoneNumber'
-              onGetPhoneNumber={onGetPhoneNumber}
-              loading={bindingPhone}
-              disabled={bindingPhone}
-            >
-              授权手机号
-            </Button>
-          </View>
-        )}
-
         {invite ? (
-          <>
-            <View className='info'>
-              <Text className='row'>岗位：{invite.title}</Text>
-              <Text className='row'>部门：{invite.department}</Text>
-            </View>
-
-            <Button className='primary-btn' disabled={!phoneBound} loading={loading} onClick={() => handleAccept(invite)}>
-              同意并开始面试
-            </Button>
-          </>
+          <View className='info'>
+            <Text className='row'>岗位：{invite.title}</Text>
+            <Text className='row'>部门：{invite.department}</Text>
+            <Text className='row dim'>邀请码：{invite.inviteId}</Text>
+          </View>
         ) : (
           <Text className='empty'>暂无新的面试邀请</Text>
         )}
+
+        {invite ? (
+          <Button className='primary-btn' loading={loading} onClick={() => handleAccept(invite)}>
+            同意并开始面试
+          </Button>
+        ) : null}
       </View>
     </View>
   )

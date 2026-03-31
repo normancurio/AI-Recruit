@@ -1,225 +1,516 @@
-import Taro, { useDidShow } from '@tarojs/taro'
-import { useMemo, useState } from 'react'
-import { Button, Text, Textarea, View } from '@tarojs/components'
+/// <reference path="../../types/trtc-wx-sdk.d.ts" />
+import Taro, { getCurrentInstance, useDidHide, useDidShow } from '@tarojs/taro'
+import { useCallback, useMemo, useRef, useState } from 'react'
+import { Button, Camera, LivePusher, Text, View } from '@tarojs/components'
+import type { LivePusherProps } from '@tarojs/components/types/LivePusher'
+import TrtcWx from 'trtc-wx-sdk'
 
+import { getApiBase } from '../../config/apiBase'
 import {
   bindSessionMember,
   fetchInterviewQuestions,
-  getLiveSessionState,
+  fetchTrtcCredential,
   startLiveSession,
   submitInterview,
   syncLiveQa,
-  syncLiveTranscript
+  syncLiveTranscript,
+  syncTrtcRoomSignal,
+  type TrtcCredential
 } from '../../services/interviewApi'
+import { trySendTrtcPusherCustomMessage } from '../../utils/trtcPusherMsg'
+import { flowLog, flowLogInfo } from '../../utils/flowLog'
 import { CandidateProfile, InterviewAnswer, InterviewQuestion, JobInfo } from '../../types/interview'
 
 import './index.scss'
 
 const requirePluginFn = (globalThis as any).requirePlugin as ((name: string) => any) | undefined
-const wxApi = (globalThis as any).wx
-// 临时联调：面试官 openid（17317476943）
-const FIXED_INTERVIEWER_OPENID = 'oWLZU11sFJgmZ8fZR2q_iJfqFD0A'
+
+type PusherState = Record<string, any> | null
 
 export default function InterviewPage() {
   const [profile, setProfile] = useState<CandidateProfile | null>(null)
   const [job, setJob] = useState<JobInfo | null>(null)
   const [questions, setQuestions] = useState<InterviewQuestion[]>([])
   const [index, setIndex] = useState(0)
-  const [answer, setAnswer] = useState('')
+  /** onStop 固化后的片段列表（最终态） */
+  const [transcriptFinalized, setTranscriptFinalized] = useState<string[]>([])
+  /** onRecognize 流式中间态，未定稿 */
+  const [transcriptStreaming, setTranscriptStreaming] = useState('')
+  const transcriptFinalizedRef = useRef<string[]>([])
+  transcriptFinalizedRef.current = transcriptFinalized
   const [answers, setAnswers] = useState<InterviewAnswer[]>([])
   const [loading, setLoading] = useState(false)
   const [sessionId, setSessionId] = useState('')
   const [transcribing, setTranscribing] = useState(false)
-  const [transcriptTip, setTranscriptTip] = useState('未开启同声转写')
-  const [startingVoip, setStartingVoip] = useState(false)
-  const [voipTip, setVoipTip] = useState('由微信 VoIP 承载视频画面（非页面内 video）')
-  const [voipStatus, setVoipStatus] = useState<'idle' | 'starting' | 'waiting_accept' | 'connected' | 'failed'>('idle')
-  const [voipDebug, setVoipDebug] = useState('')
+  const [transcriptTip, setTranscriptTip] = useState('进入后将使用 WechatSI 实时转写')
+  const [initError, setInitError] = useState('')
+  const [cameraError, setCameraError] = useState('')
+  /** 已用 TRTC live-pusher 进房（未配置或服务端 503 时为 false，使用原生 Camera） */
+  const [trtcActive, setTrtcActive] = useState(false)
+  const [pusher, setPusher] = useState<PusherState>(null)
 
-  useDidShow(async () => {
-    const p = Taro.getStorageSync('candidate_profile') as CandidateProfile | undefined
-    const j = Taro.getStorageSync('candidate_job') as JobInfo | undefined
-    if (!p?.name || !j?.id) {
-      Taro.redirectTo({ url: '/pages/entry/index' })
-      return
+  const transcribingRef = useRef(false)
+  transcribingRef.current = transcribing
+  const dataInitMarkerRef = useRef('')
+  const recordManagerRef = useRef<{ stop?: () => void } | null>(null)
+  const trtcRef = useRef<InstanceType<typeof TrtcWx> | null>(null)
+  const trtcErrorHookedRef = useRef(false)
+  const trtcImHookedRef = useRef(false)
+  const trtcEnteredSidRef = useRef('')
+  const visibleRef = useRef(false)
+  const questionCountRef = useRef(0)
+  questionCountRef.current = questions.length
+  const questionIndexRef = useRef(0)
+  questionIndexRef.current = index
+  const loadingRef = useRef(false)
+  loadingRef.current = loading
+  /** 切题 force 重启过程中抑制 onStop 自动重启，避免重复启动 */
+  const suppressAutoRestartRef = useRef(false)
+  /** 切题时 stop 后须在 onStop 里再 start，否则会报 please wait recognition finished */
+  const pendingRestartSidRef = useRef<string | null>(null)
+  const forceRestartFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const openRecognitionRef = useRef<(sid: string) => void>(() => {})
+
+  const stopSegmentedAsr = useCallback(() => {
+    pendingRestartSidRef.current = null
+    if (forceRestartFallbackTimerRef.current) {
+      clearTimeout(forceRestartFallbackTimerRef.current)
+      forceRestartFallbackTimerRef.current = null
     }
-    setProfile(p)
-    setJob(j)
-    if (questions.length === 0) {
-      try {
-        const list = await fetchInterviewQuestions(j.id)
-        setQuestions(list)
-        const cachedSid = (Taro.getStorageSync('session_id') as string) || ''
-        const sid = cachedSid || `${j.id}-${p.openid || p.phone || 'unknown'}`
-        setSessionId(sid)
-        await startLiveSession({
-          sessionId: sid,
-          jobId: j.id,
-          candidateName: p.name,
-          candidateOpenId: p.openid,
-          questions: list
-        })
-        if (p.openid) {
-          await bindSessionMember({ sessionId: sid, role: 'candidate', openid: p.openid })
+    try {
+      recordManagerRef.current?.stop?.()
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  const syncPusherFromTrtc = useCallback(() => {
+    const trtc = trtcRef.current
+    if (!trtc) return
+    setPusher({ ...trtc.getPusherAttributes() })
+  }, [])
+
+  const handlePusherStateChange = useCallback(
+    (e: any) => {
+      trtcRef.current?.pusherEventHandler(e)
+      syncPusherFromTrtc()
+    },
+    [syncPusherFromTrtc]
+  )
+
+  const handlePusherNetStatus = useCallback(
+    (e: any) => {
+      trtcRef.current?.pusherNetStatusHandler(e)
+      syncPusherFromTrtc()
+    },
+    [syncPusherFromTrtc]
+  )
+
+  const handlePusherError = useCallback(
+    (e: any) => {
+      trtcRef.current?.pusherErrorHandler(e)
+      syncPusherFromTrtc()
+    },
+    [syncPusherFromTrtc]
+  )
+
+  const handlePusherBgmStart = useCallback((e: any) => {
+    trtcRef.current?.pusherBGMStartHandler(e)
+  }, [])
+
+  const handlePusherBgmProgress = useCallback((e: any) => {
+    trtcRef.current?.pusherBGMProgressHandler(e)
+  }, [])
+
+  const handlePusherBgmComplete = useCallback((e: any) => {
+    trtcRef.current?.pusherBGMCompleteHandler(e)
+  }, [])
+
+  const handlePusherAudioVolume = useCallback(
+    (e: any) => {
+      trtcRef.current?.pusherAudioVolumeNotify(e)
+      syncPusherFromTrtc()
+    },
+    [syncPusherFromTrtc]
+  )
+
+  const ensureTrtc = useCallback(() => {
+    if (trtcRef.current) return trtcRef.current
+    const page = getCurrentInstance()?.page as any
+    if (!page) return null
+    const trtc = new TrtcWx(page)
+    trtcRef.current = trtc
+    if (!trtcErrorHookedRef.current) {
+      trtc.on(trtc.EVENT.ERROR, () => {
+        try {
+          trtc.exitRoom()
+        } catch {
+          /* ignore */
         }
-      } catch (e) {
-        Taro.showToast({ title: '题目加载失败', icon: 'none' })
+        trtcEnteredSidRef.current = ''
+        setTrtcActive(false)
+        setPusher(null)
+        setCameraError('实时音视频异常，已改用本机相机预览')
+      })
+      trtcErrorHookedRef.current = true
+    }
+    if (!trtcImHookedRef.current) {
+      trtc.on(trtc.EVENT.IM_MESSAGE_RECEIVED, (evt: unknown) => {
+        const wrap = evt as { data?: { data?: string } }
+        const raw = wrap?.data?.data
+        const text = typeof raw === 'string' ? raw : raw != null ? String(raw) : ''
+        const t = text.trim()
+        if (t) flowLogInfo('TRTC 房间消息', t.slice(0, 120))
+      })
+      trtcImHookedRef.current = true
+    }
+    trtc.createPusher({})
+    return trtc
+  }, [])
+
+  const tryEnterTrtc = useCallback(
+    async (sid: string, userKey: string) => {
+      if (!sid || !userKey) {
+        flowLog('面试页 TRTC 前置参数', false, `sid=${sid ? 'ok' : 'empty'} userKey=${userKey ? 'ok' : 'empty'}`)
+        return
+      }
+      if (trtcEnteredSidRef.current === sid) {
+        flowLogInfo('面试页', 'TRTC 已在当前 session 进房，跳过重复 enterRoom')
+        return
+      }
+      if (!getApiBase()) {
+        flowLog('面试页 TRTC 前置参数', false, 'API_BASE 为空')
+        return
+      }
+      try {
+        let cred: TrtcCredential | null = null
+        const cachedSid = (Taro.getStorageSync('session_id') as string) || ''
+        const stored = Taro.getStorageSync('trtc_credential') as TrtcCredential | undefined
+        if (stored?.sdkAppId && stored.userSig && cachedSid === sid) {
+          flowLogInfo('面试页', 'TRTC 使用本地缓存凭证')
+          cred = stored
+        }
+        if (!cred) {
+          flowLogInfo('面试页', 'TRTC 请求后端凭证 /candidate/trtc/credential')
+          cred = await fetchTrtcCredential({ sessionId: sid, userId: userKey })
+        }
+        if (!cred) {
+          flowLog('面试页 TRTC 凭证', false, '服务端返回空（常见：TRTC 未配置，接口 503）')
+          return
+        }
+        const trtc = ensureTrtc()
+        if (!trtc) {
+          flowLog('面试页 TRTC 初始化', false, '当前页面上下文不可用')
+          return
+        }
+        const attrs = trtc.enterRoom({
+          sdkAppID: cred.sdkAppId,
+          userID: cred.userId,
+          userSig: cred.userSig,
+          roomID: cred.roomId,
+          /** 语音转写走 WechatSI，TRTC 只上推视频，避免与插件抢麦 */
+          enableMic: false,
+          enableCamera: true
+        })
+        setPusher({ ...attrs })
+        trtc.getPusherInstance()?.start?.({})
+        trtcEnteredSidRef.current = sid
+        setTrtcActive(true)
+        setCameraError('')
+        flowLog('面试页 TRTC 进房', true, sid)
+      } catch {
+        flowLog('面试页 TRTC 进房', false, '未配置或凭证失败，使用 Camera')
+      }
+    },
+    [ensureTrtc]
+  )
+
+  useDidHide(() => {
+    visibleRef.current = false
+    pendingRestartSidRef.current = null
+    if (forceRestartFallbackTimerRef.current) {
+      clearTimeout(forceRestartFallbackTimerRef.current)
+      forceRestartFallbackTimerRef.current = null
+    }
+    stopSegmentedAsr()
+    const trtc = trtcRef.current
+    if (trtc && trtcEnteredSidRef.current) {
+      try {
+        trtc.exitRoom()
+      } catch {
+        /* ignore */
+      }
+      trtcEnteredSidRef.current = ''
+      setTrtcActive(false)
+      setPusher(null)
+    }
+  })
+
+  /** 微信同声传译插件实时转写；force 时仅 stop，须在 onStop 后再 start（否则插件报 please wait recognition finished） */
+  const startWechatSiTranscribe = useCallback((sid: string, force = false) => {
+    if (!sid) return
+    if (!force && transcribingRef.current) return
+
+    const clearForceRestartTimer = () => {
+      if (forceRestartFallbackTimerRef.current) {
+        clearTimeout(forceRestartFallbackTimerRef.current)
+        forceRestartFallbackTimerRef.current = null
       }
     }
+
+    const openRecognition = (sidInner: string) => {
+      /** 将本句定稿写入历史，并同步整题累计文本 */
+      const flushUtteranceToHistory = (utterance: string) => {
+        const t = utterance.trim()
+        if (!t) {
+          setTranscriptStreaming('')
+          return
+        }
+        setTranscriptFinalized((prev) => {
+          const next = [...prev, t]
+          const full = next.join('')
+          syncLiveTranscript(sidInner, full)
+          void syncTrtcRoomSignal(sidInner, full, 'subtitle')
+          trySendTrtcPusherCustomMessage(trtcRef.current, full)
+          return next
+        })
+        setTranscriptStreaming('')
+      }
+
+      try {
+        if (!requirePluginFn) throw new Error('plugin api unavailable')
+        const plugin = requirePluginFn('WechatSI')
+        const manager = plugin.getRecordRecognitionManager()
+        recordManagerRef.current = manager
+        flowLogInfo('WechatSI', 'recordRecognitionManager 已创建，开始录音')
+        manager.onRecognize = (res: { result?: string }) => {
+          const text = res?.result || ''
+          if (!text) {
+            flowLogInfo('WechatSI onRecognize', '收到空文本')
+            return
+          }
+          flowLog('WechatSI onRecognize', true, `len=${text.length}`)
+          setTranscriptStreaming(text)
+          const fullLive = transcriptFinalizedRef.current.join('') + text
+          syncLiveTranscript(sidInner, fullLive)
+          void syncTrtcRoomSignal(sidInner, fullLive, 'subtitle')
+          trySendTrtcPusherCustomMessage(trtcRef.current, fullLive)
+        }
+        manager.onStop = (res: { result?: string }) => {
+          if (recordManagerRef.current !== manager) {
+            flowLogInfo('WechatSI', '忽略非当前 RecordRecognition 实例的 onStop')
+            return
+          }
+          const text = res?.result || ''
+          if (pendingRestartSidRef.current) {
+            clearForceRestartTimer()
+            pendingRestartSidRef.current = null
+            recordManagerRef.current = null
+            if (text.trim()) {
+              flowLog('WechatSI onStop', true, `len=${text.length}`)
+              flushUtteranceToHistory(text)
+            } else {
+              flowLog('WechatSI onStop', false, 'result 为空')
+              setTranscriptStreaming('')
+            }
+            setTranscribing(false)
+            suppressAutoRestartRef.current = false
+            flowLogInfo('WechatSI', '切题 onStop 后重新 start')
+            openRecognition(sidInner)
+            return
+          }
+
+          recordManagerRef.current = null
+          if (text.trim()) {
+            flowLog('WechatSI onStop', true, `len=${text.length}`)
+            flushUtteranceToHistory(text)
+          } else {
+            flowLog('WechatSI onStop', false, 'result 为空')
+            setTranscriptStreaming('')
+          }
+          setTranscribing(false)
+          const canAutoRestart =
+            visibleRef.current &&
+            !loadingRef.current &&
+            !suppressAutoRestartRef.current &&
+            questionCountRef.current > 0 &&
+            questionIndexRef.current < questionCountRef.current - 1
+          if (canAutoRestart) {
+            setTranscriptTip('转写短暂停止，正在自动重启…')
+            setTimeout(() => {
+              if (
+                visibleRef.current &&
+                !loadingRef.current &&
+                !transcribingRef.current &&
+                questionCountRef.current > 0 &&
+                questionIndexRef.current < questionCountRef.current - 1
+              ) {
+                flowLogInfo('WechatSI', 'onStop 后自动重启')
+                openRecognitionRef.current?.(sidInner)
+              }
+            }, 220)
+          } else {
+            setTranscriptTip('转写已停止')
+          }
+        }
+        manager.onError = (err: unknown) => {
+          recordManagerRef.current = null
+          setTranscribing(false)
+          setTranscriptStreaming('')
+          const msg = (() => {
+            try {
+              return JSON.stringify(err)
+            } catch {
+              return String(err || '')
+            }
+          })()
+          flowLog('WechatSI onError', false, msg || 'unknown')
+          const friendly =
+            /please wait recognition finished/i.test(msg) || /recognition finished/i.test(msg)
+            ? '上一段识别尚未结束，请稍候再试；若刚切换题目，请稍等一秒。'
+            : '转写不可用：请检查麦克风权限、插件配置，或改手动输入'
+          setTranscriptTip(friendly)
+        }
+        const startOpts = { lang: 'zh_CN', duration: 60000 }
+        manager.start(startOpts)
+        setTranscribing(true)
+        suppressAutoRestartRef.current = false
+        flowLog('WechatSI start', true, `lang=${startOpts.lang} duration=${startOpts.duration}`)
+        setTranscriptTip('WechatSI 同声转写进行中…')
+      } catch (e) {
+        suppressAutoRestartRef.current = false
+        flowLog('WechatSI start', false, e instanceof Error ? e.message : 'plugin unavailable')
+        setTranscriptTip('未配置 WechatSI 插件，请手动输入')
+      }
+    }
+
+    openRecognitionRef.current = openRecognition
+
+    if (force) {
+      suppressAutoRestartRef.current = true
+      const mgr = recordManagerRef.current
+      if (mgr) {
+        pendingRestartSidRef.current = sid
+        clearForceRestartTimer()
+        forceRestartFallbackTimerRef.current = setTimeout(() => {
+          forceRestartFallbackTimerRef.current = null
+          if (pendingRestartSidRef.current === sid) {
+            flowLogInfo('WechatSI', '切题 stop 未收到 onStop，兜底启动')
+            pendingRestartSidRef.current = null
+            openRecognition(sid)
+          }
+        }, 1800)
+        try {
+          mgr.stop?.()
+        } catch {
+          clearForceRestartTimer()
+          pendingRestartSidRef.current = null
+          openRecognition(sid)
+        }
+        return
+      }
+    }
+
+    openRecognition(sid)
+  }, [])
+
+  const startVoiceTranscribe = useCallback(
+    (sid: string) => {
+      if (!sid || transcribingRef.current) return
+      void startWechatSiTranscribe(sid, false)
+    },
+    [startWechatSiTranscribe]
+  )
+
+  useDidShow(() => {
+    visibleRef.current = true
+    void (async () => {
+      const p = Taro.getStorageSync('candidate_profile') as CandidateProfile | undefined
+      const j = Taro.getStorageSync('candidate_job') as JobInfo | undefined
+      if (!p?.name || !j?.id) {
+        Taro.redirectTo({ url: '/pages/entry/index' })
+        return
+      }
+      setProfile(p)
+      setJob(j)
+
+      const cachedSid = (Taro.getStorageSync('session_id') as string) || ''
+      const sid = cachedSid || `${j.id}-${p.openid || p.phone || 'unknown'}`
+      const dataMarker = `${j.id}\t${sid}\t${p.openid || ''}\t${p.phone || ''}`
+      const userKey = String(p.openid || p.phone || sid).trim()
+
+      if (dataInitMarkerRef.current !== dataMarker) {
+        dataInitMarkerRef.current = dataMarker
+        setInitError('')
+        try {
+          const list = await fetchInterviewQuestions(j.id)
+          const cleaned = list.filter((q) => q && String(q.text || '').trim())
+          if (!cleaned.length) throw new Error('empty questions')
+          flowLog('AI 题目生成', true, `${cleaned.length} 题`)
+          flowLogInfo('AI 首题', cleaned[0]?.text?.slice(0, 40) || '')
+          setQuestions(cleaned)
+          setTranscriptFinalized([])
+          setTranscriptStreaming('')
+          setSessionId(sid)
+          await startLiveSession({
+            sessionId: sid,
+            jobId: j.id,
+            candidateName: p.name,
+            candidateOpenId: p.openid,
+            questions: cleaned
+          })
+          if (p.openid) {
+            await bindSessionMember({ sessionId: sid, role: 'candidate', openid: p.openid })
+          }
+          flowLog('面试页 拉题+startLiveSession', true, `${cleaned.length} 题`)
+        } catch (e) {
+          dataInitMarkerRef.current = ''
+          flowLog('AI 题目生成', false, e instanceof Error ? e.message : '未知错误')
+          flowLog('面试页 拉题或建会话', false, '见网络或后端')
+          setInitError('题目或会话初始化失败，请检查网络与后端后重试')
+          Taro.showToast({ title: '题目或会话加载失败', icon: 'none' })
+        }
+      } else {
+        setSessionId(sid)
+      }
+
+      if (!transcribingRef.current) {
+        flowLogInfo('面试页', '启动 WechatSI')
+        startVoiceTranscribe(sid)
+      }
+
+      flowLogInfo('面试页', '尝试 TRTC 进房')
+      void tryEnterTrtc(sid, userKey)
+    })()
   })
 
   const current = questions[index]
-  const isLast = index === questions.length - 1
-  const canNext = useMemo(() => answer.trim().length >= 5, [answer])
-
-  const startRealtimeTranscribe = async () => {
-    if (transcribing || !sessionId) return
-    // 微信同声传译依赖 WechatSI 插件。若未配置插件，自动降级为手动输入。
-    try {
-      if (!requirePluginFn) throw new Error('plugin api unavailable')
-      const plugin = requirePluginFn('WechatSI')
-      const manager = plugin.getRecordRecognitionManager()
-      manager.onRecognize = (res: { result?: string }) => {
-        const text = res?.result || ''
-        if (!text) return
-        setAnswer(text)
-        syncLiveTranscript(sessionId, text)
-      }
-      manager.onStop = (res: { result?: string }) => {
-        const text = res?.result || ''
-        if (text) {
-          setAnswer(text)
-          syncLiveTranscript(sessionId, text)
-        }
-        setTranscribing(false)
-        setTranscriptTip('转写已停止')
-      }
-      manager.onError = () => {
-        setTranscribing(false)
-        setTranscriptTip('转写失败，请改为手动输入')
-      }
-      manager.start({ lang: 'zh_CN', duration: 60000 })
-      setTranscribing(true)
-      setTranscriptTip('同声转写进行中...')
-    } catch (e) {
-      setTranscriptTip('未配置 WechatSI 插件，当前使用手动输入')
-    }
-  }
-
-  const stopRealtimeTranscribe = () => {
-    try {
-      if (!requirePluginFn) throw new Error('plugin api unavailable')
-      const plugin = requirePluginFn('WechatSI')
-      const manager = plugin.getRecordRecognitionManager()
-      manager.stop()
-    } catch (e) {
-      setTranscribing(false)
-    }
-  }
-
-  const startWechatVoip = async () => {
-    if (!sessionId || !profile?.openid) {
-      Taro.showToast({ title: '会话未就绪', icon: 'none' })
-      return
-    }
-    if (!wxApi?.setEnable1v1Chat || !wxApi?.join1v1Chat) {
-      setVoipStatus('failed')
-      setVoipDebug('wx.setEnable1v1Chat / wx.join1v1Chat 不存在（开发者工具可能不支持）')
-      Taro.showToast({ title: '当前环境不支持 1v1 VoIP', icon: 'none' })
-      return
-    }
-    try {
-      setStartingVoip(true)
-      setVoipStatus('starting')
-      await new Promise<void>((resolve, reject) => {
-        wxApi.setEnable1v1Chat({
-          enable: true,
-          success: () => resolve(),
-          fail: (err: unknown) => reject(err)
-        })
-      })
-      await bindSessionMember({ sessionId, role: 'candidate', openid: profile.openid })
-      const state = await getLiveSessionState(sessionId)
-      const interviewerOpenId = String(state?.interviewerOpenId || FIXED_INTERVIEWER_OPENID).trim()
-      const candidateOpenId = String(profile.openid || '').trim()
-      setVoipDebug(
-        [
-          `sessionId=${sessionId}`,
-          `candidateOpenId=${candidateOpenId || '(empty)'}`,
-          `interviewerOpenId=${interviewerOpenId || '(empty)'}`,
-          `fixedInterviewerOpenId=${FIXED_INTERVIEWER_OPENID}`,
-          'mode=join1v1Chat(caller/listener)'
-        ].join('\n')
-      )
-      if (!interviewerOpenId || !candidateOpenId) {
-        setVoipTip('面试官 openid 未就绪，请稍后重试')
-        setVoipStatus('failed')
-        Taro.showToast({ title: '面试官未就绪', icon: 'none' })
-        return
-      }
-      setVoipTip('已发起视频邀请，等待对方接听...')
-      setVoipStatus('waiting_accept')
-      wxApi.join1v1Chat({
-        caller: { openId: candidateOpenId },
-        listener: { openId: interviewerOpenId },
-        success: (ok: unknown) => {
-          setVoipStatus('connected')
-          setVoipDebug((prev) => `${prev}\njoin1v1Chat success=${JSON.stringify(ok || {})}`)
-          setVoipTip(`1v1 邀请已发起：候选人 ${candidateOpenId} / 面试官 ${interviewerOpenId}`)
-          Taro.showToast({ title: '视频邀请已发起', icon: 'none' })
-        },
-        fail: (err: unknown) => {
-          setVoipStatus('failed')
-          setVoipDebug((prev) => `${prev}\njoin1v1Chat fail=${JSON.stringify(err || {})}`)
-          setVoipTip('1v1 发起失败，请检查接口开通、类目和权限')
-          Taro.showToast({ title: '视频邀请失败', icon: 'none' })
-        }
-      })
-    } catch (e: unknown) {
-      setVoipStatus('failed')
-      setVoipDebug((prev) => `${prev}\nexception=${JSON.stringify(e || {})}`)
-      setVoipTip('获取会话状态失败，请稍后重试')
-      Taro.showToast({ title: '发起失败', icon: 'none' })
-    } finally {
-      setStartingVoip(false)
-    }
-  }
-
-  useDidShow(() => {
-    if (!wxApi?.setEnable1v1Chat) return
-    wxApi.setEnable1v1Chat({
-      enable: true,
-      fail: (err: unknown) => {
-        setVoipStatus('failed')
-        setVoipDebug((prev) => `${prev}\nsetEnable1v1Chat fail=${JSON.stringify(err || {})}`)
-      }
-    })
-    if (wxApi?.onVoIPChatInterrupted) {
-      wxApi.onVoIPChatInterrupted((evt: unknown) => {
-        setVoipStatus('failed')
-        setVoipTip('通话中断，请重试')
-        setVoipDebug((prev) => `${prev}\nonVoIPChatInterrupted=${JSON.stringify(evt || {})}`)
-      })
-    }
-  })
+  const isLast = questions.length > 0 && index === questions.length - 1
+  const composedAnswer = useMemo(
+    () => (transcriptFinalized.join('') + transcriptStreaming).trim(),
+    [transcriptFinalized, transcriptStreaming]
+  )
+  const canNext = useMemo(() => composedAnswer.length >= 2, [composedAnswer])
 
   const handleNext = async () => {
     if (!current || !canNext || !profile || !job) return
 
-    const currentQa = { questionId: current.id, question: current.text, answer: answer.trim() }
+    const currentQa = { questionId: current.id, question: current.text, answer: composedAnswer }
     const nextAnswers = [...answers, currentQa]
     setAnswers(nextAnswers)
     await syncLiveQa({ sessionId, ...currentQa })
-    setAnswer('')
+    setTranscriptFinalized([])
+    setTranscriptStreaming('')
 
     if (!isLast) {
       setIndex((v) => v + 1)
+      void startWechatSiTranscribe(sessionId, true)
       return
     }
 
     try {
       setLoading(true)
-      const result = await submitInterview(profile, job.id, nextAnswers)
+      const result = await submitInterview(profile, job.id, nextAnswers, sessionId)
       Taro.setStorageSync('interview_result', result)
       Taro.redirectTo({ url: '/pages/result/index' })
     } catch (e) {
@@ -229,58 +520,120 @@ export default function InterviewPage() {
     }
   }
 
+  const reloadPage = () => {
+    Taro.reLaunch({ url: '/pages/interview/index' })
+  }
+
+  const showTrtcPusher = trtcActive && pusher && String(pusher.url || '').length > 0
+
   return (
     <View className='safe-container interview-page'>
       <View className='card'>
         <Text className='job-title'>{job?.title || '岗位面试'}</Text>
         <Text className='progress'>
-          第 {Math.min(index + 1, questions.length || 1)} 题 / 共 {questions.length || '--'} 题
+          第 {questions.length ? Math.min(index + 1, questions.length) : 0} 题 / 共 {questions.length || '--'} 题
         </Text>
+
+        {initError ? (
+          <View className='init-error-box'>
+            <Text className='init-error-text'>{initError}</Text>
+            <Button className='secondary-btn' onClick={reloadPage}>
+              重新加载本页
+            </Button>
+          </View>
+        ) : null}
+
+        <View className='video-panel'>
+          <Text className='panel-label'>视频画面</Text>
+          <View className='ai-camera-wrap'>
+            {showTrtcPusher ? (
+              <LivePusher
+                className='ai-camera-preview'
+                url={pusher.url}
+                mode='RTC'
+                autopush={Boolean(pusher.autopush)}
+                enableCamera={pusher.enableCamera !== false}
+                enableMic={false}
+                muted
+                enableAgc={Boolean(pusher.enableAgc)}
+                enableAns={Boolean(pusher.enableAns)}
+                autoFocus={pusher.enableAutoFocus !== false}
+                zoom={Boolean(pusher.enableZoom)}
+                minBitrate={pusher.minBitrate}
+                maxBitrate={pusher.maxBitrate}
+                videoWidth={pusher.videoWidth}
+                videoHeight={pusher.videoHeight}
+                beauty={pusher.beautyLevel ?? 0}
+                whiteness={pusher.whitenessLevel ?? 0}
+                orientation={pusher.videoOrientation || 'vertical'}
+                aspect={pusher.videoAspect === '3:4' ? '3:4' : '9:16'}
+                devicePosition={pusher.frontCamera || 'front'}
+                remoteMirror={Boolean(pusher.enableRemoteMirror)}
+                localMirror={pusher.localMirror || 'auto'}
+                backgroundMute={Boolean(pusher.enableBackgroundMute)}
+                audioQuality={pusher.audioQuality || 'high'}
+                audioVolumeType={pusher.audioVolumeType || 'voicecall'}
+                audioReverbType={
+                  (Number(pusher.audioReverbType) || 0) as keyof LivePusherProps.AudioReverbType
+                }
+                waitingImage={pusher.waitingImage}
+                beautyStyle={pusher.beautyStyle || 'smooth'}
+                filter={pusher.filter || 'standard'}
+                onStateChange={handlePusherStateChange}
+                onNetStatus={handlePusherNetStatus}
+                onError={handlePusherError}
+                onBgmStart={handlePusherBgmStart}
+                onBgmProgress={handlePusherBgmProgress}
+                onBgmComplete={handlePusherBgmComplete}
+                onAudioVolumeNotify={handlePusherAudioVolume}
+              />
+            ) : (
+              <Camera
+                className='ai-camera-preview'
+                mode='normal'
+                devicePosition='front'
+                flash='off'
+                onError={() => {
+                  setCameraError('无法使用摄像头，请在系统设置或小程序权限中允许相机，或稍后重试。')
+                }}
+                onInitDone={() => setCameraError('')}
+              />
+            )}
+          </View>
+          {cameraError ? <Text className='camera-error-text'>{cameraError}</Text> : null}
+        </View>
 
         <View className='question-box'>
-          <Text className='question-text'>{current?.text || '正在加载题目...'}</Text>
+          <Text className='question-text'>{current?.text || (questions.length ? '题目索引异常' : '正在加载题目…')}</Text>
+          <View className='answer-box'>
+            <Text className='answer-label'>实时转写回答</Text>
+            <View className='transcript-composer'>
+              {transcriptFinalized.length === 0 && !transcriptStreaming && !transcribing ? (
+                <Text className='answer-placeholder'>请直接口述作答，转写文本将显示在这里</Text>
+              ) : null}
+              {transcriptFinalized.map((line, i) => (
+                <View key={`fin-${i}`} className='transcript-final-row'>
+                  <Text className='transcript-final-text'>{line}</Text>
+                </View>
+              ))}
+              {transcribing || transcriptStreaming.length > 0 ? (
+                <View className='transcript-stream-row'>
+                  <Text className='transcript-stream-text'>{transcriptStreaming}</Text>
+                  {transcribing ? <Text className='transcript-caret'>▍</Text> : null}
+                </View>
+              ) : null}
+            </View>
+          </View>
         </View>
-
-        <Textarea
-          className='answer-input'
-          value={answer}
-          maxlength={300}
-          placeholder='请输入你的回答（至少5个字）'
-          onInput={(e) => {
-            const val = e.detail.value
-            setAnswer(val)
-            syncLiveTranscript(sessionId, val)
-          }}
-        />
-
-        <Button className='voip-btn' loading={startingVoip} disabled={startingVoip || !profile?.openid} onClick={startWechatVoip}>
-          进入视频面试（微信 VoIP）
-        </Button>
-        <Text className='voip-tip'>{voipTip}</Text>
-        <Text className={`voip-state voip-${voipStatus}`}>
-          {voipStatus === 'idle'
-            ? '通话状态：未发起'
-            : voipStatus === 'starting'
-              ? '通话状态：发起中'
-              : voipStatus === 'waiting_accept'
-                ? '通话状态：等待对方接听'
-                : voipStatus === 'connected'
-                  ? '通话状态：已接通 / 已拉起微信通话界面'
-                  : '通话状态：失败'}
-        </Text>
-        {voipDebug ? <Text className='voip-debug'>{voipDebug}</Text> : null}
 
         <Text className='transcript-tip'>{transcriptTip}</Text>
-        <View className='transcript-actions'>
-          <Button className='secondary-btn' onClick={startRealtimeTranscribe} disabled={transcribing}>
-            开启同声转写
-          </Button>
-          <Button className='secondary-btn stop-btn' onClick={stopRealtimeTranscribe} disabled={!transcribing}>
-            停止转写
-          </Button>
-        </View>
 
-        <Button className='primary-btn' loading={loading} disabled={!canNext || loading || !current} onClick={handleNext}>
+        <Button
+          className='primary-btn'
+          loading={loading}
+          disabled={!canNext || loading || !current}
+          onClick={() => void handleNext()}
+        >
           {isLast ? '提交面试' : '下一题'}
         </Button>
       </View>

@@ -1,6 +1,7 @@
 export interface CandidateProfile {
   name: string
-  phone: string
+  /** 可选；未绑定时可为空字符串 */
+  phone?: string
   inviteCode: string
   openid?: string
 }
@@ -26,4 +27,8 @@ export interface InterviewResult {
   score: number
   passed: boolean
   overallFeedback: string
+  dimensionScores?: Record<string, number>
+  suggestions?: string[]
+  riskPoints?: string[]
+  meta?: Record<string, unknown>
 }

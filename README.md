@@ -15,6 +15,12 @@ View your app in AI Studio: https://ai.studio/apps/0bed06fa-d7c2-4bee-8b7a-6feb2
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+2. Set environment variables in `.env.local`:
+   - `GEMINI_API_KEY` for Gemini API
+   - `WECHAT_APPID` and `WECHAT_SECRET` for mini program `code2Session` openid exchange
+   - `MYSQL_HOST` `MYSQL_PORT` `MYSQL_USER` `MYSQL_PASSWORD` `MYSQL_DATABASE` for API persistence
 3. Run the app:
    `npm run dev`
+
+For API server (including `POST /api/wechat/login`):
+- Run `npm run dev:api`

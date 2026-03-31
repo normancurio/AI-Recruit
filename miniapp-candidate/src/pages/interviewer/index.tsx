@@ -2,15 +2,19 @@ import Taro, { useDidShow } from '@tarojs/taro'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button, ScrollView, Text, View } from '@tarojs/components'
 
-import { API_BASE } from '../../config/apiBase'
+import { getApiBase } from '../../config/apiBase'
 import {
+  acceptVideoInterview,
   bindSessionMember,
   fetchInterviewerInvitations,
+  fetchInterviewerLiveSessions,
   getLiveSessionState,
   type InterviewerInvitation,
-  type LiveSessionState
+  type LiveSessionState,
+  type LiveSessionSummary
 } from '../../services/interviewApi'
 import { loginAndGetOpenId } from '../../services/authApi'
+import { join1v1VideoChat, setEnable1v1Chat } from '../../utils/voip1v1'
 
 import './index.scss'
 
@@ -36,6 +40,8 @@ export default function InterviewerPage() {
   const [selfOpenId, setSelfOpenId] = useState('')
   const [listLoading, setListLoading] = useState(false)
   const [sessions, setSessions] = useState<InterviewerInvitation[]>([])
+  /** 手填邀请码等未出现在「我的邀请」里、但候选人已进入的会话 */
+  const [liveExtras, setLiveExtras] = useState<LiveSessionSummary[]>([])
   const [listError, setListError] = useState('')
 
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
@@ -55,16 +61,36 @@ export default function InterviewerPage() {
   }, [])
 
   const loadSessions = useCallback(async () => {
-    if (!API_BASE) return
+    if (!getApiBase()) return
     setListLoading(true)
     setListError('')
     try {
       const oid = await ensureOpenId()
-      const rows = await fetchInterviewerInvitations(oid)
-      setSessions(rows)
+      const [invR, liveR] = await Promise.allSettled([
+        fetchInterviewerInvitations(oid),
+        fetchInterviewerLiveSessions()
+      ])
+      const invRows = invR.status === 'fulfilled' ? invR.value : []
+      const liveRows = liveR.status === 'fulfilled' ? liveR.value : []
+      const failed: string[] = []
+      if (invR.status === 'rejected') failed.push('邀请列表')
+      if (liveR.status === 'rejected') failed.push('进行中会话')
+      setListError(failed.length ? `${failed.join('、')}加载失败` : '')
+      const sidFromInv = new Set(
+        invRows.map((r) => String(r.sessionId || '').trim()).filter(Boolean)
+      )
+      const extras = liveRows.filter((r) => {
+        const sid = String(r.sessionId || '').trim()
+        if (!sid || sidFromInv.has(sid)) return false
+        const iv = String(r.interviewerOpenId || '').trim()
+        return !iv || iv === oid
+      })
+      setSessions(invRows)
+      setLiveExtras(extras)
     } catch {
-      setListError('加载面试列表失败，请检查网络与后端')
+      setListError('加载失败，请检查网络与后端')
       setSessions([])
+      setLiveExtras([])
     } finally {
       setListLoading(false)
     }
@@ -75,19 +101,20 @@ export default function InterviewerPage() {
       wxApi.setEnable1v1Chat({ enable: true })
     }
     if (!activeSessionId) {
-      loadSessions()
+      void loadSessions()
     }
   })
 
   useEffect(() => {
-    ensureOpenId().catch(() => {
+    void ensureOpenId().catch(() => {
       Taro.showToast({ title: '面试官登录失败', icon: 'none' })
     })
   }, [ensureOpenId])
 
+  /** 进入会话后持续把当前面试官 openid 写入会话，供候选人 VoIP 使用 */
   useEffect(() => {
     if (!activeSessionId || !selfOpenId) return
-    bindSessionMember({
+    void bindSessionMember({
       sessionId: activeSessionId,
       role: 'interviewer',
       openid: selfOpenId
@@ -106,7 +133,7 @@ export default function InterviewerPage() {
         setRoomError('会话不存在或未开始，请返回列表')
       }
     }
-    tick()
+    void tick()
     timer = setInterval(tick, 1500)
     return () => {
       if (timer) clearInterval(timer)
@@ -116,8 +143,42 @@ export default function InterviewerPage() {
   const mergedBoard = useMemo(() => (liveState ? mergeQuestionsForBoard(liveState) : []), [liveState])
 
   const candidateOpenId = String(liveState?.candidateOpenId || '').trim()
-  const interviewerOpenId = String(liveState?.interviewerOpenId || selfOpenId || '').trim()
-  const canStartVoip = Boolean(activeSessionId && candidateOpenId && interviewerOpenId && wxApi?.join1v1Chat)
+  const selfOid = String(selfOpenId || '').trim()
+  const waitingAccept = String(liveState?.voipStatus || '') === 'waiting_interviewer_accept'
+  /** 会话与双方 openid 就绪 */
+  const canVideoSession = Boolean(activeSessionId && candidateOpenId && selfOid && liveState)
+  /** 候选人已发起：只需系统接听能力，不应再 join1v1Chat（否则会再拨一通反向电话） */
+  const canAnswerIncoming = Boolean(canVideoSession && wxApi?.setEnable1v1Chat)
+  /** 面试官主动呼叫候选人 */
+  const canDialCandidate = Boolean(canVideoSession && wxApi?.setEnable1v1Chat && wxApi?.join1v1Chat)
+  const canPrimaryVoip = waitingAccept ? canAnswerIncoming : canDialCandidate
+
+  const enterSessionAndBind = async (sessionId: string) => {
+    const oid = await ensureOpenId()
+    setActiveSessionId(sessionId)
+    setLiveState(null)
+    setRoomError('')
+    Taro.setNavigationBarTitle({ title: '面试进行中' })
+    try {
+      await bindSessionMember({ sessionId, role: 'interviewer', openid: oid })
+    } catch {
+      Taro.showToast({ title: '绑定面试官身份失败，可稍后重试', icon: 'none' })
+    }
+  }
+
+  const openInvitationSession = async (row: InterviewerInvitation) => {
+    if (!row.sessionId) {
+      Taro.showToast({ title: '候选人尚未接受邀请', icon: 'none' })
+      return
+    }
+    await enterSessionAndBind(row.sessionId)
+  }
+
+  const openLiveOnlySession = async (row: LiveSessionSummary) => {
+    const sid = String(row.sessionId || '').trim()
+    if (!sid) return
+    await enterSessionAndBind(sid)
+  }
 
   const startVideoCall = async () => {
     if (!activeSessionId || !canStartVoip) {
@@ -129,19 +190,21 @@ export default function InterviewerPage() {
       await bindSessionMember({
         sessionId: activeSessionId,
         role: 'interviewer',
-        openid: selfOpenId
+        openid: selfOid
       })
       const latest = await getLiveSessionState(activeSessionId)
       const c = String(latest.candidateOpenId || '').trim()
-      const iv = String(latest.interviewerOpenId || selfOpenId).trim()
-      if (!c || !iv) {
+      if (!c) {
         Taro.showToast({ title: '请确认候选人已进入面试页', icon: 'none' })
         return
       }
+      await acceptVideoInterview(activeSessionId)
       wxApi.join1v1Chat({
-        caller: { openId: iv },
+        caller: { openId: selfOid },
         listener: { openId: c },
-        success: () => Taro.showToast({ title: '视频通话已启动', icon: 'none' }),
+        mode: 'video',
+        style: 'float_small',
+        success: () => Taro.showToast({ title: '已接听视频面试', icon: 'none' }),
         fail: () => Taro.showToast({ title: '启动失败，请检查权限与插件', icon: 'none' })
       })
     } catch {
@@ -151,23 +214,12 @@ export default function InterviewerPage() {
     }
   }
 
-  const openSession = (row: InterviewerInvitation) => {
-    if (!row.sessionId) {
-      Taro.showToast({ title: '候选人尚未接受邀请', icon: 'none' })
-      return
-    }
-    setActiveSessionId(row.sessionId)
-    setLiveState(null)
-    setRoomError('')
-    Taro.setNavigationBarTitle({ title: '面试进行中' })
-  }
-
   const backToList = () => {
     setActiveSessionId(null)
     setLiveState(null)
     setRoomError('')
     Taro.setNavigationBarTitle({ title: '面试官看板' })
-    loadSessions()
+    void loadSessions()
   }
 
   if (activeSessionId) {
@@ -184,19 +236,23 @@ export default function InterviewerPage() {
           <Button
             className='primary-btn'
             loading={startingVoip}
-            disabled={!canStartVoip || startingVoip}
-            onClick={startVideoCall}
+            disabled={!canPrimaryVoip || startingVoip}
+            onClick={() => void startVideoCall()}
           >
-            发起视频面试（VoIP）
+            {waitingAccept ? '已发起？去微信系统界面接听' : '主动联系候选人视频'}
           </Button>
-          <Text className={`status ${canStartVoip ? 'status-ok' : 'status-wait'}`}>
-            {!wxApi?.join1v1Chat
-              ? '当前基础库不支持 VoIP 或未配置插件'
-              : !candidateOpenId
-                ? '等待候选人打开「答题」页面…'
-                : !interviewerOpenId
-                  ? '正在绑定面试官身份…'
-                  : '可发起视频，画面为微信 VoIP 通话界面'}
+          <Text className={`status ${canPrimaryVoip ? 'status-ok' : 'status-wait'}`}>
+            {!wxApi?.setEnable1v1Chat
+              ? '当前基础库不支持双人通话或未开通接口'
+              : !liveState
+                ? '正在同步会话…'
+                : !candidateOpenId
+                  ? '等待候选人打开「答题」页面并登录…'
+                  : waitingAccept
+                    ? '候选人已发起：您应在微信系统界面接听，不要把它当成「再点一次发起通话」。上方按钮仅同步状态并弹出说明。'
+                    : !wxApi?.join1v1Chat
+                      ? '无法主动拨出：请升级基础库或开通 join1v1Chat'
+                      : '候选人未点发起时，您可用上方按钮主动呼叫对方视频。'}
           </Text>
           {roomError ? <Text className='error'>{roomError}</Text> : null}
         </View>
@@ -243,30 +299,57 @@ export default function InterviewerPage() {
   return (
     <View className='safe-container interviewer-page'>
       <View className='card block'>
-        <Text className='title'>我的邀请列表</Text>
-        <Text className='hint'>可查看你创建的邀请。候选人接受后，点击该条即可进入看板并发起视频。</Text>
-        <Button className='secondary-btn' loading={listLoading} onClick={loadSessions}>
+        <Text className='title'>面试官看板</Text>
+        <Text className='hint'>
+          「我的邀请」为绑定给您的邀约；「进行中的面试」包含手填邀请码已进入的候选人。进入会话后会自动绑定您的 openid，便于对方发起视频。
+        </Text>
+        <Button className='secondary-btn' loading={listLoading} onClick={() => void loadSessions()}>
           刷新列表
         </Button>
         {listError ? <Text className='error'>{listError}</Text> : null}
       </View>
 
       <ScrollView scrollY className='invite-scroll'>
-        {sessions.length === 0 && !listLoading ? (
-          <Text className='empty pad'>暂无邀请记录。</Text>
-        ) : (
-          sessions.map((s) => (
-            <View key={s.inviteCode} className='invite-card' onClick={() => openSession(s)}>
-              <Text className='invite-title'>{s.jobTitle || s.jobId}</Text>
-              <Text className='invite-sub'>{s.department}</Text>
-              <Text className='invite-meta'>岗位代码 {s.jobId}</Text>
-              <Text className='invite-meta'>候选人 {s.candidateName || s.candidatePhone || '未登记'}</Text>
-              <Text className='invite-meta'>状态 {s.inviteStatus}</Text>
-              <Text className='invite-meta dim'>邀请码 {s.inviteCode}</Text>
-              <Text className='invite-meta dim'>会话 {s.sessionId || '待候选人接受后生成'}</Text>
-            </View>
-          ))
-        )}
+        {sessions.length === 0 && liveExtras.length === 0 && !listLoading ? (
+          <Text className='empty pad'>暂无数据。请确认后台邀请已关联您的账号（interviewer_openid / interviewer_user_id）。</Text>
+        ) : null}
+
+        {sessions.length > 0 ? (
+          <>
+            <Text className='section-label'>我的邀请</Text>
+            {sessions.map((s) => (
+              <View
+                key={`${s.inviteCode}-${s.sessionId || 'pending'}`}
+                className='invite-card'
+                onClick={() => void openInvitationSession(s)}
+              >
+                <Text className='invite-title'>{s.jobTitle || s.jobId}</Text>
+                <Text className='invite-sub'>{s.department}</Text>
+                <Text className='invite-meta'>岗位代码 {s.jobId}</Text>
+                <Text className='invite-meta'>候选人 {s.candidateName || s.candidatePhone || '未登记'}</Text>
+                <Text className='invite-meta'>状态 {s.inviteStatus}</Text>
+                <Text className='invite-meta dim'>邀请码 {s.inviteCode}</Text>
+                <Text className='invite-meta dim'>会话 {s.sessionId || '待候选人接受后生成'}</Text>
+              </View>
+            ))}
+          </>
+        ) : null}
+
+        {liveExtras.length > 0 ? (
+          <>
+            <Text className='section-label'>进行中的面试</Text>
+            {liveExtras.map((s) => (
+              <View key={s.sessionId} className='invite-card invite-card-live' onClick={() => void openLiveOnlySession(s)}>
+                <Text className='invite-title'>{s.jobTitle || s.jobId}</Text>
+                <Text className='invite-sub'>{s.department}</Text>
+                <Text className='invite-meta dim'>会话 {s.sessionId}</Text>
+                <Text className='invite-meta'>
+                  {String(s.voipStatus || '') === 'waiting_interviewer_accept' ? '视频：待您接听' : '视频：未请求或已连接'}
+                </Text>
+              </View>
+            ))}
+          </>
+        ) : null}
       </ScrollView>
     </View>
   )

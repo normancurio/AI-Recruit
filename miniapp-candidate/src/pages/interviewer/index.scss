@@ -159,12 +159,25 @@
   max-height: 70vh;
 }
 
+.section-label {
+  display: block;
+  font-size: 26px;
+  font-weight: 600;
+  color: #475569;
+  margin: 8px 0 12px;
+}
+
 .invite-card {
   background: #ffffff;
   border: 2px solid #e2e8f0;
   border-radius: 16px;
   padding: 24px;
   margin-bottom: 16px;
+}
+
+.invite-card-live {
+  border-color: #c7d2fe;
+  background: #f8fafc;
 }
 
 .invite-title {

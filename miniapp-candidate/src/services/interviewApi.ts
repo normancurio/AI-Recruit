@@ -1,5 +1,5 @@
 import Taro from '@tarojs/taro'
-import { API_BASE } from '../config/apiBase'
+import { getApiBase } from '../config/apiBase'
 import {
   CandidateProfile,
   InterviewAnswer,
@@ -21,7 +21,57 @@ const MOCK_QUESTIONS: InterviewQuestion[] = [
 ]
 
 function useMock() {
-  return !API_BASE
+  return !getApiBase()
+}
+
+export type TrtcCredential = {
+  sdkAppId: number
+  userId: string
+  userSig: string
+  roomId: number
+}
+
+export type LoginInviteResult = {
+  openid: string
+  sessionId: string
+  name: string
+  job: JobInfo
+  trtc: TrtcCredential | null
+}
+
+/** wx.login 的 code + 邀请码 + 姓名：换 openid、校验邀请码，并返回 TRTC 凭证（服务端已配 TRTC 时） */
+export async function loginWithInviteCode(params: {
+  code: string
+  inviteCode: string
+  name: string
+  phone?: string
+}): Promise<LoginInviteResult> {
+  const invite = params.inviteCode.trim().toUpperCase()
+  if (useMock()) {
+    const job = MOCK_JOBS[invite]
+    if (!job) throw new Error('无效邀请码')
+    return {
+      openid: 'mock_openid',
+      sessionId: `${job.id}-mock_openid`,
+      name: params.name.trim(),
+      job,
+      trtc: null
+    }
+  }
+  const res = await Taro.request<{ data: LoginInviteResult; message?: string }>({
+    url: `${getApiBase()}/api/candidate/login-invite`,
+    method: 'POST',
+    data: {
+      code: params.code,
+      inviteCode: invite,
+      name: params.name.trim(),
+      phone: params.phone?.trim() || ''
+    }
+  })
+  if (res.statusCode >= 400 || !res.data?.data?.openid) {
+    throw new Error(res.data?.message || '登录失败')
+  }
+  return res.data.data
 }
 
 export async function validateInviteCode(code: string): Promise<JobInfo> {
@@ -33,7 +83,7 @@ export async function validateInviteCode(code: string): Promise<JobInfo> {
   }
 
   const res = await Taro.request<{ data: JobInfo }>({
-    url: `${API_BASE}/api/candidate/validate-invite`,
+    url: `${getApiBase()}/api/candidate/validate-invite`,
     method: 'POST',
     data: { inviteCode: normalized }
   })
@@ -48,7 +98,7 @@ export async function fetchInterviewQuestions(jobId: string): Promise<InterviewQ
   if (useMock()) return MOCK_QUESTIONS
 
   const res = await Taro.request<{ data: InterviewQuestion[] }>({
-    url: `${API_BASE}/api/candidate/interview-questions`,
+    url: `${getApiBase()}/api/candidate/interview-questions`,
     method: 'GET',
     data: { jobId }
   })
@@ -62,7 +112,8 @@ export async function fetchInterviewQuestions(jobId: string): Promise<InterviewQ
 export async function submitInterview(
   profile: CandidateProfile,
   jobId: string,
-  answers: InterviewAnswer[]
+  answers: InterviewAnswer[],
+  sessionId?: string
 ): Promise<InterviewResult> {
   if (useMock()) {
     const qualityScore = Math.min(
@@ -80,9 +131,9 @@ export async function submitInterview(
   }
 
   const res = await Taro.request<{ data: InterviewResult }>({
-    url: `${API_BASE}/api/candidate/submit-interview`,
+    url: `${getApiBase()}/api/candidate/submit-interview`,
     method: 'POST',
-    data: { profile, jobId, answers }
+    data: { profile, jobId, answers, sessionId: sessionId || '' }
   })
 
   if (res.statusCode >= 400 || !res.data?.data) {
@@ -100,7 +151,7 @@ export async function startLiveSession(params: {
 }) {
   if (useMock()) return
   await Taro.request({
-    url: `${API_BASE}/api/live/session/start`,
+    url: `${getApiBase()}/api/live/session/start`,
     method: 'POST',
     data: params
   })
@@ -109,10 +160,71 @@ export async function startLiveSession(params: {
 export async function syncLiveTranscript(sessionId: string, text: string) {
   if (useMock() || !text.trim()) return
   await Taro.request({
-    url: `${API_BASE}/api/live/session/transcript`,
+    url: `${getApiBase()}/api/live/session/transcript`,
     method: 'POST',
     data: { sessionId, text }
   })
+}
+
+/** TRTC 旁路信令：字幕写入服务端，监考端可轮询 session/state */
+export async function syncTrtcRoomSignal(sessionId: string, text: string, kind = 'subtitle') {
+  if (useMock() || !sessionId || !text.trim()) return
+  try {
+    await Taro.request({
+      url: `${getApiBase()}/api/live/session/trtc-signal`,
+      method: 'POST',
+      data: { sessionId, text, kind }
+    })
+  } catch {
+    /* 会话未创建等 */
+  }
+}
+
+/** 拉取 TRTC 进房凭证；未配置时服务端返回 503，调用方应回退本地 Camera */
+export async function fetchTrtcCredential(params: {
+  sessionId: string
+  userId: string
+}): Promise<TrtcCredential | null> {
+  if (useMock()) return null
+  const res = await Taro.request<{ data?: TrtcCredential; message?: string }>({
+    url: `${getApiBase()}/api/candidate/trtc/credential`,
+    method: 'POST',
+    data: { sessionId: params.sessionId, userId: params.userId }
+  })
+  if (res.statusCode === 503) return null
+  if (res.statusCode >= 400 || !res.data?.data) {
+    throw new Error(res.data?.message || 'TRTC 凭证获取失败')
+  }
+  return res.data.data
+}
+
+export async function uploadAsrSegment(params: {
+  filePath: string
+  sessionId: string
+  questionId: string
+  segmentIndex: number
+}): Promise<string> {
+  if (useMock()) return ''
+  const res = await Taro.uploadFile({
+    url: `${getApiBase()}/api/candidate/ai-interview/asr`,
+    filePath: params.filePath,
+    name: 'file',
+    formData: {
+      sessionId: params.sessionId,
+      questionId: params.questionId,
+      segmentIndex: String(params.segmentIndex)
+    }
+  })
+  let body: { data?: { text?: string }; message?: string } = {}
+  try {
+    body = JSON.parse((res.data as string) || '{}') as typeof body
+  } catch {
+    body = {}
+  }
+  if (res.statusCode >= 400) {
+    throw new Error(body?.message || '语音识别失败')
+  }
+  return String(body?.data?.text || '').trim()
 }
 
 export async function syncLiveQa(params: {
@@ -123,7 +235,7 @@ export async function syncLiveQa(params: {
 }) {
   if (useMock()) return
   await Taro.request({
-    url: `${API_BASE}/api/live/session/qa`,
+    url: `${getApiBase()}/api/live/session/qa`,
     method: 'POST',
     data: params
   })
@@ -136,15 +248,19 @@ export type LiveSessionState = {
   department?: string
   candidateOpenId?: string
   interviewerOpenId?: string
+  voipStatus?: string
   questions: { id: string; text: string }[]
   transcript: { ts: number; text: string }[]
   qa: { questionId: string; question: string; answer: string }[]
+  /** 候选人经 /trtc-signal 上报的字幕/信令时间线 */
+  trtcSignals?: { ts: number; text: string; kind?: string }[]
 }
 
 export type LiveSessionSummary = {
   sessionId: string
   candidateOpenId: string
   interviewerOpenId: string
+  voipStatus?: string
   status: string
   updatedAt: string
   jobId: string
@@ -167,7 +283,7 @@ export type InterviewerInvitation = {
 export async function fetchInterviewerInvitations(openid: string): Promise<InterviewerInvitation[]> {
   if (useMock()) return []
   const res = await Taro.request<{ data: InterviewerInvitation[] }>({
-    url: `${API_BASE}/api/interviewer/invitations`,
+    url: `${getApiBase()}/api/interviewer/invitations`,
     method: 'GET',
     data: { openid }
   })
@@ -180,7 +296,7 @@ export async function fetchInterviewerInvitations(openid: string): Promise<Inter
 export async function fetchInterviewerLiveSessions(): Promise<LiveSessionSummary[]> {
   if (useMock()) return []
   const res = await Taro.request<{ data: LiveSessionSummary[] }>({
-    url: `${API_BASE}/api/interviewer/live-sessions`,
+    url: `${getApiBase()}/api/interviewer/live-sessions`,
     method: 'GET'
   })
   if (res.statusCode >= 400 || !Array.isArray(res.data?.data)) {
@@ -197,11 +313,12 @@ export async function getLiveSessionState(sessionId: string): Promise<LiveSessio
       interviewerOpenId: '',
       questions: [],
       transcript: [],
-      qa: []
+      qa: [],
+      trtcSignals: []
     }
   }
   const res = await Taro.request<{ data: LiveSessionState }>({
-    url: `${API_BASE}/api/live/session/state`,
+    url: `${getApiBase()}/api/live/session/state`,
     method: 'GET',
     data: { sessionId }
   })
@@ -218,8 +335,26 @@ export async function bindSessionMember(params: {
 }) {
   if (useMock()) return
   await Taro.request({
-    url: `${API_BASE}/api/live/session/bind-members`,
+    url: `${getApiBase()}/api/live/session/bind-members`,
     method: 'POST',
     data: params
+  })
+}
+
+export async function requestVideoInterview(sessionId: string) {
+  if (useMock()) return
+  await Taro.request({
+    url: `${getApiBase()}/api/live/session/request-video`,
+    method: 'POST',
+    data: { sessionId }
+  })
+}
+
+export async function acceptVideoInterview(sessionId: string) {
+  if (useMock()) return
+  await Taro.request({
+    url: `${getApiBase()}/api/live/session/accept-video`,
+    method: 'POST',
+    data: { sessionId }
   })
 }

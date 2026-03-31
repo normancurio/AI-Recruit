@@ -5,7 +5,7 @@ import {
   Settings, Network, UserCog, Shield, Menu as MenuIcon,
   Search, Plus, UploadCloud, BrainCircuit, ChevronDown,
   ChevronRight, MoreHorizontal, CheckCircle2, XCircle,
-  LogOut, Bell, LayoutDashboard
+  LogOut, Bell, LayoutDashboard, Send
 } from 'lucide-react';
 
 // --- Types ---
@@ -370,6 +370,19 @@ function ProjectManagementView({ role }: { role: Role }) {
   );
 }
 
+function miniappApiFetch(path: string, init?: RequestInit) {
+  const base = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
+  const token = import.meta.env.VITE_ADMIN_API_TOKEN || '';
+  const url = base ? `${base}${path}` : path;
+  const h = new Headers(init?.headers);
+  if (token) {
+    h.set('Authorization', `Bearer ${token}`);
+    h.set('X-Admin-Token', token);
+  }
+  if (init?.body && !h.has('Content-Type')) h.set('Content-Type', 'application/json');
+  return fetch(url, { ...init, headers: h });
+}
+
 function JobQueryView() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [projectName, setProjectName] = useState('');
@@ -425,13 +438,138 @@ function JobQueryView() {
 
 function ResumeScreeningView() {
   const [resumes, setResumes] = useState<Resume[]>([]);
+  const apiBase = (import.meta.env.VITE_API_BASE || '').trim();
+  const hasToken = Boolean(import.meta.env.VITE_ADMIN_API_TOKEN?.trim());
+  const [inviteJobs, setInviteJobs] = useState<{ job_code: string; title: string; department: string }[]>([]);
+  const [inviteJobsLoading, setInviteJobsLoading] = useState(false);
+  const [creatingInvite, setCreatingInvite] = useState<string | null>(null);
+  const [inviteBanner, setInviteBanner] = useState('');
+  const [lastInvite, setLastInvite] = useState<{ inviteCode: string; jobCode: string } | null>(null);
 
   useEffect(() => {
     fetch('/api/resumes').then(res => res.json()).then(setResumes);
   }, []);
 
+  useEffect(() => {
+    if (!apiBase || !hasToken) {
+      setInviteBanner('未配置小程序 API：请在根目录 .env.local 设置 VITE_API_BASE=http://localhost:3001 与 VITE_ADMIN_API_TOKEN（与 ADMIN_API_TOKEN 相同），并同时运行 npm run dev:api。');
+      return;
+    }
+    setInviteJobsLoading(true);
+    setInviteBanner('');
+    miniappApiFetch('/api/admin/jobs')
+      .then(async (r) => {
+        if (!r.ok) throw new Error('bad');
+        return r.json() as Promise<{ data: { job_code: string; title: string; department: string }[] }>;
+      })
+      .then((d) => setInviteJobs(d.data || []))
+      .catch(() => setInviteBanner('加载岗位失败：请确认小程序 API 已启动且 ADMIN_API_TOKEN 正确。'))
+      .finally(() => setInviteJobsLoading(false));
+  }, [apiBase, hasToken]);
+
+  const handleMiniappInvite = async (jobCode: string) => {
+    setLastInvite(null);
+    setCreatingInvite(jobCode);
+    try {
+      const r = await miniappApiFetch('/api/admin/invitations', {
+        method: 'POST',
+        body: JSON.stringify({ jobCode, expiresInDays: 7 })
+      });
+      const j = (await r.json()) as { data?: { inviteCode: string; jobCode: string }; message?: string };
+      if (!r.ok) throw new Error(j.message || 'failed');
+      if (j.data?.inviteCode) {
+        setLastInvite({ inviteCode: j.data.inviteCode, jobCode: j.data.jobCode });
+        setInviteBanner('');
+      }
+    } catch {
+      setInviteBanner('发起面试失败');
+    } finally {
+      setCreatingInvite(null);
+    }
+  };
+
+  const copyInviteCode = (code: string) => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(code);
+    }
+  };
+
+  const handleInviteFromResume = (resume: Resume) => {
+    const name = (resume.job || '').trim();
+    if (!name) {
+      setInviteBanner('该简历未标注匹配岗位，请在上方岗位列表中手动发起面试。');
+      return;
+    }
+    const matched =
+      inviteJobs.find((j) => j.job_code === name) ||
+      inviteJobs.find((j) => j.title === name) ||
+      inviteJobs.find((j) => name.includes(j.title) || j.title.includes(name));
+    if (!matched) {
+      setInviteBanner(`未在岗位列表中找到与「${name}」对应的岗位，请在上方列表中选择正确岗位发起面试。`);
+      return;
+    }
+    void handleMiniappInvite(matched.job_code);
+  };
+
   return (
     <div className="space-y-6">
+      <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-4 flex items-start gap-3">
+        <Send className="w-5 h-5 text-emerald-600 mt-0.5" />
+        <div>
+          <h4 className="font-bold text-emerald-900">发起小程序面试</h4>
+          <p className="text-sm text-emerald-800 mt-1">
+            岗位数据来自 MySQL（ai_recruit）jobs 表。生成邀请码后发给候选人，对方可在小程序登录页填写 INV… 码进入面试。
+          </p>
+        </div>
+      </div>
+      {inviteBanner ? (
+        <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">{inviteBanner}</div>
+      ) : null}
+      {lastInvite ? (
+        <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+          <p className="text-sm text-slate-600 mb-2">最近生成的邀请码（请发给候选人）</p>
+          <div className="flex flex-wrap items-center gap-3">
+            <code className="text-lg font-mono bg-slate-100 px-3 py-2 rounded">{lastInvite.inviteCode}</code>
+            <button
+              type="button"
+              onClick={() => copyInviteCode(lastInvite.inviteCode)}
+              className="text-sm text-indigo-600 hover:underline"
+            >
+              复制
+            </button>
+            <span className="text-slate-500 text-sm">岗位 {lastInvite.jobCode}</span>
+          </div>
+        </div>
+      ) : null}
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="p-4 border-b border-slate-100 font-medium text-slate-800">岗位列表 · 发起面试</div>
+        {inviteJobsLoading ? (
+          <div className="p-8 text-slate-500 text-sm">加载岗位中…</div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {inviteJobs.length === 0 && !inviteBanner ? (
+              <div className="p-8 text-slate-500 text-sm">暂无岗位</div>
+            ) : null}
+            {inviteJobs.map((j) => (
+              <div key={j.job_code} className="p-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="font-medium text-slate-900">{j.title}</div>
+                  <div className="text-sm text-slate-500">编码 {j.job_code} · {j.department || '—'}</div>
+                </div>
+                <button
+                  type="button"
+                  disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
+                  onClick={() => void handleMiniappInvite(j.job_code)}
+                  className="shrink-0 bg-indigo-600 text-white text-sm font-medium px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {creatingInvite === j.job_code ? '生成中…' : '发起面试'}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="flex gap-6">
         {/* Upload Area */}
         <div className="w-1/3">
@@ -493,7 +631,14 @@ function ResumeScreeningView() {
                   <div className="flex gap-2">
                     <button className="px-3 py-1.5 bg-indigo-50 text-indigo-700 text-sm font-medium rounded hover:bg-indigo-100">查看报告</button>
                     {resume.matchScore >= 60 && (
-                      <button className="px-3 py-1.5 bg-emerald-50 text-emerald-700 text-sm font-medium rounded hover:bg-emerald-100">发起面试</button>
+                      <button
+                        type="button"
+                        onClick={() => handleInviteFromResume(resume)}
+                        disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
+                        className="px-3 py-1.5 bg-emerald-50 text-emerald-700 text-sm font-medium rounded hover:bg-emerald-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        发起面试
+                      </button>
                     )}
                   </div>
                 </div>

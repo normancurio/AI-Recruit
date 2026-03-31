@@ -1,36 +1,59 @@
 import Taro, { useDidShow } from '@tarojs/taro'
-import { useState } from 'react'
-import { Text, View } from '@tarojs/components'
+import { useCallback, useRef, useState } from 'react'
+import { Button, Text, View } from '@tarojs/components'
 
 import { loginAndGetOpenId } from '../../services/authApi'
-import { getMyProfile } from '../../services/userApi'
+import { flowLog, flowLogInfo } from '../../utils/flowLog'
 
 import './index.scss'
 
+async function ensureWxOpenId() {
+  const openid = await loginAndGetOpenId('candidate')
+  Taro.setStorageSync('wx_openid', openid)
+}
+
+function formatBootError(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message
+  return '加载失败，请检查网络后重试'
+}
+
 export default function EntryPage() {
-  const [tip, setTip] = useState('正在登录...')
+  const [tip, setTip] = useState('正在准备…')
+  const [showRetry, setShowRetry] = useState(false)
+  const bootGen = useRef(0)
 
-  useDidShow(async () => {
-    try {
-      const openid = await loginAndGetOpenId('candidate')
-      Taro.setStorageSync('wx_openid', openid)
-      setTip('正在加载身份信息...')
+  const goLogin = useCallback(() => {
+    Taro.reLaunch({ url: '/pages/login/index' })
+  }, [])
 
-      const me = await getMyProfile(openid)
-      if (me.role === 'interviewer') {
-        Taro.reLaunch({ url: '/pages/interviewer/index' })
-        return
-      }
-      Taro.reLaunch({ url: '/pages/login/index' })
-    } catch (e: unknown) {
-      const msg =
-        e instanceof Error
-          ? e.message
-          : typeof e === 'object' && e !== null && 'errMsg' in e
-            ? String((e as { errMsg: string }).errMsg)
-            : '登录失败，请稍后重试'
-      setTip(msg)
+  const bootstrap = useCallback(async () => {
+    const gen = ++bootGen.current
+    setShowRetry(false)
+    setTip('正在准备…')
+    const cached = (Taro.getStorageSync('wx_openid') as string) || ''
+    if (cached) {
+      if (gen !== bootGen.current) return
+      flowLogInfo('入口', '已有 wx_openid，跳转登录')
+      goLogin()
+      return
     }
+    try {
+      setTip('正在连接微信…')
+      flowLogInfo('入口', '请求 loginAndGetOpenId')
+      await ensureWxOpenId()
+      if (gen !== bootGen.current) return
+      flowLog('入口 换 openid', true)
+      goLogin()
+    } catch (e) {
+      if (gen !== bootGen.current) return
+      flowLog('入口 换 openid', false, e instanceof Error ? e.message : 'unknown')
+      setTip(formatBootError(e))
+      setShowRetry(true)
+    }
+  }, [goLogin])
+
+  useDidShow(() => {
+    void bootstrap()
   })
 
   return (
@@ -38,8 +61,12 @@ export default function EntryPage() {
       <View className='card'>
         <Text className='title'>AI 面试</Text>
         <Text className='tip'>{tip}</Text>
+        {showRetry ? (
+          <Button className='retry-btn' onClick={() => void bootstrap()}>
+            重试
+          </Button>
+        ) : null}
       </View>
     </View>
   )
 }
-

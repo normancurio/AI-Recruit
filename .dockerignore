@@ -1,0 +1,14 @@
+node_modules
+**/node_modules
+.git
+.gitignore
+.cursor
+dist
+**/dist
+.env.local
+**/.DS_Store
+*.md
+miniapp-candidate/.swc
+coverage
+.vscode
+.idea

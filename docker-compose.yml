@@ -1,0 +1,56 @@
+# AI-Recruit：小程序 API（3001）+ 管理后台（3000）
+#
+# 首次构建（PUBLIC_API_BASE 填浏览器可访问的 API 根 URL，含协议与端口）：
+#   export PUBLIC_API_BASE=https://api.example.com
+#   export VITE_ADMIN_API_TOKEN_BUILD=与下面 .env 中 ADMIN_API_TOKEN 相同
+#   docker compose build
+#
+# 服务器上放置 .env（从 .env.example 复制并填写 MYSQL_*、WECHAT_*、ADMIN_API_TOKEN 等），然后：
+#   docker compose up -d
+#
+# MySQL 在宿主机或其它机器时：MYSQL_HOST 填可解析地址（Linux 常用宿主机内网 IP 或 Docker 网关）。
+
+x-app-build: &app-build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    VITE_API_BASE: ${PUBLIC_API_BASE:-http://localhost:3001}
+    VITE_ADMIN_API_TOKEN: ${VITE_ADMIN_API_TOKEN_BUILD:-}
+
+services:
+  api:
+    image: ai-recruit-app
+    build: *app-build
+    command: ["npx", "tsx", "server/index.ts"]
+    ports:
+      - "${API_PORT:-3001}:3001"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      HOST: "0.0.0.0"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3001/api/health',r=>{r.resume();process.exit(0);}).on('error',()=>process.exit(1))\""
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  admin:
+    image: ai-recruit-app
+    build: *app-build
+    command: ["npx", "tsx", "server.ts"]
+    ports:
+      - "${ADMIN_PORT:-3000}:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      ADMIN_UI_PORT: "3000"
+    restart: unless-stopped
