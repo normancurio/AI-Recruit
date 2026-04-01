@@ -1479,7 +1479,7 @@
     "@tarojs/helper" "4.1.11"
     "@tarojs/shared" "4.1.11"
 
-"@tarojs/taro@4.1.11":
+"@tarojs/taro@^4.0.7", "@tarojs/taro@4.1.11":
   version "4.1.11"
   resolved "https://mirrors.huaweicloud.com/repository/npm/@tarojs/taro/-/taro-4.1.11.tgz"
   integrity sha512-kaFWiGfyxxqX4nl2Gg+FmMcJfOswT6M3QhikXxxtl3SEB171ThfVkYK9EVxDZ1imtd0DYR1gphZXjdaO58vTgQ==

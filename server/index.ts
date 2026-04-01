@@ -26,6 +26,11 @@ const uploadAudioMemory = multer({
   limits: { fileSize: 2 * 1024 * 1024 }
 })
 
+const uploadResumeMemory = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 12 * 1024 * 1024 }
+})
+
 const mysqlPool = mysql.createPool({
   host: process.env.MYSQL_HOST || '127.0.0.1',
   port: Number(process.env.MYSQL_PORT || 3306),
@@ -305,6 +310,130 @@ function parseAiInterviewScoreJson(raw: string): AiInterviewScore | null {
   }
 }
 
+type ResumeScreeningAiResult = {
+  candidateName: string
+  matchScore: number
+  status: string
+  summary: string
+}
+
+function parseResumeScreeningAiJson(raw: string): ResumeScreeningAiResult | null {
+  try {
+    const cleaned = raw
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```\s*$/i, '')
+    const parsed = JSON.parse(cleaned) as Partial<ResumeScreeningAiResult>
+    const candidateName = String(parsed?.candidateName || '').trim()
+    const matchScore = Number(parsed?.matchScore)
+    const status = String(parsed?.status || 'AI分析完成').trim() || 'AI分析完成'
+    const summary = String(parsed?.summary || '').trim()
+    if (!candidateName || !Number.isFinite(matchScore) || !summary) return null
+    return {
+      candidateName,
+      matchScore: Math.max(0, Math.min(100, Math.round(matchScore))),
+      status,
+      summary
+    }
+  } catch {
+    return null
+  }
+}
+
+function guessCandidateNameFromResume(text: string): string {
+  const t = text.replace(/\r\n/g, '\n').slice(0, 8000)
+  const m =
+    t.match(/(?:姓名|名字)[:：\s]*([^\s\n，,]{2,20})/) ||
+    t.match(/Name[:：\s]*([A-Za-z\u4e00-\u9fa5][^\n]{1,30})/i)
+  if (m?.[1]) return String(m[1]).trim().replace(/[,，.。]/g, '')
+  const line = t.split('\n').find((l) => l.trim().length >= 2 && l.trim().length <= 24)
+  return line?.trim().slice(0, 20) || '候选人'
+}
+
+function fallbackResumeScreening(resumeText: string, jdText: string, jobTitle: string): ResumeScreeningAiResult {
+  const candidateName = guessCandidateNameFromResume(resumeText)
+  const resumeLower = resumeText.toLowerCase()
+  const jd = (jdText || jobTitle || '').trim()
+  const tokens = jd
+    .split(/[\s,，.。;；、/|]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 2)
+  const uniq = [...new Set(tokens)].slice(0, 40)
+  let hits = 0
+  for (const w of uniq) {
+    if (resumeLower.includes(w.toLowerCase())) hits++
+  }
+  const ratio = uniq.length ? hits / uniq.length : 0
+  const matchScore = Math.min(100, Math.max(35, Math.round(42 + ratio * 58)))
+  return {
+    candidateName,
+    matchScore,
+    status: 'AI分析完成',
+    summary:
+      `（未调用大模型或模型不可用：基于岗位 JD 关键词与简历文本重叠度的估算分，仅供参考。）\n` +
+      `目标岗位：${jobTitle || '—'}\n` +
+      `建议配置 DASHSCOPE_API_KEY 并检查额度后重试以获得结构化评估。`
+  }
+}
+
+async function extractResumePlainText(buffer: Buffer, originalname: string, mimetype: string): Promise<string> {
+  const ext = path.extname(originalname || '').toLowerCase()
+  if (ext === '.txt' || mimetype === 'text/plain') {
+    return buffer.toString('utf8')
+  }
+  if (ext === '.pdf' || mimetype === 'application/pdf') {
+    const parser = new PDFParse({ data: buffer })
+    try {
+      const tr = await parser.getText()
+      return (tr.text || '').trim()
+    } finally {
+      await parser.destroy()
+    }
+  }
+  if (ext === '.docx' || mimetype.includes('wordprocessingml') || mimetype.includes('officedocument')) {
+    const r = await mammoth.extractRawText({ buffer })
+    return (r.value || '').trim()
+  }
+  throw new Error('仅支持 TXT、PDF、DOCX；旧版 .doc 请另存为 DOCX 后上传')
+}
+
+async function runResumeScreeningWithAi(params: {
+  resumeText: string
+  jobTitle: string
+  department: string
+  jdText: string
+}): Promise<ResumeScreeningAiResult | null> {
+  const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
+  if (!apiKey) return null
+  const model =
+    process.env.QWEN_RESUME_MODEL?.trim() ||
+    process.env.QWEN_QUESTION_MODEL?.trim() ||
+    'qwen-turbo'
+  const clipResume = params.resumeText.replace(/\s+/g, ' ').slice(0, 14000)
+  const clipJd = (params.jdText || '').replace(/\s+/g, ' ').slice(0, 8000)
+  const userPrompt = [
+    `岗位名称：${params.jobTitle}`,
+    `部门：${params.department || '—'}`,
+    `JD：${clipJd || '（无正文）'}`,
+    `简历全文（节选）：${clipResume}`
+  ].join('\n')
+  const data = await dashScopeChatCompletions({
+    model,
+    temperature: 0.3,
+    messages: [
+      {
+        role: 'system',
+        content:
+          '你是资深招聘顾问。根据「岗位 JD」与「简历文本」评估匹配度。只输出一个 JSON 对象，不要 markdown 代码块，不要其它文字。格式：{"candidateName":"从简历推断的中文姓名或合理称呼","matchScore":0到100的整数,"status":"AI分析完成 或 不匹配 等简短状态","summary":"3～6 句中文，说明匹配点、风险与是否建议推进"}'
+      },
+      { role: 'user', content: userPrompt }
+    ]
+  })
+  const raw = data?.choices?.[0]?.message?.content
+  const text = typeof raw === 'string' ? raw : ''
+  return parseResumeScreeningAiJson(text)
+}
+
 function fallbackInterviewScore(profile: { name?: string }, answers: Array<{ answer?: string }>): AiInterviewScore {
   const score = Math.min(
     100,
@@ -358,12 +487,24 @@ function genTrtcUserSig(sdkAppId: number, secretKey: string, userId: string, exp
   return api.genSig(userId, expireSeconds)
 }
 
+function logAiQuestionFallback(reason: string, detail?: string) {
+  const clip = detail ? String(detail).replace(/\s+/g, ' ').slice(0, 600) : ''
+  console.warn(`[AI-questions] 回退到内置题库 | ${reason}${clip ? ` | ${clip}` : ''}`)
+  if (flowLogEnabled) flowLog('AI 出题回退', false, `${reason}${clip ? ` | ${clip}` : ''}`)
+}
+
+function fallbackQuestionBank(count: number) {
+  return QUESTION_BANK.slice(0, count).map((q, idx) => ({ id: `Q${idx + 1}`, text: q.text }))
+}
+
 async function generateAiQuestions(params: { title: string; department?: string; jdText?: string; count?: number }) {
   const count = params.count || 3
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
   if (!apiKey) {
-    return QUESTION_BANK.slice(0, count).map((q, idx) => ({ id: `Q${idx + 1}`, text: q.text }))
+    logAiQuestionFallback('未配置 DASHSCOPE_API_KEY')
+    return fallbackQuestionBank(count)
   }
+  const model = process.env.QWEN_QUESTION_MODEL || 'qwen3.5-plus'
   try {
     const userPrompt = [
       `岗位名称：${params.title}`,
@@ -371,7 +512,6 @@ async function generateAiQuestions(params: { title: string; department?: string;
       `JD：${params.jdText || '无'}`,
       `请生成恰好 ${count} 道中文专业技术面试题，要求具体、可考察真实能力。`
     ].join('\n')
-    const model = process.env.QWEN_QUESTION_MODEL || 'qwen3.5-plus'
     const data = await dashScopeChatCompletions({
       model,
       messages: [
@@ -386,6 +526,10 @@ async function generateAiQuestions(params: { title: string; department?: string;
     })
     const raw = data?.choices?.[0]?.message?.content
     const text = typeof raw === 'string' ? raw : ''
+    if (!text.trim()) {
+      logAiQuestionFallback(`模型返回空内容 model=${model}`, JSON.stringify(data).slice(0, 400))
+      return fallbackQuestionBank(count)
+    }
     const parsed = parseQuestionsJson(text, count)
     if (parsed?.length) {
       return parsed.slice(0, count).map((q, idx) => ({
@@ -393,9 +537,12 @@ async function generateAiQuestions(params: { title: string; department?: string;
         text: q.text
       }))
     }
-    return QUESTION_BANK.slice(0, count).map((q, idx) => ({ id: `Q${idx + 1}`, text: q.text }))
-  } catch {
-    return QUESTION_BANK.slice(0, count).map((q, idx) => ({ id: `Q${idx + 1}`, text: q.text }))
+    logAiQuestionFallback(`JSON 解析失败或 questions 为空 model=${model}`, text)
+    return fallbackQuestionBank(count)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    logAiQuestionFallback(`DashScope 调用异常 model=${model}`, msg)
+    return fallbackQuestionBank(count)
   }
 }
 
@@ -710,14 +857,58 @@ function maskPhoneDisplay(phone: string | null | undefined) {
   return p || '—'
 }
 
+/** 写入 jobs.recruiters（JSON）：与 schema_admin 一致为字符串数组 */
+function normalizeRecruitersForDb(raw: unknown): string {
+  if (raw === undefined || raw === null) return '[]'
+  if (Array.isArray(raw)) return JSON.stringify(raw.map((x) => String(x)))
+  if (typeof raw === 'string') {
+    const t = raw.trim()
+    if (!t) return '[]'
+    try {
+      const p = JSON.parse(t) as unknown
+      if (Array.isArray(p)) return JSON.stringify(p.map((x) => String(x)))
+    } catch {
+      return JSON.stringify([t])
+    }
+  }
+  return '[]'
+}
+
+function recruitersFromRow(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.map(String)
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer(raw)) {
+    try {
+      const p = JSON.parse(raw.toString('utf8')) as unknown
+      return Array.isArray(p) ? p.map(String) : []
+    } catch {
+      return []
+    }
+  }
+  if (typeof raw === 'string') {
+    try {
+      const p = JSON.parse(raw) as unknown
+      return Array.isArray(p) ? p.map(String) : []
+    } catch {
+      return []
+    }
+  }
+  return []
+}
+
 /** HR 后台：岗位列表（与小程序 / 会话共用 jobs 表） */
 app.get('/api/admin/jobs', async (req, res) => {
   if (!assertAdminToken(req, res)) return
   try {
     const [rows] = await mysqlPool.query<any[]>(
-      'SELECT id, job_code, title, department, jd_text FROM jobs ORDER BY id DESC'
+      `SELECT id, project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters
+       FROM jobs ORDER BY id DESC`
     )
-    res.json({ data: rows })
+    res.json({
+      data: rows.map((r) => ({
+        ...r,
+        recruiters: recruitersFromRow(r.recruiters)
+      }))
+    })
   } catch {
     res.status(500).json({ message: 'db error' })
   }
@@ -731,16 +922,44 @@ app.post('/api/admin/jobs', async (req, res) => {
   if (!jobCode) {
     jobCode = `J${Date.now().toString(36).toUpperCase().slice(-8)}`
   }
+  const projectIdRaw = req.body?.projectId
+  const projectId =
+    projectIdRaw === undefined || projectIdRaw === null || projectIdRaw === ''
+      ? null
+      : String(projectIdRaw).trim() || null
   const department = String(req.body?.department || '').trim()
   const jdText = String(req.body?.jdText || req.body?.jd || '').trim()
+  const rawDemand = Number(req.body?.demand)
+  const demand = Number.isFinite(rawDemand) && rawDemand > 0 ? Math.min(Math.floor(rawDemand), 99999) : 1
+  const location = String(req.body?.location ?? '').trim()
+  const skills = String(req.body?.skills ?? '').trim()
+  const level = String(req.body?.level ?? '').trim()
+  const salary = String(req.body?.salary ?? '').trim()
+  const recruitersJson = normalizeRecruitersForDb(req.body?.recruiters)
   try {
     await mysqlPool.query(
-      'INSERT INTO jobs (job_code, title, department, jd_text) VALUES (?,?,?,?)',
-      [jobCode, title, department, jdText]
+      `INSERT INTO jobs (project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters)
+       VALUES (?,?,?,?,?,?,?,?,?,?, CAST(? AS JSON))`,
+      [
+        projectId,
+        jobCode,
+        title,
+        department,
+        jdText,
+        demand,
+        location || null,
+        skills || null,
+        level || null,
+        salary || null,
+        recruitersJson
+      ]
     )
     res.json({ data: { jobCode } })
   } catch (e: any) {
     if (e?.code === 'ER_DUP_ENTRY') return res.status(409).json({ message: 'job_code exists' })
+    if (e?.code === 'ER_NO_REFERENCED_ROW_2') {
+      return res.status(400).json({ message: 'projectId not found in projects' })
+    }
     res.status(500).json({ message: 'db error' })
   }
 })
@@ -752,6 +971,25 @@ app.patch('/api/admin/jobs/:jobCode', async (req, res) => {
   const title = req.body?.title !== undefined ? String(req.body.title).trim() : null
   const department = req.body?.department !== undefined ? String(req.body.department).trim() : null
   const jdText = req.body?.jdText !== undefined ? String(req.body.jdText) : null
+  const projectId =
+    req.body?.projectId !== undefined
+      ? req.body.projectId === null || req.body.projectId === ''
+        ? null
+        : String(req.body.projectId).trim() || null
+      : undefined
+  const demand =
+    req.body?.demand !== undefined
+      ? (() => {
+          const n = Number(req.body.demand)
+          return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 99999) : 1
+        })()
+      : undefined
+  const location = req.body?.location !== undefined ? String(req.body.location).trim() : undefined
+  const skills = req.body?.skills !== undefined ? String(req.body.skills).trim() : undefined
+  const level = req.body?.level !== undefined ? String(req.body.level).trim() : undefined
+  const salary = req.body?.salary !== undefined ? String(req.body.salary).trim() : undefined
+  const recruiters =
+    req.body?.recruiters !== undefined ? normalizeRecruitersForDb(req.body.recruiters) : undefined
   try {
     const fields: string[] = []
     const vals: any[] = []
@@ -767,6 +1005,34 @@ app.patch('/api/admin/jobs/:jobCode', async (req, res) => {
       fields.push('jd_text=?')
       vals.push(jdText)
     }
+    if (projectId !== undefined) {
+      fields.push('project_id=?')
+      vals.push(projectId)
+    }
+    if (demand !== undefined) {
+      fields.push('demand=?')
+      vals.push(demand)
+    }
+    if (location !== undefined) {
+      fields.push('location=?')
+      vals.push(location || null)
+    }
+    if (skills !== undefined) {
+      fields.push('skills=?')
+      vals.push(skills || null)
+    }
+    if (level !== undefined) {
+      fields.push('level=?')
+      vals.push(level || null)
+    }
+    if (salary !== undefined) {
+      fields.push('salary=?')
+      vals.push(salary || null)
+    }
+    if (recruiters !== undefined) {
+      fields.push('recruiters=CAST(? AS JSON)')
+      vals.push(recruiters)
+    }
     if (!fields.length) return res.status(400).json({ message: 'no fields to update' })
     vals.push(jobCode)
     const [hdr] = await mysqlPool.query<ResultSetHeader>(
@@ -775,10 +1041,103 @@ app.patch('/api/admin/jobs/:jobCode', async (req, res) => {
     )
     if (!hdr.affectedRows) return res.status(404).json({ message: 'job not found' })
     res.json({ ok: true })
-  } catch {
+  } catch (e: any) {
+    if (e?.code === 'ER_NO_REFERENCED_ROW_2') {
+      return res.status(400).json({ message: 'projectId not found in projects' })
+    }
     res.status(500).json({ message: 'db error' })
   }
 })
+
+app.get('/api/admin/resume-screenings', async (req, res) => {
+  if (!assertAdminToken(req, res)) return
+  try {
+    const [rows] = await mysqlPool.query<any[]>(
+      `SELECT id, job_code, candidate_name, matched_job_title, match_score, status, report_summary, file_name, created_at
+       FROM resume_screenings ORDER BY id DESC LIMIT 200`
+    )
+    res.json({ data: rows })
+  } catch (e: unknown) {
+    const code = (e as { code?: string })?.code
+    if (code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({ message: 'resume_screenings 表未创建，请执行 server/migration_resume_screenings.sql' })
+    }
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.post(
+  '/api/admin/resume-screen',
+  uploadResumeMemory.single('file'),
+  async (req, res) => {
+    if (!assertAdminToken(req, res)) return
+    const jobCode = String(req.body?.jobCode || '').trim().toUpperCase()
+    if (!jobCode) return res.status(400).json({ message: 'jobCode required' })
+    if (!req.file?.buffer?.length) return res.status(400).json({ message: 'file required' })
+    try {
+      const [jobRows] = await mysqlPool.query<any[]>(
+        'SELECT title, department, jd_text FROM jobs WHERE job_code=? LIMIT 1',
+        [jobCode]
+      )
+      if (!jobRows.length) return res.status(404).json({ message: 'job not found' })
+      const job = jobRows[0] as { title: string; department: string | null; jd_text: string | null }
+      let plain: string
+      try {
+        plain = await extractResumePlainText(req.file.buffer, req.file.originalname, req.file.mimetype || '')
+      } catch (ex) {
+        const msg = ex instanceof Error ? ex.message : 'parse failed'
+        return res.status(415).json({ message: msg })
+      }
+      if (!plain.trim()) return res.status(422).json({ message: '未能从文件中提取可读文本' })
+
+      let result: ResumeScreeningAiResult
+      try {
+        const ai = await runResumeScreeningWithAi({
+          resumeText: plain,
+          jobTitle: String(job.title || ''),
+          department: String(job.department || ''),
+          jdText: String(job.jd_text || '')
+        })
+        result = ai || fallbackResumeScreening(plain, String(job.jd_text || ''), String(job.title || ''))
+      } catch {
+        result = fallbackResumeScreening(plain, String(job.jd_text || ''), String(job.title || ''))
+      }
+
+      const [ins] = await mysqlPool.query<ResultSetHeader>(
+        `INSERT INTO resume_screenings (job_code, candidate_name, matched_job_title, match_score, status, report_summary, file_name)
+         VALUES (?,?,?,?,?,?,?)`,
+        [
+          jobCode,
+          result.candidateName,
+          String(job.title || ''),
+          result.matchScore,
+          result.status,
+          result.summary,
+          String(req.file.originalname || '').slice(0, 255)
+        ]
+      )
+      flowLog('resume-screen', true, `job=${jobCode} score=${result.matchScore}`)
+      res.json({
+        data: {
+          id: Number(ins.insertId),
+          jobCode,
+          candidateName: result.candidateName,
+          matchedJobTitle: String(job.title || ''),
+          matchScore: result.matchScore,
+          status: result.status,
+          summary: result.summary
+        }
+      })
+    } catch (e: unknown) {
+      const code = (e as { code?: string })?.code
+      if (code === 'ER_NO_SUCH_TABLE') {
+        return res.status(503).json({ message: 'resume_screenings 表未创建，请执行 server/migration_resume_screenings.sql' })
+      }
+      flowLog('resume-screen', false, e instanceof Error ? e.message : 'failed')
+      res.status(500).json({ message: 'screening failed' })
+    }
+  }
+)
 
 function generateUniqueInviteCode(): string {
   return `INV${crypto.randomBytes(6).toString('hex').toUpperCase()}`

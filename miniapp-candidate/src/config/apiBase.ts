@@ -4,6 +4,11 @@ import Taro from '@tarojs/taro'
 const ENV_API_BASE = String(process.env.TARO_APP_API_BASE || '').trim().replace(/\/$/, '')
 
 const DEV_STORAGE_KEY = 'DEV_API_BASE'
+declare const TARO_FLOW_DEBUG: string
+
+function allowDevApiOverride() {
+  return String(typeof TARO_FLOW_DEBUG !== 'undefined' ? TARO_FLOW_DEBUG : '').trim() === '1'
+}
 
 /**
  * 当前请求使用的 API 根地址（无尾部 /）。
@@ -12,6 +17,7 @@ const DEV_STORAGE_KEY = 'DEV_API_BASE'
  *   `wx.setStorageSync('DEV_API_BASE', 'http://192.168.1.16:3001')` 后重进小程序，可立刻指向新 IP，无需重编。
  */
 export function getApiBase(): string {
+  if (!allowDevApiOverride()) return ENV_API_BASE
   try {
     const v = Taro.getStorageSync(DEV_STORAGE_KEY) as string
     if (typeof v === 'string') {

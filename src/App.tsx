@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Building2, Briefcase, Users, FileText, UserCheck, 
@@ -12,9 +12,18 @@ import {
 type Role = 'admin' | 'delivery_manager' | 'recruiter';
 
 export interface Client { id: string; name: string; creditCode: string; industry: string; contact: string; phone: string; }
-export interface Job { id: string; project_id: string; title: string; demand: number; location: string; skills: string; level: string; salary: string; recruiters: string[]; }
+export interface Job { id: string; project_id: string; title: string; demand: number; location: string; skills: string; level: string; salary: string; recruiters: string[]; jdText?: string; }
 export interface Project { id: string; name: string; client: string; dept: string; manager: string; status: string; jobs: Job[]; }
-export interface Resume { id: string; name: string; job: string; matchScore: number; status: string; uploadTime: string; }
+export interface Resume {
+  id: string
+  name: string
+  job: string
+  jobCode?: string
+  matchScore: number
+  status: string
+  uploadTime: string
+  reportSummary?: string
+}
 export interface Application { id: string; name: string; job: string; resumeScore: number; interviewScore: number; aiEval: string; status: string; }
 export interface Dept { id: string; name: string; level: number; manager: string; count: number; }
 export interface User { id: string; name: string; username: string; dept: string; role: string; status: string; }
@@ -379,13 +388,16 @@ function miniappApiFetch(path: string, init?: RequestInit) {
     h.set('Authorization', `Bearer ${token}`);
     h.set('X-Admin-Token', token);
   }
-  if (init?.body && !h.has('Content-Type')) h.set('Content-Type', 'application/json');
+  if (init?.body && !(init.body instanceof FormData) && !h.has('Content-Type')) {
+    h.set('Content-Type', 'application/json');
+  }
   return fetch(url, { ...init, headers: h });
 }
 
 function JobQueryView() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [projectName, setProjectName] = useState('');
+  const [jdModalJob, setJdModalJob] = useState<Job | null>(null);
 
   useEffect(() => {
     fetch('/api/projects').then(res => res.json()).then((data: Project[]) => {
@@ -422,7 +434,14 @@ function JobQueryView() {
               <div className="flex justify-between"><span>级别要求</span><span className="font-medium text-slate-900">{job.level}</span></div>
             </div>
             <div className="flex gap-3">
-              <button className="flex-1 bg-slate-50 text-slate-700 py-2 rounded-lg text-sm font-medium hover:bg-slate-100 transition-colors border border-slate-200">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setJdModalJob(job);
+                }}
+                className="flex-1 bg-slate-50 text-slate-700 py-2 rounded-lg text-sm font-medium hover:bg-slate-100 transition-colors border border-slate-200"
+              >
                 查看JD
               </button>
               <button className="flex-1 bg-indigo-50 text-indigo-700 py-2 rounded-lg text-sm font-medium hover:bg-indigo-100 transition-colors border border-indigo-100">
@@ -432,8 +451,91 @@ function JobQueryView() {
           </div>
         ))}
       </div>
+
+      <AnimatePresence>
+        {jdModalJob ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="jd-modal-title"
+            onClick={() => setJdModalJob(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              transition={{ duration: 0.2 }}
+              className="bg-white rounded-xl shadow-xl border border-slate-200 w-full max-w-2xl max-h-[min(80vh,640px)] flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-4 px-6 py-4 border-b border-slate-100">
+                <div>
+                  <h3 id="jd-modal-title" className="text-lg font-bold text-slate-900">{jdModalJob.title}</h3>
+                  <p className="text-sm text-slate-500 mt-0.5">岗位编码 {jdModalJob.id} · {projectName}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setJdModalJob(null)}
+                  className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                  aria-label="关闭"
+                >
+                  <XCircle className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto px-6 py-4">
+                <p className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-2">职位描述（JD）</p>
+                <div className="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">
+                  {jdModalJob.jdText?.trim()
+                    ? jdModalJob.jdText
+                    : '暂无职位描述。请联系管理员在后台为该岗位补充 JD（jobs 表的职位说明）。'}
+                </div>
+              </div>
+              <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 rounded-b-xl flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setJdModalJob(null)}
+                  className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors"
+                >
+                  关闭
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </div>
   );
+}
+
+function mapScreeningRow(r: {
+  id: number | string
+  job_code: string
+  candidate_name: string
+  matched_job_title: string | null
+  match_score: number
+  status: string
+  report_summary: string | null
+  created_at: string | Date
+}): Resume {
+  const created = r.created_at
+  const uploadTime =
+    created instanceof Date
+      ? created.toLocaleString('zh-CN', { hour12: false })
+      : String(created || '')
+  return {
+    id: String(r.id),
+    name: String(r.candidate_name || '候选人'),
+    job: String(r.matched_job_title || r.job_code || ''),
+    jobCode: String(r.job_code || ''),
+    matchScore: Number(r.match_score) || 0,
+    status: String(r.status || ''),
+    uploadTime,
+    reportSummary: String(r.report_summary || '')
+  }
 }
 
 function ResumeScreeningView() {
@@ -445,10 +547,45 @@ function ResumeScreeningView() {
   const [creatingInvite, setCreatingInvite] = useState<string | null>(null);
   const [inviteBanner, setInviteBanner] = useState('');
   const [lastInvite, setLastInvite] = useState<{ inviteCode: string; jobCode: string } | null>(null);
+  const [selectedJobCode, setSelectedJobCode] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [uploadHint, setUploadHint] = useState('');
+  const [screenListError, setScreenListError] = useState('');
+  const [reportResume, setReportResume] = useState<Resume | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const loadScreenings = useCallback(() => {
+    if (!apiBase || !hasToken) {
+      setResumes([]);
+      setScreenListError('');
+      return;
+    }
+    setScreenListError('');
+    void miniappApiFetch('/api/admin/resume-screenings')
+      .then(async (r) => {
+        const j = (await r.json()) as { data?: unknown[]; message?: string }
+        if (!r.ok) throw new Error(j.message || 'load failed');
+        const rows = (j.data || []) as Array<{
+          id: number | string
+          job_code: string
+          candidate_name: string
+          matched_job_title: string | null
+          match_score: number
+          status: string
+          report_summary: string | null
+          created_at: string | Date
+        }>
+        setResumes(rows.map((row) => mapScreeningRow(row)));
+      })
+      .catch(() => {
+        setResumes([]);
+        setScreenListError('筛查记录加载失败：请执行 server/migration_resume_screenings.sql，并确认 API 与 ADMIN_API_TOKEN 正常。');
+      });
+  }, [apiBase, hasToken]);
 
   useEffect(() => {
-    fetch('/api/resumes').then(res => res.json()).then(setResumes);
-  }, []);
+    loadScreenings();
+  }, [loadScreenings]);
 
   useEffect(() => {
     if (!apiBase || !hasToken) {
@@ -466,6 +603,14 @@ function ResumeScreeningView() {
       .catch(() => setInviteBanner('加载岗位失败：请确认小程序 API 已启动且 ADMIN_API_TOKEN 正确。'))
       .finally(() => setInviteJobsLoading(false));
   }, [apiBase, hasToken]);
+
+  useEffect(() => {
+    if (inviteJobs.length === 0) return;
+    setSelectedJobCode((prev) => {
+      if (prev && inviteJobs.some((j) => j.job_code === prev)) return prev;
+      return inviteJobs[0].job_code;
+    });
+  }, [inviteJobs]);
 
   const handleMiniappInvite = async (jobCode: string) => {
     setLastInvite(null);
@@ -495,6 +640,13 @@ function ResumeScreeningView() {
   };
 
   const handleInviteFromResume = (resume: Resume) => {
+    if (resume.jobCode) {
+      const byCode = inviteJobs.find((j) => j.job_code === resume.jobCode);
+      if (byCode) {
+        void handleMiniappInvite(byCode.job_code);
+        return;
+      }
+    }
     const name = (resume.job || '').trim();
     if (!name) {
       setInviteBanner('该简历未标注匹配岗位，请在上方岗位列表中手动发起面试。');
@@ -509,6 +661,30 @@ function ResumeScreeningView() {
       return;
     }
     void handleMiniappInvite(matched.job_code);
+  };
+
+  const runUpload = (file: File | null) => {
+    if (!file || !apiBase || !hasToken) return;
+    if (!selectedJobCode) {
+      setUploadHint('请先选择目标岗位。');
+      return;
+    }
+    setUploadHint('');
+    setUploading(true);
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('jobCode', selectedJobCode);
+    void miniappApiFetch('/api/admin/resume-screen', { method: 'POST', body: fd })
+      .then(async (r) => {
+        const j = (await r.json()) as { message?: string }
+        if (!r.ok) throw new Error(j.message || 'upload failed');
+        loadScreenings();
+        setUploadHint('解析与打分已完成，已加入下方列表。');
+      })
+      .catch((e: unknown) => {
+        setUploadHint(e instanceof Error ? e.message : '上传或筛查失败');
+      })
+      .finally(() => setUploading(false));
   };
 
   return (
@@ -577,17 +753,70 @@ function ResumeScreeningView() {
             <h3 className="font-bold text-slate-900 mb-4">上传简历进行 AI 筛查</h3>
             <div className="mb-4">
               <label className="block text-sm font-medium text-slate-700 mb-1">目标匹配岗位</label>
-              <select className="w-full border border-slate-200 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 outline-none text-sm">
-                <option>高级前端工程师 (J001)</option>
-                <option>Java架构师 (J002)</option>
+              <select
+                value={selectedJobCode}
+                onChange={(e) => setSelectedJobCode(e.target.value)}
+                disabled={!inviteJobs.length || inviteJobsLoading}
+                className="w-full border border-slate-200 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 outline-none text-sm disabled:bg-slate-100"
+              >
+                {inviteJobs.length === 0 ? (
+                  <option value="">暂无岗位（请先保证 jobs 表有数据）</option>
+                ) : (
+                  inviteJobs.map((j) => (
+                    <option key={j.job_code} value={j.job_code}>
+                      {j.title} ({j.job_code})
+                    </option>
+                  ))
+                )}
               </select>
             </div>
-            <div className="flex-1 border-2 border-dashed border-slate-300 rounded-xl flex flex-col items-center justify-center p-8 text-center hover:bg-slate-50 hover:border-indigo-400 transition-colors cursor-pointer group">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.doc,.docx,.txt,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = '';
+                runUpload(f || null);
+              }}
+            />
+            {uploadHint ? (
+              <p
+                className={`text-xs mb-3 ${
+                  /失败|未创建|请先|未能|不支持|错误/i.test(uploadHint) ? 'text-amber-700' : 'text-emerald-700'
+                }`}
+              >
+                {uploadHint}
+              </p>
+            ) : null}
+            <div
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click();
+              }}
+              onClick={() => !uploading && fileInputRef.current?.click()}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (uploading) return;
+                const f = e.dataTransfer.files?.[0];
+                runUpload(f || null);
+              }}
+              className={`flex-1 min-h-[220px] border-2 border-dashed border-slate-300 rounded-xl flex flex-col items-center justify-center p-8 text-center transition-colors group ${
+                uploading ? 'opacity-60 cursor-wait' : 'hover:bg-slate-50 hover:border-indigo-400 cursor-pointer'
+              }`}
+            >
               <div className="w-16 h-16 bg-indigo-50 rounded-full flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
                 <UploadCloud className="w-8 h-8 text-indigo-500" />
               </div>
-              <p className="font-medium text-slate-700 mb-1">点击或拖拽简历文件到此处</p>
-              <p className="text-xs text-slate-500">支持 PDF, Word, TXT 格式。AI 将自动解析并打分。</p>
+              <p className="font-medium text-slate-700 mb-1">{uploading ? '正在解析与打分…' : '点击或拖拽简历文件到此处'}</p>
+              <p className="text-xs text-slate-500">支持 PDF、DOCX、TXT；旧版 .doc 请另存为 DOCX。配置 DASHSCOPE_API_KEY 时由大模型评估，否则为关键词估算分。</p>
             </div>
           </div>
         </div>
@@ -600,6 +829,15 @@ function ResumeScreeningView() {
               <span className="text-sm text-slate-500">共解析 {resumes.length} 份简历</span>
             </div>
             <div className="flex-1 overflow-auto p-6 space-y-4">
+              {screenListError ? (
+                <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">{screenListError}</div>
+              ) : null}
+              {!apiBase || !hasToken ? (
+                <p className="text-sm text-slate-500">配置 VITE_API_BASE 与 VITE_ADMIN_API_TOKEN 后，此处展示已上传简历的 AI 筛查记录。</p>
+              ) : null}
+              {apiBase && hasToken && resumes.length === 0 ? (
+                <p className="text-sm text-slate-500">暂无筛查记录。请从左侧上传简历，或确认已执行 server/migration_resume_screenings.sql。</p>
+              ) : null}
               {resumes.map(resume => (
                 <div key={resume.id} className="border border-slate-200 rounded-lg p-4 flex items-center gap-6 hover:border-indigo-300 transition-colors">
                   <div className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center flex-shrink-0">
@@ -629,7 +867,13 @@ function ResumeScreeningView() {
                     </div>
                   </div>
                   <div className="flex gap-2">
-                    <button className="px-3 py-1.5 bg-indigo-50 text-indigo-700 text-sm font-medium rounded hover:bg-indigo-100">查看报告</button>
+                    <button
+                      type="button"
+                      onClick={() => setReportResume(resume)}
+                      className="px-3 py-1.5 bg-indigo-50 text-indigo-700 text-sm font-medium rounded hover:bg-indigo-100"
+                    >
+                      查看报告
+                    </button>
                     {resume.matchScore >= 60 && (
                       <button
                         type="button"
@@ -647,6 +891,60 @@ function ResumeScreeningView() {
           </div>
         </div>
       </div>
+
+      <AnimatePresence>
+        {reportResume ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="report-modal-title"
+            onClick={() => setReportResume(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              transition={{ duration: 0.2 }}
+              className="bg-white rounded-xl shadow-xl border border-slate-200 w-full max-w-xl max-h-[min(80vh,560px)] flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-4 px-6 py-4 border-b border-slate-100">
+                <div>
+                  <h3 id="report-modal-title" className="text-lg font-bold text-slate-900">筛查报告 · {reportResume.name}</h3>
+                  <p className="text-sm text-slate-500 mt-0.5">{reportResume.job} · {reportResume.uploadTime}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setReportResume(null)}
+                  className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                  aria-label="关闭"
+                >
+                  <XCircle className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto px-6 py-4">
+                <p className="text-xs font-medium text-slate-500 mb-2">匹配度 {reportResume.matchScore} 分 · {reportResume.status}</p>
+                <div className="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">
+                  {reportResume.reportSummary?.trim() || '暂无报告正文。'}
+                </div>
+              </div>
+              <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 rounded-b-xl flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setReportResume(null)}
+                  className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors"
+                >
+                  关闭
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </div>
   );
 }

@@ -71,9 +71,10 @@ export default function LoginPage() {
       Taro.setStorageSync('candidate_job', data.job)
       flowLog('登录 login-invite', true, `session=${data.sessionId} trtc=${data.trtc ? 'yes' : 'no'}`)
       Taro.navigateTo({ url: '/pages/lobby/index' })
-    } catch {
-      flowLog('登录 login-invite', false, '接口异常或邀请码无效')
-      Taro.showToast({ title: '登录或邀请码校验失败', icon: 'none' })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '登录或邀请码校验失败'
+      flowLog('登录 login-invite', false, msg)
+      Taro.showToast({ title: msg.slice(0, 24), icon: 'none' })
     } finally {
       setLoading(false)
     }

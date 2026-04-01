@@ -3,10 +3,13 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "clean": "rm -rf dist",
     "dev:weapp": "taro build --type weapp --watch",
-    "build:weapp": "taro build --type weapp"
+    "build:weapp": "taro build --type weapp",
+    "build:weapp:clean": "npm run clean && taro build --type weapp"
   },
   "dependencies": {
+    "@tarojs/taro": "^4.0.7",
     "@tarojs/components": "^4.0.7",
     "@tarojs/helper": "^4.0.7",
     "@tarojs/plugin-framework-react": "^4.0.7",

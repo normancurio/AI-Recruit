@@ -49,16 +49,54 @@ CREATE TABLE IF NOT EXISTS interviewer_phone_whitelist (
   KEY idx_whitelist_enabled (enabled)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS projects (
+  id VARCHAR(64) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  client VARCHAR(255) NULL,
+  dept VARCHAR(128) NULL,
+  manager VARCHAR(64) NULL,
+  status VARCHAR(32) NOT NULL DEFAULT '进行中',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS jobs (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  project_id VARCHAR(64) NULL,
   job_code VARCHAR(32) NOT NULL,
   title VARCHAR(255) NOT NULL,
   department VARCHAR(255) NULL,
   jd_text TEXT NULL,
+  demand INT NOT NULL DEFAULT 1,
+  location VARCHAR(128) NULL,
+  skills VARCHAR(255) NULL,
+  level VARCHAR(64) NULL,
+  salary VARCHAR(64) NULL,
+  recruiters JSON NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  UNIQUE KEY uk_jobs_job_code (job_code)
+  UNIQUE KEY uk_jobs_job_code (job_code),
+  KEY idx_jobs_project (project_id),
+  CONSTRAINT fk_jobs_project
+    FOREIGN KEY (project_id) REFERENCES projects(id)
+    ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS resume_screenings (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  job_code VARCHAR(32) NOT NULL,
+  candidate_name VARCHAR(128) NOT NULL DEFAULT '',
+  matched_job_title VARCHAR(255) NULL,
+  match_score TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  status VARCHAR(64) NOT NULL DEFAULT 'AI分析完成',
+  report_summary TEXT NULL,
+  file_name VARCHAR(255) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_resume_screen_job (job_code),
+  KEY idx_resume_screen_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS interview_invitations (
@@ -158,11 +196,76 @@ CREATE TABLE IF NOT EXISTS interview_messages (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Optional seeds (align with existing mock job codes in frontend/miniapp)
-INSERT INTO jobs (job_code, title, department, jd_text)
+INSERT INTO projects (id, name, client, dept, manager, status)
 VALUES
-  ('J001', '前端开发工程师 (校招)', '大前端团队', '请补充 JD'),
-  ('J002', 'Java后端工程师 (校招)', '业务中台', '请补充 JD'),
-  ('J003', '高级前端架构师', '基础架构部', '请补充 JD')
+  ('P001', '2026春季核心研发招聘', '北京字节跳动科技有限公司', '华北交付中心', '李交付', '进行中')
 ON DUPLICATE KEY UPDATE
+  name = VALUES(name),
+  client = VALUES(client),
+  dept = VALUES(dept),
+  manager = VALUES(manager),
+  status = VALUES(status);
+
+INSERT INTO jobs (
+  project_id,
+  job_code,
+  title,
+  department,
+  jd_text,
+  demand,
+  location,
+  skills,
+  level,
+  salary,
+  recruiters
+)
+VALUES
+  (
+    'P001',
+    'J001',
+    '高级前端工程师',
+    '大前端团队',
+    '请补充 JD',
+    5,
+    '北京',
+    'React, TypeScript',
+    '高级',
+    '30k-50k',
+    JSON_ARRAY('赵招聘', '钱招聘')
+  ),
+  (
+    'P001',
+    'J002',
+    'Java架构师',
+    '业务中台',
+    '请补充 JD',
+    2,
+    '北京',
+    'Java, Spring Cloud',
+    '专家',
+    '50k-80k',
+    JSON_ARRAY('钱招聘')
+  ),
+  (
+    'P001',
+    'J003',
+    '高级前端架构师',
+    '基础架构部',
+    '请补充 JD',
+    1,
+    '北京',
+    '架构, 性能',
+    '专家',
+    '面议',
+    JSON_ARRAY()
+  )
+ON DUPLICATE KEY UPDATE
+  project_id = VALUES(project_id),
   title = VALUES(title),
-  department = VALUES(department);
+  department = VALUES(department),
+  demand = VALUES(demand),
+  location = VALUES(location),
+  skills = VALUES(skills),
+  level = VALUES(level),
+  salary = VALUES(salary),
+  recruiters = VALUES(recruiters);
