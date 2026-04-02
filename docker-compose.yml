@@ -14,7 +14,7 @@ x-app-build: &app-build
   context: .
   dockerfile: Dockerfile
   args:
-    VITE_API_BASE: ${PUBLIC_API_BASE:-http://localhost:3001}
+    VITE_API_BASE: ${PUBLIC_API_BASE:-http://localhost:3011}
     VITE_ADMIN_API_TOKEN: ${VITE_ADMIN_API_TOKEN_BUILD:-}
 
 services:
@@ -23,19 +23,19 @@ services:
     build: *app-build
     command: ["npx", "tsx", "server/index.ts"]
     ports:
-      - "${API_PORT:-3001}:3001"
+      - "${API_PORT:-3011}:3011"
     env_file:
       - .env
     environment:
       NODE_ENV: production
-      PORT: "3001"
+      PORT: "3011"
       HOST: "0.0.0.0"
     restart: unless-stopped
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "node -e \"require('http').get('http://127.0.0.1:3001/api/health',r=>{r.resume();process.exit(0);}).on('error',()=>process.exit(1))\""
+          "node -e \"require('http').get('http://127.0.0.1:3011/api/health',r=>{r.resume();process.exit(0);}).on('error',()=>process.exit(1))\""
         ]
       interval: 30s
       timeout: 10s
@@ -47,10 +47,10 @@ services:
     build: *app-build
     command: ["npx", "tsx", "server.ts"]
     ports:
-      - "${ADMIN_PORT:-3000}:3000"
+      - "${ADMIN_PORT:-3010}:3010"
     env_file:
       - .env
     environment:
       NODE_ENV: production
-      ADMIN_UI_PORT: "3000"
+      ADMIN_UI_PORT: "3010"
     restart: unless-stopped
