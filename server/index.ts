@@ -4,8 +4,11 @@ import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import { createRequire } from 'node:module'
-import mysql, { type ResultSetHeader } from 'mysql2/promise'
+import mysql, { type ResultSetHeader, type RowDataPacket } from 'mysql2/promise'
 import multer from 'multer'
+import Redis from 'ioredis'
+import { PDFParse } from 'pdf-parse'
+import mammoth from 'mammoth'
 
 const requireCjs = createRequire(import.meta.url)
 
@@ -41,6 +44,72 @@ const mysqlPool = mysql.createPool({
   connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 10),
   queueLimit: 0
 })
+
+/** 管理端演示库（HR users 等），与 MYSQL_DATABASE 业务库分离 */
+const mysqlAdminPool = mysql.createPool({
+  host: process.env.MYSQL_HOST || '127.0.0.1',
+  port: Number(process.env.MYSQL_PORT || 3306),
+  user: process.env.MYSQL_USER || 'root',
+  password: process.env.MYSQL_PASSWORD || '',
+  database: process.env.MYSQL_ADMIN_DATABASE || 'ai_recruit_admin',
+  waitForConnections: true,
+  connectionLimit: Math.min(5, Number(process.env.MYSQL_CONNECTION_LIMIT || 10)),
+  queueLimit: 0
+})
+
+const ADMIN_SESSION_KEY_PREFIX = String(process.env.REDIS_ADMIN_SESSION_PREFIX || 'ar:admin:sess:').trim() || 'ar:admin:sess:'
+
+let redisSingleton: Redis | null | undefined
+
+function adminRedisConfigured(): boolean {
+  return Boolean(String(process.env.REDIS_URL || '').trim() || String(process.env.REDIS_HOST || '').trim())
+}
+
+function getRedisClient(): Redis | null {
+  if (redisSingleton === null) return null
+  if (redisSingleton !== undefined) return redisSingleton
+  const url = String(process.env.REDIS_URL || '').trim()
+  const host = String(process.env.REDIS_HOST || '').trim()
+  if (!url && !host) {
+    redisSingleton = null
+    return null
+  }
+  try {
+    const baseOpts = { maxRetriesPerRequest: 2, enableReadyCheck: true }
+    const client =
+      url.length > 0
+        ? new Redis(url, baseOpts)
+        : new Redis(
+            {
+              host,
+              port: Number(process.env.REDIS_PORT || 6379),
+              password: process.env.REDIS_PASSWORD ? String(process.env.REDIS_PASSWORD) : undefined,
+              db: Number(process.env.REDIS_DB || 0),
+              ...baseOpts
+            },
+          )
+    client.on('error', (err) => {
+      console.error('[redis]', err.message)
+    })
+    redisSingleton = client
+    return client
+  } catch (e) {
+    console.error('[redis] init failed', e)
+    redisSingleton = null
+    return null
+  }
+}
+
+async function pingRedis(): Promise<boolean> {
+  if (!adminRedisConfigured()) return false
+  const r = getRedisClient()
+  if (!r) return false
+  try {
+    return (await r.ping()) === 'PONG'
+  } catch {
+    return false
+  }
+}
 
 function maskSecret(value: string, keepStart = 3, keepEnd = 2) {
   if (!value) return '(empty)'
@@ -368,11 +437,11 @@ function fallbackResumeScreening(resumeText: string, jdText: string, jobTitle: s
   return {
     candidateName,
     matchScore,
-    status: 'AI分析完成',
+    status: '关键词估算（未调用大模型）',
     summary:
-      `（未调用大模型或模型不可用：基于岗位 JD 关键词与简历文本重叠度的估算分，仅供参考。）\n` +
+      `（未调用大模型或调用失败：仅根据岗位 JD 与简历文本的关键词重叠度估算分数，仅供参考。）\n` +
       `目标岗位：${jobTitle || '—'}\n` +
-      `建议配置 DASHSCOPE_API_KEY 并检查额度后重试以获得结构化评估。`
+      `若要结构化 AI 评估：在根目录 .env.local 配置 DASHSCOPE_API_KEY（阿里云百炼），可选 QWEN_RESUME_MODEL，重启 npm run dev:api 后重新筛查。`
   }
 }
 
@@ -724,7 +793,11 @@ async function upsertSessionBase(params: {
 app.get('/api/health', async (_, res) => {
   try {
     await dbPing()
-    res.json({ ok: true, db: true })
+    const body: { ok: true; db: true; redis?: boolean } = { ok: true, db: true }
+    if (adminRedisConfigured()) {
+      body.redis = await pingRedis()
+    }
+    res.json(body)
   } catch {
     res.status(503).json({ ok: false, db: false })
   }
@@ -822,23 +895,269 @@ app.post('/api/user/bind-phone', (req, res) => {
     .catch(() => res.status(500).json({ message: 'bind phone failed' }))
 })
 
-function assertAdminToken(req: express.Request, res: express.Response): boolean {
-  const expected = String(process.env.ADMIN_API_TOKEN || '').trim()
-  if (!expected) {
-    res.status(503).json({ message: 'ADMIN_API_TOKEN not configured' })
+const ADMIN_SESSION_TTL_SEC = Number(process.env.ADMIN_SESSION_TTL_SEC || 60 * 60 * 24 * 7)
+
+function getAdminSessionSecret(): string {
+  return String(process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_API_TOKEN || '').trim()
+}
+
+/** 可签发 HMAC 无状态令牌（未配 Redis 时的回退） */
+function adminSessionSigningConfigured(): boolean {
+  return Boolean(getAdminSessionSecret())
+}
+
+/** 管理端登录会话可持久化：Redis 或 HMAC 密钥至少其一 */
+function adminSessionPersistenceConfigured(): boolean {
+  return adminRedisConfigured() || adminSessionSigningConfigured()
+}
+
+async function createAdminRedisSession(userId: string, username: string): Promise<string | null> {
+  if (!adminRedisConfigured()) return null
+  const r = getRedisClient()
+  if (!r) return null
+  const sid = crypto.randomBytes(24).toString('hex')
+  const key = `${ADMIN_SESSION_KEY_PREFIX}${sid}`
+  try {
+    await r.set(key, JSON.stringify({ uid: userId, u: username }), 'EX', ADMIN_SESSION_TTL_SEC)
+    return sid
+  } catch (e) {
+    console.error('[redis] set admin session failed', e)
+    return null
+  }
+}
+
+/** 与 HMAC 令牌区分：不含 `.`，为 Redis 中存的 session id */
+async function verifyAdminRedisSession(token: string): Promise<boolean> {
+  if (!token || token.includes('.')) return false
+  if (!adminRedisConfigured()) return false
+  const r = getRedisClient()
+  if (!r) return false
+  const key = `${ADMIN_SESSION_KEY_PREFIX}${token}`
+  try {
+    const v = await r.get(key)
+    return Boolean(v && v.length > 0)
+  } catch {
+    return false
+  }
+}
+
+/** 环境变量单账号密码登录（与库表登录二选一或并存） */
+function envAdminPasswordLoginConfigured(): boolean {
+  const u = String(process.env.ADMIN_USERNAME || '').trim()
+  const p = String(process.env.ADMIN_PASSWORD || '')
+  return Boolean(u && p && adminSessionPersistenceConfigured())
+}
+
+/** 与库表 password_hash 一致：salt 与 hex(scrypt) 以冒号拼接 */
+function verifyAdminPassword(password: string, stored: string): boolean {
+  const s = String(stored || '').trim()
+  if (!s) return false
+  const i = s.indexOf(':')
+  if (i <= 0) return false
+  const salt = s.slice(0, i)
+  const wantHex = s.slice(i + 1)
+  if (!salt || !wantHex || !/^[0-9a-f]+$/i.test(wantHex)) return false
+  try {
+    const gotHex = crypto.scryptSync(password, salt, 64).toString('hex')
+    const a = Buffer.from(wantHex, 'hex')
+    const b = Buffer.from(gotHex, 'hex')
+    if (a.length !== b.length) return false
+    return crypto.timingSafeEqual(a, b)
+  } catch {
+    return false
+  }
+}
+
+function signAdminSessionToken(userId: string, username: string): string | null {
+  const secret = getAdminSessionSecret()
+  if (!secret) return null
+  const exp = Math.floor(Date.now() / 1000) + ADMIN_SESSION_TTL_SEC
+  const payload = Buffer.from(JSON.stringify({ v: 2, uid: userId, u: username, exp }), 'utf8').toString('base64url')
+  const sig = crypto.createHmac('sha256', secret).update(payload).digest('base64url')
+  return `${payload}.${sig}`
+}
+
+/** 兼容旧版仅 env 登录签发的 v:1 令牌 */
+function signAdminSessionTokenLegacy(username: string): string | null {
+  const secret = getAdminSessionSecret()
+  if (!secret) return null
+  const exp = Math.floor(Date.now() / 1000) + ADMIN_SESSION_TTL_SEC
+  const payload = Buffer.from(JSON.stringify({ v: 1, u: username, exp }), 'utf8').toString('base64url')
+  const sig = crypto.createHmac('sha256', secret).update(payload).digest('base64url')
+  return `${payload}.${sig}`
+}
+
+function verifyAdminSessionToken(token: string): boolean {
+  const secret = getAdminSessionSecret()
+  if (!secret || !token) return false
+  const dot = token.lastIndexOf('.')
+  if (dot <= 0) return false
+  const payload = token.slice(0, dot)
+  const sig = token.slice(dot + 1)
+  const expectSig = crypto.createHmac('sha256', secret).update(payload).digest('base64url')
+  try {
+    const a = Buffer.from(expectSig, 'utf8')
+    const b = Buffer.from(sig, 'utf8')
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false
+  } catch {
+    return false
+  }
+  try {
+    const raw = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
+      v?: number
+      exp?: number
+      u?: string
+      uid?: string
+    }
+    if (typeof raw.exp !== 'number' || raw.exp < Math.floor(Date.now() / 1000)) return false
+    if (raw.v === 1 && typeof raw.u === 'string' && raw.u.length > 0) return true
+    if (raw.v === 2 && typeof raw.uid === 'string' && raw.uid.length > 0 && typeof raw.u === 'string') return true
+    return false
+  } catch {
+    return false
+  }
+}
+
+async function adminDbPasswordLoginAvailable(): Promise<boolean> {
+  if (!adminSessionPersistenceConfigured()) return false
+  try {
+    const [rows] = await mysqlAdminPool.query<RowDataPacket[]>(
+      'SELECT 1 AS ok FROM users WHERE password_hash IS NOT NULL AND TRIM(password_hash) <> ? LIMIT 1',
+      ['']
+    )
+    return Array.isArray(rows) && rows.length > 0
+  } catch {
+    return false
+  }
+}
+
+/** 公开：供管理前端判断是否展示登录框（无需鉴权） */
+app.get('/api/admin/auth-status', async (_req, res) => {
+  const dbPasswordLogin = await adminDbPasswordLoginAvailable()
+  res.json({
+    passwordLogin: envAdminPasswordLoginConfigured() || dbPasswordLogin,
+    dbPasswordLogin,
+    legacyToken: Boolean(String(process.env.ADMIN_API_TOKEN || '').trim())
+  })
+})
+
+/** 管理库 users.role（中文）→ 管理端界面 Role */
+function mapAdminDbRoleToUiRole(dbRole: string): 'admin' | 'delivery_manager' | 'recruiter' {
+  const r = String(dbRole || '').trim()
+  if (!r) return 'delivery_manager'
+  if (/平台管理员|系统管理|超级管理/i.test(r)) return 'admin'
+  if (/交付/i.test(r)) return 'delivery_manager'
+  if (/招聘/i.test(r)) return 'recruiter'
+  if (/管理/i.test(r)) return 'admin'
+  return 'delivery_manager'
+}
+
+/** 管理端登录：换会话令牌，浏览器可不再配置 VITE_ADMIN_API_TOKEN */
+app.post('/api/admin/login', async (req, res) => {
+  if (!adminSessionPersistenceConfigured()) {
+    return res.status(503).json({
+      message:
+        'admin session not configured: set REDIS_HOST or REDIS_URL for Redis sessions, or ADMIN_SESSION_SECRET (or ADMIN_API_TOKEN) for signed tokens'
+    })
+  }
+  const username = String(req.body?.username || '').trim()
+  const password = String(req.body?.password ?? '')
+  if (!username || !password) {
+    return res.status(400).json({ message: 'username and password required' })
+  }
+
+  try {
+    const [rows] = await mysqlAdminPool.query<RowDataPacket[]>(
+      'SELECT id, username, name, role, password_hash, status FROM users WHERE username = ? LIMIT 1',
+      [username]
+    )
+    const row = rows[0] as {
+      id?: string
+      username?: string | null
+      name?: string | null
+      role?: string | null
+      password_hash?: string | null
+      status?: string | null
+    } | undefined
+    if (row && String(row.password_hash || '').trim()) {
+      if (!verifyAdminPassword(password, String(row.password_hash))) {
+        return res.status(401).json({ message: 'invalid credentials' })
+      }
+      const st = String(row.status ?? '').trim()
+      if (st && st !== '正常') {
+        return res.status(403).json({ message: 'account disabled' })
+      }
+      const uid = String(row.id || '').trim()
+      const un = String(row.username || username).trim()
+      const displayName = String(row.name || un).trim() || un
+      const uiRole = mapAdminDbRoleToUiRole(String(row.role || ''))
+      const userPayload = { name: displayName, username: un, uiRole }
+      const redisTok = await createAdminRedisSession(uid || un, un)
+      if (redisTok) {
+        return res.json({ data: { token: redisTok, expiresInSec: ADMIN_SESSION_TTL_SEC, user: userPayload } })
+      }
+      if (!adminSessionSigningConfigured()) {
+        return res.status(503).json({ message: 'Redis session unavailable and no ADMIN_SESSION_SECRET for token fallback' })
+      }
+      const token = signAdminSessionToken(uid || un, un)
+      if (!token) return res.status(500).json({ message: 'session sign failed' })
+      return res.json({ data: { token, expiresInSec: ADMIN_SESSION_TTL_SEC, user: userPayload } })
+    }
+  } catch {
+    // 表或列不存在时走环境变量账号
+  }
+
+  if (!envAdminPasswordLoginConfigured()) {
+    return res.status(401).json({
+      message:
+        'invalid credentials（请确认管理库 users.username / password_hash；若未使用库表登录可配置 ADMIN_USERNAME + ADMIN_PASSWORD）'
+    })
+  }
+  const eu = String(process.env.ADMIN_USERNAME || '').trim()
+  const ep = String(process.env.ADMIN_PASSWORD || '')
+  if (username !== eu || password !== ep) {
+    return res.status(401).json({ message: 'invalid credentials' })
+  }
+  const envUser = { name: '环境账号', username: eu, uiRole: 'admin' as const }
+  const redisTok = await createAdminRedisSession(eu, eu)
+  if (redisTok) {
+    return res.json({ data: { token: redisTok, expiresInSec: ADMIN_SESSION_TTL_SEC, user: envUser } })
+  }
+  if (!adminSessionSigningConfigured()) {
+    return res.status(503).json({ message: 'Redis session unavailable and no ADMIN_SESSION_SECRET for token fallback' })
+  }
+  const token = signAdminSessionTokenLegacy(username)
+  if (!token) return res.status(500).json({ message: 'session sign failed' })
+  res.json({ data: { token, expiresInSec: ADMIN_SESSION_TTL_SEC, user: envUser } })
+})
+
+async function assertAdminToken(req: express.Request, res: express.Response): Promise<boolean> {
+  const legacy = String(process.env.ADMIN_API_TOKEN || '').trim()
+  if (!legacy && !adminSessionPersistenceConfigured()) {
+    res.status(503).json({
+      message:
+        'Admin auth not configured: set ADMIN_API_TOKEN, or REDIS_* for sessions, or ADMIN_SESSION_SECRET for signed sessions'
+    })
     return false
   }
   const auth = String(req.headers.authorization || '')
   const bearer = auth.startsWith('Bearer ') ? auth.slice(7).trim() : ''
   const headerToken = String(req.headers['x-admin-token'] || '').trim()
-  if (bearer === expected || headerToken === expected) return true
+  const token = bearer || headerToken
+  if (!token) {
+    res.status(401).json({ message: 'unauthorized' })
+    return false
+  }
+  if (legacy && token === legacy) return true
+  if (token.includes('.') && verifyAdminSessionToken(token)) return true
+  if (await verifyAdminRedisSession(token)) return true
   res.status(401).json({ message: 'unauthorized' })
   return false
 }
 
 // MVP 管理接口：用手机号标注面试官（需 ADMIN_API_TOKEN）
-app.post('/api/admin/interviewer/mark-phone', (req, res) => {
-  if (!assertAdminToken(req, res)) return
+app.post('/api/admin/interviewer/mark-phone', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
   const raw = String(req.body?.phone || '').trim()
   const phone = normalizePhoneForMatch(raw)
   if (!phone) return res.status(400).json({ message: 'phone required' })
@@ -897,7 +1216,7 @@ function recruitersFromRow(raw: unknown): string[] {
 
 /** HR 后台：岗位列表（与小程序 / 会话共用 jobs 表） */
 app.get('/api/admin/jobs', async (req, res) => {
-  if (!assertAdminToken(req, res)) return
+  if (!(await assertAdminToken(req, res))) return
   try {
     const [rows] = await mysqlPool.query<any[]>(
       `SELECT id, project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters
@@ -915,7 +1234,7 @@ app.get('/api/admin/jobs', async (req, res) => {
 })
 
 app.post('/api/admin/jobs', async (req, res) => {
-  if (!assertAdminToken(req, res)) return
+  if (!(await assertAdminToken(req, res))) return
   const title = String(req.body?.title || '').trim()
   let jobCode = String(req.body?.jobCode || '').trim().toUpperCase()
   if (!title) return res.status(400).json({ message: 'title required' })
@@ -965,7 +1284,7 @@ app.post('/api/admin/jobs', async (req, res) => {
 })
 
 app.patch('/api/admin/jobs/:jobCode', async (req, res) => {
-  if (!assertAdminToken(req, res)) return
+  if (!(await assertAdminToken(req, res))) return
   const jobCode = String(req.params.jobCode || '').trim().toUpperCase()
   if (!jobCode) return res.status(400).json({ message: 'jobCode required' })
   const title = req.body?.title !== undefined ? String(req.body.title).trim() : null
@@ -1050,7 +1369,7 @@ app.patch('/api/admin/jobs/:jobCode', async (req, res) => {
 })
 
 app.get('/api/admin/resume-screenings', async (req, res) => {
-  if (!assertAdminToken(req, res)) return
+  if (!(await assertAdminToken(req, res))) return
   try {
     const [rows] = await mysqlPool.query<any[]>(
       `SELECT id, job_code, candidate_name, matched_job_title, match_score, status, report_summary, file_name, created_at
@@ -1070,7 +1389,7 @@ app.post(
   '/api/admin/resume-screen',
   uploadResumeMemory.single('file'),
   async (req, res) => {
-    if (!assertAdminToken(req, res)) return
+    if (!(await assertAdminToken(req, res))) return
     const jobCode = String(req.body?.jobCode || '').trim().toUpperCase()
     if (!jobCode) return res.status(400).json({ message: 'jobCode required' })
     if (!req.file?.buffer?.length) return res.status(400).json({ message: 'file required' })
@@ -1098,8 +1417,14 @@ app.post(
           department: String(job.department || ''),
           jdText: String(job.jd_text || '')
         })
+        if (!ai && flowLogEnabled) {
+          flowLog('resume-screen', false, '未配置 DASHSCOPE_API_KEY 或大模型返回空，使用关键词回退')
+        }
         result = ai || fallbackResumeScreening(plain, String(job.jd_text || ''), String(job.title || ''))
-      } catch {
+      } catch (aiErr) {
+        const msg = aiErr instanceof Error ? aiErr.message : String(aiErr)
+        if (flowLogEnabled) flowLog('resume-screen AI 失败', false, msg)
+        else console.warn('[resume-screen] 大模型调用失败，使用关键词回退:', msg)
         result = fallbackResumeScreening(plain, String(job.jd_text || ''), String(job.title || ''))
       }
 
@@ -1145,7 +1470,7 @@ function generateUniqueInviteCode(): string {
 
 /** HR：为某岗位生成一条待处理面试邀请（写入 interview_invitations，候选人可在小程序「邀请」列表或登录页输入 INV… 码） */
 app.post('/api/admin/invitations', async (req, res) => {
-  if (!assertAdminToken(req, res)) return
+  if (!(await assertAdminToken(req, res))) return
   const jobCode = String(req.body?.jobCode || '').trim().toUpperCase()
   if (!jobCode) return res.status(400).json({ message: 'jobCode required' })
   const rawDays = Number(req.body?.expiresInDays)
@@ -1180,7 +1505,7 @@ app.post('/api/admin/invitations', async (req, res) => {
 
 /** 面试官会话列表，供 HR 后台展示「候选人」行 */
 app.get('/api/admin/sessions', async (req, res) => {
-  if (!assertAdminToken(req, res)) return
+  if (!(await assertAdminToken(req, res))) return
   try {
     const [rows] = await mysqlPool.query<any[]>(
       `SELECT s.session_id AS sessionId, s.updated_at AS updatedAt,
@@ -1199,7 +1524,7 @@ app.get('/api/admin/sessions', async (req, res) => {
 })
 
 app.get('/api/admin/session-report', async (req, res) => {
-  if (!assertAdminToken(req, res)) return
+  if (!(await assertAdminToken(req, res))) return
   const sessionId = String(req.query.sessionId || '').trim()
   if (!sessionId) return res.status(400).json({ message: 'sessionId required' })
   try {

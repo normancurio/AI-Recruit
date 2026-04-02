@@ -2,7 +2,7 @@
 #
 # 首次构建（PUBLIC_API_BASE 填浏览器可访问的 API 根 URL，含协议与端口）：
 #   export PUBLIC_API_BASE=https://api.example.com
-#   export VITE_ADMIN_API_TOKEN_BUILD=与下面 .env 中 ADMIN_API_TOKEN 相同
+# 可选：export VITE_ADMIN_API_TOKEN_BUILD=与 ADMIN_API_TOKEN 相同（不配则管理端用登录页换 token）
 #   docker compose build
 #
 # 服务器上放置 .env（从 .env.example 复制并填写 MYSQL_*、WECHAT_*、ADMIN_API_TOKEN 等），然后：

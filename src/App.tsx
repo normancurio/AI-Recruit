@@ -1,5 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import {
+  getAdminApiTokenForMiniapp,
+  getAdminLoginProfile,
+  hasAdminApiCredentials,
+  logoutAdminMiniappAuth,
+  setAdminLoginProfile,
+  setAdminSessionToken,
+  subscribeAdminSession,
+  type AdminLoginProfile
+} from './adminSession';
 import { 
   Building2, Briefcase, Users, FileText, UserCheck, 
   Settings, Network, UserCog, Shield, Menu as MenuIcon,
@@ -8,8 +18,43 @@ import {
   LogOut, Bell, LayoutDashboard, Send
 } from 'lucide-react';
 
+/**
+ * 小程序 API 根地址。未配 VITE_API_BASE 时：在 localhost / 127.0.0.1 打开管理端则默认同主机 :3001（不依赖 import.meta.env.DEV，避免 Vite middleware 模式下 DEV 异常导致基址为空）。
+ */
+function resolveMiniappApiBase(): string {
+  const v = (import.meta.env.VITE_API_BASE || '').trim()
+  if (v) return v
+  if (typeof window !== 'undefined') {
+    const { protocol, hostname } = window.location
+    const local =
+      hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1'
+    if (local) {
+      const h = hostname === '[::1]' || hostname === '::1' ? '[::1]' : hostname
+      return `${protocol}//${h}:3001`
+    }
+  }
+  if (import.meta.env.DEV || import.meta.env.MODE === 'development') {
+    return 'http://127.0.0.1:3001'
+  }
+  return ''
+}
+
 // --- Types ---
 type Role = 'admin' | 'delivery_manager' | 'recruiter';
+
+/** 登录身份允许切换的视角（平台管理员可预览下级角色；招聘人员仅本人视角） */
+function allowedPerspectiveRoles(loginRole: Role | null): Role[] {
+  if (loginRole == null) return ['admin', 'delivery_manager', 'recruiter']
+  if (loginRole === 'admin') return ['admin', 'delivery_manager', 'recruiter']
+  if (loginRole === 'delivery_manager') return ['delivery_manager', 'recruiter']
+  return ['recruiter']
+}
+
+function roleFallbackLabel(r: Role): string {
+  if (r === 'admin') return '管理员'
+  if (r === 'delivery_manager') return '交付经理'
+  return '招聘人员'
+}
 
 export interface Client { id: string; name: string; creditCode: string; industry: string; contact: string; phone: string; }
 export interface Job { id: string; project_id: string; title: string; demand: number; location: string; skills: string; level: string; salary: string; recruiters: string[]; jdText?: string; }
@@ -33,9 +78,92 @@ export interface Menu { id: string; name: string; type: string; icon: string; pa
 // --- Components ---
 
 export default function App() {
-  const [currentRole, setCurrentRole] = useState<Role>('delivery_manager');
+  const [authTick, setAuthTick] = useState(0);
+  useEffect(() => subscribeAdminSession(() => setAuthTick((n) => n + 1)), []);
+  const miniappApiBase = resolveMiniappApiBase();
+  /** 服务端是否声明支持密码登录（仅用于提示；不阻塞登录层显示，避免 auth-status 失败或慢请求导致永远不出现登录框） */
+  const [hrApiPasswordLogin, setHrApiPasswordLogin] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!miniappApiBase) {
+      setHrApiPasswordLogin(null);
+      return;
+    }
+    const base = miniappApiBase.replace(/\/$/, '');
+    void fetch(`${base}/api/admin/auth-status`)
+      .then(async (r) => {
+        if (!r.ok) throw new Error(String(r.status))
+        return r.json() as Promise<{ passwordLogin?: boolean }>
+      })
+      .then((j) => setHrApiPasswordLogin(Boolean(j.passwordLogin)))
+      .catch(() => setHrApiPasswordLogin(null));
+  }, [miniappApiBase]);
+  const showHrApiLogin = Boolean(miniappApiBase) && !hasAdminApiCredentials();
+  const [loginUser, setLoginUser] = useState('');
+  const [loginPass, setLoginPass] = useState('');
+  const [loginErr, setLoginErr] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
+
+  const [currentRole, setCurrentRole] = useState<Role>(() => getAdminLoginProfile()?.uiRole ?? 'delivery_manager');
+  const [authProfile, setAuthProfile] = useState<AdminLoginProfile | null>(() => getAdminLoginProfile());
+  /** 仅在「登录身份」变化时把视角对齐到本人职级，避免默认 delivery_manager 卡在交付经理且手动选平台管理员后被逻辑盖回 */
+  const lastSyncedProfileKeyRef = useRef<string>('');
+  useEffect(() => {
+    setAuthProfile(getAdminLoginProfile());
+    const p = getAdminLoginProfile();
+    if (!p) {
+      lastSyncedProfileKeyRef.current = '';
+      setCurrentRole('delivery_manager');
+      return;
+    }
+    const allowed = allowedPerspectiveRoles(p.uiRole);
+    const profileKey = `${p.username}\t${p.uiRole}`;
+    if (lastSyncedProfileKeyRef.current !== profileKey) {
+      lastSyncedProfileKeyRef.current = profileKey;
+      setCurrentRole(p.uiRole);
+      return;
+    }
+    setCurrentRole((prev) => (allowed.includes(prev) ? prev : p.uiRole));
+  }, [authTick]);
+  const perspectiveOpts = allowedPerspectiveRoles(authProfile?.uiRole ?? null);
   const [activeMenu, setActiveMenu] = useState('clients');
   const [expandedMenus, setExpandedMenus] = useState<string[]>(['projects', 'recruitment', 'system']);
+
+  const submitHrLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginErr('');
+    setLoginLoading(true);
+    try {
+      const base = miniappApiBase.replace(/\/$/, '');
+      const r = await fetch(`${base}/api/admin/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: loginUser.trim(), password: loginPass })
+      });
+      const j = (await r.json().catch(() => ({}))) as {
+        message?: string
+        data?: { token?: string; user?: AdminLoginProfile }
+      };
+      if (!r.ok) throw new Error(j.message || `登录失败 ${r.status}`);
+      const token = j.data?.token;
+      if (!token) throw new Error('未返回 token');
+      setAdminSessionToken(token);
+      const u = j.data?.user;
+      if (u?.uiRole && u.username) {
+        setAdminLoginProfile({
+          name: String(u.name || u.username),
+          username: String(u.username),
+          uiRole: u.uiRole
+        });
+      } else {
+        setAdminLoginProfile(null);
+      }
+      setLoginPass('');
+    } catch (err) {
+      setLoginErr(err instanceof Error ? err.message : '登录失败');
+    } finally {
+      setLoginLoading(false);
+    }
+  };
 
   const toggleMenu = (menu: string) => {
     setExpandedMenus(prev => prev.includes(menu) ? prev.filter(m => m !== menu) : [...prev, menu]);
@@ -109,7 +237,60 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex">
+    <>
+      {showHrApiLogin ? (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/65 p-4">
+          <form
+            onSubmit={submitHrLogin}
+            className="bg-white rounded-xl shadow-xl border border-slate-200 p-8 w-full max-w-md space-y-4"
+          >
+            <h2 className="text-xl font-bold text-slate-900">管理端登录</h2>
+            <p className="text-sm text-slate-600 leading-relaxed">
+              使用管理库 <code className="text-xs bg-slate-100 px-1 rounded">users</code> 表中的{' '}
+              <code className="text-xs bg-slate-100 px-1 rounded">username</code> 与口令（对应{' '}
+              <code className="text-xs bg-slate-100 px-1 rounded">password_hash</code>
+              ）登录，即可调用招聘 API。若已在构建时写入{' '}
+              <code className="text-xs bg-slate-100 px-1 rounded">VITE_ADMIN_API_TOKEN</code>，则无需登录。
+            </p>
+            <div>
+              <label className="block text-xs font-medium text-slate-500 mb-1">用户名</label>
+              <input
+                value={loginUser}
+                onChange={(e) => setLoginUser(e.target.value)}
+                autoComplete="username"
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+                placeholder="users.username，例如 admin"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-500 mb-1">密码</label>
+              <input
+                type="password"
+                value={loginPass}
+                onChange={(e) => setLoginPass(e.target.value)}
+                autoComplete="current-password"
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+                placeholder="与 password_hash 对应的明文口令"
+              />
+            </div>
+            {loginErr ? <p className="text-sm text-red-600">{loginErr}</p> : null}
+            {hrApiPasswordLogin === false ? (
+              <p className="text-sm text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                服务端提示当前未开启密码登录。请确认已运行 <code className="text-xs">npm run dev:api</code>，并配置 Redis
+                或会话密钥与管理库 <code className="text-xs">password_hash</code>。
+              </p>
+            ) : null}
+            <button
+              type="submit"
+              disabled={loginLoading}
+              className="w-full bg-indigo-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:opacity-60"
+            >
+              {loginLoading ? '登录中…' : '登录'}
+            </button>
+          </form>
+        </div>
+      ) : null}
+      <div className="min-h-screen bg-slate-50 flex">
       {/* Sidebar */}
       <aside className="w-64 bg-slate-900 text-slate-300 flex flex-col shadow-xl z-20">
         <div className="h-16 flex items-center px-6 border-b border-slate-800 bg-slate-950">
@@ -183,21 +364,42 @@ export default function App() {
           </div>
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-2">
-              <span className="text-sm text-slate-500">当前视角模拟:</span>
-              <select 
-                value={currentRole}
+              <span className="text-sm text-slate-500">
+                {authProfile ? '视角切换（不高于本人职级）' : '当前视角模拟'}
+                :
+              </span>
+              <select
+                value={perspectiveOpts.includes(currentRole) ? currentRole : perspectiveOpts[0]}
                 onChange={(e) => {
-                  setCurrentRole(e.target.value as Role);
-                  setActiveMenu(e.target.value === 'recruiter' ? 'job-query' : 'clients');
+                  const next = e.target.value as Role;
+                  if (!perspectiveOpts.includes(next)) return;
+                  setCurrentRole(next);
+                  setActiveMenu(next === 'recruiter' ? 'job-query' : 'clients');
                 }}
                 className="bg-slate-100 border-none text-sm font-medium rounded-md py-1.5 px-3 focus:ring-2 focus:ring-indigo-500 cursor-pointer"
               >
-                <option value="admin">平台管理员 (全权限)</option>
-                <option value="delivery_manager">交付经理 (客户/项目)</option>
-                <option value="recruiter">招聘人员 (岗位/简历/应聘)</option>
+                {perspectiveOpts.includes('admin') ? (
+                  <option value="admin">平台管理员 (全权限)</option>
+                ) : null}
+                {perspectiveOpts.includes('delivery_manager') ? (
+                  <option value="delivery_manager">交付经理 (客户/项目)</option>
+                ) : null}
+                {perspectiveOpts.includes('recruiter') ? (
+                  <option value="recruiter">招聘人员 (岗位/简历/应聘)</option>
+                ) : null}
               </select>
             </div>
             <div className="w-px h-6 bg-slate-200"></div>
+            {authTick >= 0 && miniappApiBase && hasAdminApiCredentials() ? (
+              <button
+                type="button"
+                onClick={() => logoutAdminMiniappAuth()}
+                className="text-sm text-slate-600 hover:text-slate-900 flex items-center gap-1.5"
+              >
+                <LogOut className="w-4 h-4" />
+                退出登录
+              </button>
+            ) : null}
             <button className="text-slate-400 hover:text-slate-600 relative">
               <Bell className="w-5 h-5" />
               <span className="absolute top-0 right-0 w-2 h-2 bg-red-500 rounded-full border-2 border-white"></span>
@@ -207,7 +409,7 @@ export default function App() {
                 {currentRole === 'admin' ? 'A' : currentRole === 'delivery_manager' ? 'D' : 'R'}
               </div>
               <span className="text-sm font-medium text-slate-700">
-                {currentRole === 'admin' ? '管理员' : currentRole === 'delivery_manager' ? '李交付' : '赵招聘'}
+                {authProfile?.name ?? roleFallbackLabel(currentRole)}
               </span>
             </div>
           </div>
@@ -227,6 +429,7 @@ export default function App() {
         </div>
       </main>
     </div>
+    </>
   );
 }
 
@@ -380,8 +583,8 @@ function ProjectManagementView({ role }: { role: Role }) {
 }
 
 function miniappApiFetch(path: string, init?: RequestInit) {
-  const base = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
-  const token = import.meta.env.VITE_ADMIN_API_TOKEN || '';
+  const base = resolveMiniappApiBase().replace(/\/$/, '');
+  const token = getAdminApiTokenForMiniapp();
   const url = base ? `${base}${path}` : path;
   const h = new Headers(init?.headers);
   if (token) {
@@ -540,8 +743,11 @@ function mapScreeningRow(r: {
 
 function ResumeScreeningView() {
   const [resumes, setResumes] = useState<Resume[]>([]);
-  const apiBase = (import.meta.env.VITE_API_BASE || '').trim();
-  const hasToken = Boolean(import.meta.env.VITE_ADMIN_API_TOKEN?.trim());
+  const [sessRev, setSessRev] = useState(0);
+  useEffect(() => subscribeAdminSession(() => setSessRev((n) => n + 1)), []);
+  const apiBase = resolveMiniappApiBase();
+  const hasToken = hasAdminApiCredentials();
+  void sessRev;
   const [inviteJobs, setInviteJobs] = useState<{ job_code: string; title: string; department: string }[]>([]);
   const [inviteJobsLoading, setInviteJobsLoading] = useState(false);
   const [creatingInvite, setCreatingInvite] = useState<string | null>(null);
@@ -579,9 +785,9 @@ function ResumeScreeningView() {
       })
       .catch(() => {
         setResumes([]);
-        setScreenListError('筛查记录加载失败：请执行 server/migration_resume_screenings.sql，并确认 API 与 ADMIN_API_TOKEN 正常。');
+        setScreenListError('筛查记录加载失败：请执行 server/migration_resume_screenings.sql，并确认 API 与登录或 ADMIN_API_TOKEN 正常。');
       });
-  }, [apiBase, hasToken]);
+  }, [apiBase, hasToken, sessRev]);
 
   useEffect(() => {
     loadScreenings();
@@ -589,7 +795,9 @@ function ResumeScreeningView() {
 
   useEffect(() => {
     if (!apiBase || !hasToken) {
-      setInviteBanner('未配置小程序 API：请在根目录 .env.local 设置 VITE_API_BASE=http://localhost:3001 与 VITE_ADMIN_API_TOKEN（与 ADMIN_API_TOKEN 相同），并同时运行 npm run dev:api。');
+      setInviteBanner(
+        '未就绪：请设置 VITE_API_BASE 并运行小程序 API；再登录管理账号（或配置 VITE_ADMIN_API_TOKEN）。'
+      );
       return;
     }
     setInviteJobsLoading(true);
@@ -600,9 +808,11 @@ function ResumeScreeningView() {
         return r.json() as Promise<{ data: { job_code: string; title: string; department: string }[] }>;
       })
       .then((d) => setInviteJobs(d.data || []))
-      .catch(() => setInviteBanner('加载岗位失败：请确认小程序 API 已启动且 ADMIN_API_TOKEN 正确。'))
+      .catch(() =>
+        setInviteBanner('加载岗位失败：请确认小程序 API 已启动，且已登录或 VITE_ADMIN_API_TOKEN 正确。')
+      )
       .finally(() => setInviteJobsLoading(false));
-  }, [apiBase, hasToken]);
+  }, [apiBase, hasToken, sessRev]);
 
   useEffect(() => {
     if (inviteJobs.length === 0) return;
@@ -833,7 +1043,9 @@ function ResumeScreeningView() {
                 <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">{screenListError}</div>
               ) : null}
               {!apiBase || !hasToken ? (
-                <p className="text-sm text-slate-500">配置 VITE_API_BASE 与 VITE_ADMIN_API_TOKEN 后，此处展示已上传简历的 AI 筛查记录。</p>
+                <p className="text-sm text-slate-500">
+                  配置 VITE_API_BASE 并登录管理账号（或配置 VITE_ADMIN_API_TOKEN）后，此处展示已上传简历的 AI 筛查记录。
+                </p>
               ) : null}
               {apiBase && hasToken && resumes.length === 0 ? (
                 <p className="text-sm text-slate-500">暂无筛查记录。请从左侧上传简历，或确认已执行 server/migration_resume_screenings.sql。</p>

@@ -70,7 +70,9 @@ CREATE TABLE IF NOT EXISTS users (
   username VARCHAR(64),
   dept VARCHAR(128),
   role VARCHAR(64),
-  status VARCHAR(32)
+  status VARCHAR(32),
+  password_hash VARCHAR(255) NULL,
+  UNIQUE KEY uk_users_username (username)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS roles (
@@ -155,10 +157,10 @@ ON DUPLICATE KEY UPDATE
   manager = VALUES(manager),
   count = VALUES(count);
 
-INSERT INTO users (id, name, username, dept, role, status) VALUES
-  ('U1', '系统管理员', 'admin', '集团总部', '平台管理员', '正常'),
-  ('U2', '李交付', 'li.jiaofu', '华北交付中心', '交付经理', '正常'),
-  ('U3', '赵招聘', 'zhao.zhaopin', '研发一部', '招聘人员', '正常')
+INSERT INTO users (id, name, username, dept, role, status, password_hash) VALUES
+  ('U1', '系统管理员', 'admin', '集团总部', '平台管理员', '正常', 'ai_recruit_init_123456:3fc16a3cd232ec694f1ef13bc3d0a0abe0e13c9ff3775fc5ef01ba7a94f3874266a1daff39ffcd9620bdce13f84e85c6379a1be51b34c1aca2b8244cb894fa5c'),
+  ('U2', '李交付', 'li.jiaofu', '华北交付中心', '交付经理', '正常', 'ai_recruit_init_123456:3fc16a3cd232ec694f1ef13bc3d0a0abe0e13c9ff3775fc5ef01ba7a94f3874266a1daff39ffcd9620bdce13f84e85c6379a1be51b34c1aca2b8244cb894fa5c'),
+  ('U3', '赵招聘', 'zhao.zhaopin', '研发一部', '招聘人员', '正常', 'ai_recruit_init_123456:3fc16a3cd232ec694f1ef13bc3d0a0abe0e13c9ff3775fc5ef01ba7a94f3874266a1daff39ffcd9620bdce13f84e85c6379a1be51b34c1aca2b8244cb894fa5c')
 ON DUPLICATE KEY UPDATE
   name = VALUES(name),
   username = VALUES(username),
