@@ -45,7 +45,6 @@ export default function InterviewPage() {
   const [sessionId, setSessionId] = useState('')
   const [transcribing, setTranscribing] = useState(false)
   const [showAnswerTranscript, setShowAnswerTranscript] = useState(false)
-  const [, setTranscriptTip] = useState('进入后将使用 WechatSI 实时转写')
   /** 通话场景顶部状态：读题 / 作答 */
   const [callStatusLine, setCallStatusLine] = useState('正在连接…')
   const [initError, setInitError] = useState('')
@@ -77,7 +76,6 @@ export default function InterviewPage() {
   const pendingRestartSidRef = useRef<string | null>(null)
   const forceRestartFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const answerPhaseGateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const openRecognitionRef = useRef<(sid: string) => void>(() => {})
   /** 切题时丢弃上题最后一个 onStop 尾包，避免写回到下一题 */
   const dropNextOnStopResultRef = useRef(false)
   /** 切题或首题：转写 stop 完成后先播题目 TTS 再 openRecognition */
@@ -92,6 +90,14 @@ export default function InterviewPage() {
    */
   const answerTranscriptOpenRef = useRef(false)
   const questionInnerAudioRef = useRef<ReturnType<typeof Taro.createInnerAudioContext> | null>(null)
+  const closeAnswerTranscriptDisplay = useCallback(() => {
+    answerTranscriptOpenRef.current = false
+    setShowAnswerTranscript(false)
+    if (answerPhaseGateTimerRef.current) {
+      clearTimeout(answerPhaseGateTimerRef.current)
+      answerPhaseGateTimerRef.current = null
+    }
+  }, [])
 
   const stopSegmentedAsr = useCallback(() => {
     pendingRestartSidRef.current = null
@@ -254,8 +260,7 @@ export default function InterviewPage() {
 
   useDidHide(() => {
     visibleRef.current = false
-    answerTranscriptOpenRef.current = false
-    setShowAnswerTranscript(false)
+    closeAnswerTranscriptDisplay()
     pendingRestartSidRef.current = null
     pendingTtsAfterStopRef.current = null
     if (forceRestartFallbackTimerRef.current) {
@@ -329,18 +334,20 @@ export default function InterviewPage() {
         const plugin = requirePluginFn('WechatSI')
         const manager = plugin.getRecordRecognitionManager()
         recordManagerRef.current = manager
-        answerTranscriptOpenRef.current = false
-        setShowAnswerTranscript(false)
+        closeAnswerTranscriptDisplay()
         if (answerPhaseGateTimerRef.current) {
           clearTimeout(answerPhaseGateTimerRef.current)
           answerPhaseGateTimerRef.current = null
         }
         flowLogInfo('WechatSI', 'recordRecognitionManager 已创建，开始录音')
         manager.onRecognize = (res: { result?: string }) => {
-          if (!answerTranscriptOpenRef.current) return
-          if (questionTtsPlayingRef.current) return
-          if (Date.now() < ignoreRecognizeBeforeTsRef.current) return
           const text = res?.result || ''
+          if (questionTtsPlayingRef.current) {
+            flowLogInfo('WechatSI onRecognize', 'TTS 播放中，丢弃转写结果')
+            return
+          }
+          if (Date.now() < ignoreRecognizeBeforeTsRef.current) return
+          if (!answerTranscriptOpenRef.current) return
           if (shouldDropQuestionEcho(text)) {
             flowLogInfo('WechatSI onRecognize', '命中题目回声过滤')
             return
@@ -362,6 +369,12 @@ export default function InterviewPage() {
             return
           }
           const text = res?.result || ''
+          if (questionTtsPlayingRef.current) {
+            flowLogInfo('WechatSI onStop', 'TTS 播放中 onStop，忽略尾包')
+            setTranscriptStreaming('')
+            setTranscribing(false)
+            return
+          }
           if (pendingRestartSidRef.current) {
             clearForceRestartTimer()
             pendingRestartSidRef.current = null
@@ -412,7 +425,6 @@ export default function InterviewPage() {
             questionCountRef.current > 0 &&
             questionIndexRef.current < questionCountRef.current - 1
           if (canAutoRestart) {
-            setTranscriptTip('转写短暂停止，正在自动重启…')
             setTimeout(() => {
               if (
                 visibleRef.current &&
@@ -422,11 +434,9 @@ export default function InterviewPage() {
                 questionIndexRef.current < questionCountRef.current - 1
               ) {
                 flowLogInfo('WechatSI', 'onStop 后自动重启')
-                openRecognitionRef.current?.(sidInner)
+                openRecognition(sidInner)
               }
             }, 220)
-          } else {
-            setTranscriptTip('转写已停止')
           }
         }
         manager.onError = (err: unknown) => {
@@ -450,12 +460,12 @@ export default function InterviewPage() {
             /please wait recognition finished/i.test(msg) || /recognition finished/i.test(msg)
             ? '上一段识别尚未结束，请稍候再试；若刚切换题目，请稍等一秒。'
             : '转写不可用：请检查麦克风权限、插件配置，或改手动输入'
-          setTranscriptTip(friendly)
+          flowLogInfo('WechatSI', friendly)
         }
         const startOpts = { lang: 'zh_CN', duration: 60000 }
         manager.start(startOpts)
-        // 最硬隔离：转写启动后先冷却一段时间，再开放写入，彻底避开首题播报残音。
-        const gateDelayMs = 2600
+        // 极短冷却：读题结束后主要靠 questionTtsPlayingRef + 短 ignore 窗防回声，避免“慢半拍”。
+        const gateDelayMs = 220
         answerTranscriptOpenRef.current = false
         answerPhaseGateTimerRef.current = setTimeout(() => {
           answerPhaseGateTimerRef.current = null
@@ -467,31 +477,45 @@ export default function InterviewPage() {
         setTranscribing(true)
         suppressAutoRestartRef.current = false
         flowLog('WechatSI start', true, `lang=${startOpts.lang} duration=${startOpts.duration}`)
-        setTranscriptTip('WechatSI 同声转写进行中…')
       } catch (e) {
         answerTranscriptOpenRef.current = false
         suppressAutoRestartRef.current = false
         flowLog('WechatSI start', false, e instanceof Error ? e.message : 'plugin unavailable')
-        setTranscriptTip('未配置 WechatSI 插件，请手动输入')
       }
+    }
+
+    /** 读题结束：若识别已在跑则只重新“开门”，避免重复 start；否则走 openRecognition。 */
+    const resumeAnswerAfterQuestionTts = (sidInner: string) => {
+      if (!visibleRef.current) return
+      setCallStatusLine('请口述您的回答')
+      if (!transcribingRef.current) {
+        openRecognition(sidInner)
+        return
+      }
+      if (answerPhaseGateTimerRef.current) {
+        clearTimeout(answerPhaseGateTimerRef.current)
+        answerPhaseGateTimerRef.current = null
+      }
+      answerTranscriptOpenRef.current = true
+      setShowAnswerTranscript(true)
     }
 
     const playTtsThenResume = (sidInner: string, ttsRaw: string) => {
       if (!requirePluginFn) {
         questionTtsPlayingRef.current = false
-        answerTranscriptOpenRef.current = false
-        setShowAnswerTranscript(false)
         setCallStatusLine('请口述您的回答')
-        openRecognition(sidInner)
+        if (!transcribingRef.current) openRecognition(sidInner)
+        else resumeAnswerAfterQuestionTts(sidInner)
         return
       }
-      answerTranscriptOpenRef.current = false
-      setShowAnswerTranscript(false)
-      const ttsText = String(ttsRaw || '').trim()
-      // 关键兜底：按文本长度预估播报时长，在窗口内即使提前开启识别也不允许写入回答框。
-      const estimatedSpeakMs = Math.max(4500, Math.min(22000, ttsText.length * 220 + 2400))
-      ignoreRecognizeBeforeTsRef.current = Date.now() + estimatedSpeakMs
       questionTtsPlayingRef.current = true
+      setCallStatusLine('AI 正在读题...')
+      closeAnswerTranscriptDisplay()
+      const ttsText = String(ttsRaw || '').trim()
+      const ttsStartAt = Date.now()
+      // 最短屏蔽时长：防止 InnerAudio onEnded 过早触发导致 questionTtsPlaying 提前关闭、读题声进框。
+      const minTtsCoverMs = Math.max(4200, Math.min(24000, ttsText.length * 200 + 2400))
+      ignoreRecognizeBeforeTsRef.current = ttsStartAt + minTtsCoverMs
       playInterviewQuestionTts(
         ttsText,
         {
@@ -500,11 +524,18 @@ export default function InterviewPage() {
           onStatus: setCallStatusLine
         },
         () => {
-          questionTtsPlayingRef.current = false
-          // onDone 可能早于真实结束，延长并取更晚的截止时间，继续抑制播报尾音进入回答框。
-          ignoreRecognizeBeforeTsRef.current = Math.max(ignoreRecognizeBeforeTsRef.current, Date.now() + 1800)
-          setCallStatusLine('请口述您的回答')
-          openRecognition(sidInner)
+          const elapsed = Date.now() - ttsStartAt
+          const holdMs = Math.max(0, minTtsCoverMs - elapsed)
+          const releaseTtsAndResume = () => {
+            questionTtsPlayingRef.current = false
+            ignoreRecognizeBeforeTsRef.current = Date.now() + 900
+            setTimeout(() => resumeAnswerAfterQuestionTts(sidInner), 30)
+          }
+          if (holdMs <= 0) {
+            releaseTtsAndResume()
+          } else {
+            setTimeout(releaseTtsAndResume, holdMs)
+          }
         }
       )
     }
@@ -516,14 +547,11 @@ export default function InterviewPage() {
         flowLog('面试读题 TTS', true, `queued len=${String(t).length}`)
         playTtsThenResume(sidInner, String(t))
       } else {
-        answerTranscriptOpenRef.current = false
-        setShowAnswerTranscript(false)
+        closeAnswerTranscriptDisplay()
         setCallStatusLine('请口述您的回答')
         openRecognition(sidInner)
       }
     }
-
-    openRecognitionRef.current = openRecognition
 
     if (force) {
       suppressAutoRestartRef.current = true
@@ -576,8 +604,7 @@ export default function InterviewPage() {
       if (dataInitMarkerRef.current !== dataMarker) {
         dataInitMarkerRef.current = dataMarker
         setInitError('')
-        answerTranscriptOpenRef.current = false
-        setShowAnswerTranscript(false)
+        closeAnswerTranscriptDisplay()
         try {
           const list = await fetchInterviewQuestions(j.id)
           const cleaned = list.filter((q) => q && String(q.text || '').trim())
@@ -615,8 +642,7 @@ export default function InterviewPage() {
       } else {
         setSessionId(sid)
         if (!transcribingRef.current) {
-          answerTranscriptOpenRef.current = false
-          setShowAnswerTranscript(false)
+          closeAnswerTranscriptDisplay()
           const currentText = String((questions[questionIndexRef.current]?.text ?? '') || '').trim()
           flowLogInfo('面试页', '回到面试页：先停转写再读题')
           pendingTtsAfterStopRef.current = currentText
@@ -637,6 +663,7 @@ export default function InterviewPage() {
     [transcriptFinalized, transcriptStreaming]
   )
   const canNext = useMemo(() => composedAnswer.length >= 2, [composedAnswer])
+  const speakingHighlight = transcribing && transcriptStreaming.length > 0
 
   const handleNext = async () => {
     if (!current || !canNext || !profile || !job) return
@@ -650,8 +677,7 @@ export default function InterviewPage() {
 
     if (!isLast) {
       const nextIdx = index + 1
-      answerTranscriptOpenRef.current = false
-      setShowAnswerTranscript(false)
+      closeAnswerTranscriptDisplay()
       pendingTtsAfterStopRef.current = questions[nextIdx]?.text ?? ''
       setIndex(nextIdx)
       void startWechatSiTranscribe(sessionId, true)
@@ -678,122 +704,142 @@ export default function InterviewPage() {
 
   return (
     <View className='safe-container interview-page'>
-      <View className='card'>
-        <Text className='job-title'>{job?.title || '岗位面试'}</Text>
-        <Text className='progress'>
-          第 {questions.length ? Math.min(index + 1, questions.length) : 0} 题 / 共 {questions.length || '--'} 题
-        </Text>
-
-        {initError ? (
-          <View className='init-error-box'>
-            <Text className='init-error-text'>{initError}</Text>
-            <Button className='secondary-btn' onClick={reloadPage}>
-              重新加载本页
-            </Button>
-          </View>
-        ) : null}
-
-        <View className='call-scene'>
-          <Text className='call-status-line'>{callStatusLine}</Text>
-          <View className='interviewer-stage'>
-            <View className='interviewer-bg' />
-            <View className='interviewer-figure'>
-              <Image className='interviewer-avatar-img' src={AI_INTERVIEWER_IMG_URL} mode='aspectFill' />
-              <View className='interviewer-caption-bar'>
-                <Text className='interviewer-caption'>AI 面试官</Text>
+      <View className='interview-hero'>
+        <View className='interviewer-stage'>
+          <View className='interviewer-bg' />
+          <View className='interviewer-figure-layer'>
+            <View className='interviewer-avatar-stack'>
+              <View className='interviewer-circle-cluster'>
+                <View className='interviewer-orbit interviewer-orbit--b' aria-hidden />
+                <View className='interviewer-orbit interviewer-orbit--a' aria-hidden />
+                <View className='interviewer-circle-frame'>
+                  <Image
+                    className='interviewer-circle-img'
+                    src={AI_INTERVIEWER_IMG_URL}
+                    mode='aspectFill'
+                  />
+                  <View className='interviewer-circle-badge'>
+                    <Text className='interviewer-circle-badge-text'>AI 面试官</Text>
+                  </View>
+                </View>
+              </View>
+              <View className='interviewer-name-dots'>
+                <View className='interviewer-name-dot interviewer-name-dot--active' />
+                <View className='interviewer-name-dot' />
               </View>
             </View>
-            <View className='pip-camera-wrap'>
-              {showTrtcPusher ? (
-                <LivePusher
-                  className='pip-camera'
-                  url={pusher.url}
-                  mode='RTC'
-                  autopush={Boolean(pusher.autopush)}
-                  enableCamera={pusher.enableCamera !== false}
-                  enableMic={false}
-                  muted
-                  enableAgc={Boolean(pusher.enableAgc)}
-                  enableAns={Boolean(pusher.enableAns)}
-                  autoFocus={pusher.enableAutoFocus !== false}
-                  zoom={Boolean(pusher.enableZoom)}
-                  minBitrate={pusher.minBitrate}
-                  maxBitrate={pusher.maxBitrate}
-                  videoWidth={pusher.videoWidth}
-                  videoHeight={pusher.videoHeight}
-                  beauty={pusher.beautyLevel ?? 0}
-                  whiteness={pusher.whitenessLevel ?? 0}
-                  orientation={pusher.videoOrientation || 'vertical'}
-                  aspect={pusher.videoAspect === '3:4' ? '3:4' : '9:16'}
-                  devicePosition={pusher.frontCamera || 'front'}
-                  remoteMirror={Boolean(pusher.enableRemoteMirror)}
-                  localMirror={pusher.localMirror || 'auto'}
-                  backgroundMute={Boolean(pusher.enableBackgroundMute)}
-                  audioQuality={pusher.audioQuality || 'high'}
-                  audioVolumeType={pusher.audioVolumeType || 'voicecall'}
-                  audioReverbType={
-                    (Number(pusher.audioReverbType) || 0) as keyof LivePusherProps.AudioReverbType
-                  }
-                  waitingImage={pusher.waitingImage}
-                  beautyStyle={pusher.beautyStyle || 'smooth'}
-                  filter={pusher.filter || 'standard'}
-                  onStateChange={handlePusherStateChange}
-                  onNetStatus={handlePusherNetStatus}
-                  onError={handlePusherError}
-                  onBgmStart={handlePusherBgmStart}
-                  onBgmProgress={handlePusherBgmProgress}
-                  onBgmComplete={handlePusherBgmComplete}
-                  onAudioVolumeNotify={handlePusherAudioVolume}
-                />
-              ) : (
-                <Camera
-                  className='pip-camera'
-                  mode='normal'
-                  devicePosition='front'
-                  flash='off'
-                  onError={() => {
-                    setCameraError('无法使用摄像头，请在系统设置或小程序权限中允许相机，或稍后重试。')
-                  }}
-                  onInitDone={() => setCameraError('')}
-                />
-              )}
+          </View>
+          <View className={`pip-camera-wrap${speakingHighlight ? ' pip-camera-wrap--active' : ''}`}>
+            {showTrtcPusher ? (
+              <LivePusher
+                className='pip-camera'
+                url={pusher.url}
+                mode='RTC'
+                autopush={Boolean(pusher.autopush)}
+                enableCamera={pusher.enableCamera !== false}
+                enableMic={false}
+                muted
+                enableAgc={Boolean(pusher.enableAgc)}
+                enableAns={Boolean(pusher.enableAns)}
+                autoFocus={pusher.enableAutoFocus !== false}
+                zoom={Boolean(pusher.enableZoom)}
+                minBitrate={pusher.minBitrate}
+                maxBitrate={pusher.maxBitrate}
+                videoWidth={pusher.videoWidth}
+                videoHeight={pusher.videoHeight}
+                beauty={pusher.beautyLevel ?? 0}
+                whiteness={pusher.whitenessLevel ?? 0}
+                orientation={pusher.videoOrientation || 'vertical'}
+                aspect={pusher.videoAspect === '3:4' ? '3:4' : '9:16'}
+                devicePosition={pusher.frontCamera || 'front'}
+                remoteMirror={Boolean(pusher.enableRemoteMirror)}
+                localMirror={pusher.localMirror || 'auto'}
+                backgroundMute={Boolean(pusher.enableBackgroundMute)}
+                audioQuality={pusher.audioQuality || 'high'}
+                audioVolumeType={pusher.audioVolumeType || 'voicecall'}
+                audioReverbType={
+                  (Number(pusher.audioReverbType) || 0) as keyof LivePusherProps.AudioReverbType
+                }
+                waitingImage={pusher.waitingImage}
+                beautyStyle={pusher.beautyStyle || 'smooth'}
+                filter={pusher.filter || 'standard'}
+                onStateChange={handlePusherStateChange}
+                onNetStatus={handlePusherNetStatus}
+                onError={handlePusherError}
+                onBgmStart={handlePusherBgmStart}
+                onBgmProgress={handlePusherBgmProgress}
+                onBgmComplete={handlePusherBgmComplete}
+                onAudioVolumeNotify={handlePusherAudioVolume}
+              />
+            ) : (
+              <Camera
+                className='pip-camera'
+                mode='normal'
+                devicePosition='front'
+                flash='off'
+                onError={() => {
+                  setCameraError('无法使用摄像头，请在系统设置或小程序权限中允许相机，或稍后重试。')
+                }}
+                onInitDone={() => setCameraError('')}
+              />
+            )}
+            <View className='pip-name-chip'>
               <Text className='pip-label'>我</Text>
             </View>
           </View>
-          {cameraError ? <Text className='camera-error-text'>{cameraError}</Text> : null}
-          <View className='question-box'>
-            <Text className='question-text'>{current?.text || (questions.length ? '题目索引异常' : '正在加载题目…')}</Text>
-            <View className='answer-box'>
-              <Text className='answer-label'>实时转写回答</Text>
-              <View className='transcript-composer'>
-                {!showAnswerTranscript ? <Text className='answer-placeholder'>读题中，转写内容暂不显示</Text> : null}
-                {showAnswerTranscript && transcriptFinalized.length === 0 && !transcriptStreaming && !transcribing ? (
-                  <Text className='answer-placeholder'>请直接口述作答，转写文本将显示在这里</Text>
-                ) : null}
-                {showAnswerTranscript &&
-                  transcriptFinalized.map((line, i) => (
-                  <View key={`fin-${i}`} className='transcript-final-row'>
-                    <Text className='transcript-final-text'>{line}</Text>
-                  </View>
-                  ))}
-                {showAnswerTranscript && (transcribing || transcriptStreaming.length > 0) ? (
-                  <View className='transcript-stream-row'>
-                    <Text className='transcript-stream-text'>{transcriptStreaming}</Text>
-                    {transcribing ? <Text className='transcript-caret'>▍</Text> : null}
-                  </View>
-                ) : null}
-              </View>
+        </View>
+      </View>
+
+      <View className='card'>
+        <View className='interview-job-block'>
+          <Text className='call-status-line'>{callStatusLine}</Text>
+          <Text className='job-title'>{job?.title || '岗位面试'}</Text>
+          <Text className='progress'>
+            第 {questions.length ? Math.min(index + 1, questions.length) : 0} 题 / 共 {questions.length || '--'} 题
+          </Text>
+          {initError ? (
+            <View className='init-error-box'>
+              <Text className='init-error-text'>{initError}</Text>
+              <Button className='secondary-btn' onClick={reloadPage}>
+                重新加载本页
+              </Button>
+            </View>
+          ) : null}
+        </View>
+        {cameraError ? <Text className='camera-error-text'>{cameraError}</Text> : null}
+        <View className='question-box'>
+          <Text className='question-text'>{current?.text || (questions.length ? '题目索引异常' : '正在加载题目…')}</Text>
+          <View className='answer-box'>
+            <Text className='answer-label'>实时转写回答</Text>
+            <View className='transcript-composer'>
+              {!showAnswerTranscript ? <Text className='answer-placeholder'>读题中，转写内容暂不显示</Text> : null}
+              {showAnswerTranscript && transcriptFinalized.length === 0 && !transcriptStreaming && !transcribing ? (
+                <Text className='answer-placeholder'>请直接口述作答，转写文本将显示在这里</Text>
+              ) : null}
+              {showAnswerTranscript &&
+                transcriptFinalized.map((line, i) => (
+                <View key={`fin-${i}`} className='transcript-final-row'>
+                  <Text className='transcript-final-text'>{line}</Text>
+                </View>
+                ))}
+              {showAnswerTranscript && (transcribing || transcriptStreaming.length > 0) ? (
+                <View className='transcript-stream-row'>
+                  <Text className='transcript-stream-text'>{transcriptStreaming}</Text>
+                  {transcribing ? <Text className='transcript-caret'>▍</Text> : null}
+                </View>
+              ) : null}
             </View>
           </View>
-          <Button
-            className='primary-btn'
-            loading={loading}
-            disabled={!canNext || loading || !current}
-            onClick={() => void handleNext()}
-          >
-            {isLast ? '提交面试' : '下一题'}
-          </Button>
         </View>
+        <Button
+          className='primary-btn'
+          loading={loading}
+          disabled={!canNext || loading || !current}
+          onClick={() => void handleNext()}
+        >
+          {isLast ? '提交面试' : '下一题'}
+        </Button>
+        <Text className='transcript-tip'>本服务为AI生成内容，结果仅供参考</Text>
       </View>
     </View>
   )

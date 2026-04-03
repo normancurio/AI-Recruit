@@ -3,7 +3,17 @@
   flex-direction: column;
   align-items: stretch;
   min-height: 100vh;
-  background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+  padding-bottom: env(safe-area-inset-bottom, 0);
+  /* 参考稿：浅蓝主色 */
+  background: linear-gradient(180deg, #c5e0fc 0%, #a5ccf9 42%, #95c2f5 100%);
+}
+
+/* 顶部面试官区：仅在页面浅蓝底上，不进白色卡片 */
+.interview-hero {
+  width: 100%;
+  padding: 8px 0 12px;
+  box-sizing: border-box;
+  flex-shrink: 0;
 }
 
 .init-error-box {
@@ -21,12 +31,21 @@
   margin-bottom: 16px;
 }
 
-.card {
+/* 覆盖 app.scss 全局 .card：仅面试页白底内容区 */
+.interview-page .card {
   width: 100%;
+  max-width: 720px;
+  margin: 0 auto 16px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
   flex: 1;
+  background: #ffffff;
+  border-radius: 20px;
+  padding: 18px 16px 20px;
+  box-sizing: border-box;
+  box-shadow: 0 12rpx 40rpx rgba(30, 58, 95, 0.12);
+  border: 1px solid rgba(226, 232, 240, 0.9);
 }
 
 .job-title {
@@ -37,7 +56,7 @@
 
 .progress {
   font-size: 24px;
-  color: #64748b;
+  color: #334155;
 }
 
 .question-box {
@@ -68,9 +87,9 @@
   font-size: 30px;
   line-height: 1.6;
   color: #1e293b;
-  background: linear-gradient(180deg, #fffbeb 0%, #fef9c3 100%);
-  border: 1px solid #fde047;
-  border-radius: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
   padding: 16px 18px;
 }
 
@@ -82,93 +101,197 @@
   margin-bottom: 8px;
 }
 
-/* 双画面：大区域 AI 面试官 + 右上 PiP 本人摄像头 */
-.call-scene {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  flex: 1;
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
-  border-radius: 18px;
-  padding: 16px;
-  box-sizing: border-box;
-}
-
 .call-status-line {
   display: block;
   font-size: 24px;
-  color: #475569;
+  color: #1e3a5f;
   font-weight: 600;
-  padding: 0 4px;
+  padding: 0 8px;
+}
+
+/* 岗位标题 + 进度：白色卡片内顶部 */
+.interview-job-block {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 0 4px;
+  box-sizing: border-box;
+
+  .call-status-line {
+    padding: 0;
+    margin-bottom: 2px;
+    color: #334155;
+  }
 }
 
 .interviewer-stage {
   position: relative;
   width: 100%;
-  height: 520rpx;
-  border-radius: 20px;
+  height: 480rpx;
+  border-radius: 28rpx;
   overflow: hidden;
-  border: 2px solid #c7d2fe;
-  box-shadow: 0 12px 40px rgba(79, 70, 229, 0.12);
+  border: 3rpx solid rgba(255, 255, 255, 0.75);
+  box-shadow: 0 20rpx 56rpx rgba(30, 58, 95, 0.14);
 }
 
+/* 底层背景 */
 .interviewer-bg {
   position: absolute;
   inset: 0;
-  background: linear-gradient(165deg, #e0e7ff 0%, #dbeafe 40%, #f8fafc 100%);
+  z-index: 0;
+  background: linear-gradient(180deg, #b8d9fc 0%, #a5ccf9 55%, #9bbef0 100%);
 }
 
-.interviewer-figure {
+/* 居中圆形头像 + 装饰环 */
+.interviewer-figure-layer {
   position: absolute;
-  left: 50%;
-  top: 52%;
-  transform: translate(-50%, -50%);
-  width: 280rpx;
-  height: 280rpx;
-  border-radius: 50%;
-  overflow: hidden;
-  border: 6rpx solid #fff;
-  box-shadow: 0 8px 32px rgba(15, 23, 42, 0.15);
-  background: #e2e8f0;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20rpx 0 8rpx;
+  pointer-events: none;
 }
 
-.interviewer-avatar-img {
+.interviewer-avatar-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
   width: 100%;
-  height: 100%;
-  display: block;
 }
 
-.interviewer-caption-bar {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  padding: 10rpx 0;
-  background: linear-gradient(180deg, transparent 0%, rgba(15, 23, 42, 0.65) 100%);
+/* 圆环与头像共用中心，不受下方分页点影响 */
+.interviewer-circle-cluster {
+  position: relative;
+  width: 340rpx;
+  height: 340rpx;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.interviewer-caption {
-  font-size: 22rpx;
-  color: #f8fafc;
-  font-weight: 600;
+/* 参考稿：头像外圈高亮弧（双层错角） */
+.interviewer-orbit {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  border-radius: 50%;
+  box-sizing: border-box;
+  pointer-events: none;
 }
 
+.interviewer-orbit--a {
+  width: 312rpx;
+  height: 312rpx;
+  margin-left: -156rpx;
+  margin-top: -156rpx;
+  border: 4rpx solid transparent;
+  border-top-color: rgba(255, 255, 255, 0.95);
+  border-right-color: rgba(255, 255, 255, 0.45);
+  transform: rotate(-38deg);
+  box-shadow: 0 0 24rpx rgba(255, 255, 255, 0.25);
+}
+
+.interviewer-orbit--b {
+  width: 334rpx;
+  height: 334rpx;
+  margin-left: -167rpx;
+  margin-top: -167rpx;
+  border: 3rpx solid transparent;
+  border-bottom-color: rgba(255, 255, 255, 0.5);
+  border-left-color: rgba(255, 255, 255, 0.2);
+  transform: rotate(52deg);
+  opacity: 0.85;
+}
+
+.interviewer-circle-frame {
+  position: relative;
+  z-index: 2;
+  width: 268rpx;
+  height: 268rpx;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 6rpx solid #ffffff;
+  box-shadow:
+    0 0 0 2rpx rgba(255, 255, 255, 0.35),
+    0 16rpx 48rpx rgba(30, 58, 95, 0.22);
+}
+
+.interviewer-circle-img {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* 圆内底部胶囊标签 */
+.interviewer-circle-badge {
+  position: absolute;
+  left: 50%;
+  bottom: 14rpx;
+  transform: translateX(-50%);
+  max-width: 90%;
+  padding: 6rpx 22rpx;
+  border-radius: 999rpx;
+  background: rgba(15, 23, 42, 0.52);
+  border: 1rpx solid rgba(255, 255, 255, 0.35);
+}
+
+.interviewer-circle-badge-text {
+  font-size: 22rpx;
+  color: #ffffff;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.interviewer-name-dots {
+  display: flex;
+  flex-direction: row;
+  gap: 12rpx;
+  align-items: center;
+  margin-top: 8rpx;
+  position: relative;
+  z-index: 2;
+}
+
+.interviewer-name-dot {
+  width: 12rpx;
+  height: 12rpx;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.interviewer-name-dot--active {
+  background: #ffffff;
+  box-shadow: 0 0 0 4rpx rgba(255, 255, 255, 0.35);
+}
+
+/* 候选人：右上小窗，与左侧半身像留出呼吸空间 */
 .pip-camera-wrap {
   position: absolute;
-  top: 16rpx;
-  right: 16rpx;
-  width: 168rpx;
-  height: 224rpx;
-  border-radius: 16rpx;
+  top: 20rpx;
+  right: 20rpx;
+  bottom: auto;
+  z-index: 5;
+  width: 188rpx;
+  height: 248rpx;
+  border-radius: 20rpx;
   overflow: hidden;
-  border: 3rpx solid #ffffff;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.2);
+  border: 4rpx solid #ffffff;
+  box-shadow:
+    0 4rpx 0 rgba(255, 255, 255, 0.35) inset,
+    0 12rpx 32rpx rgba(15, 23, 42, 0.28);
   background: #0f172a;
+  transition: box-shadow 180ms ease, border-color 180ms ease, transform 180ms ease;
+}
+
+.pip-camera-wrap--active {
+  border-color: #a5b4fc;
+  box-shadow: 0 0 0 2rpx rgba(165, 180, 252, 0.7), 0 10px 28px rgba(79, 70, 229, 0.35);
+  animation: pip-speaking-pulse 1.2s ease-in-out infinite;
 }
 
 .pip-camera {
@@ -177,14 +300,30 @@
 }
 
 .pip-label {
-  position: absolute;
-  left: 8rpx;
-  bottom: 8rpx;
   font-size: 18rpx;
   color: #fff;
-  background: rgba(15, 23, 42, 0.55);
-  padding: 4rpx 10rpx;
-  border-radius: 8rpx;
+  font-weight: 600;
+}
+
+.pip-name-chip {
+  position: absolute;
+  left: 10rpx;
+  top: 10rpx;
+  background: rgba(15, 23, 42, 0.62);
+  border: 1rpx solid rgba(255, 255, 255, 0.35);
+  padding: 3rpx 10rpx;
+  border-radius: 999rpx;
+  line-height: 1.2;
+}
+
+@keyframes pip-speaking-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.02);
+  }
 }
 
 .video-panel {
@@ -214,11 +353,12 @@
   width: 100%;
   min-height: 180px;
   box-sizing: border-box;
-  border: 2px solid #e2e8f0;
+  border: 1px solid rgba(226, 232, 240, 0.9);
   border-radius: 16px;
   padding: 18px;
-  background: #f8fafc;
+  background: #ffffff;
   flex: 1;
+  box-shadow: 0 8rpx 28rpx rgba(30, 58, 95, 0.06);
 }
 
 .answer-label {
@@ -323,6 +463,7 @@
   background: #f1f5f9;
   border-radius: 12px;
   padding: 12px 16px;
+  border: 1px solid #e2e8f0;
 }
 
 .secondary-btn {
@@ -341,12 +482,13 @@
 }
 
 .primary-btn {
-  margin-top: auto;
+  margin-top: 8px;
   height: 88px;
   line-height: 88px;
   border-radius: 999px;
-  background: #4f46e5;
+  background: #1e40af;
   color: #ffffff;
   font-size: 30px;
   font-weight: 600;
+  box-shadow: 0 8rpx 24rpx rgba(30, 64, 175, 0.35);
 }
