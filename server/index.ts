@@ -1464,8 +1464,19 @@ app.post(
   }
 )
 
-function generateUniqueInviteCode(): string {
-  return `INV${crypto.randomBytes(6).toString('hex').toUpperCase()}`
+function sanitizeInviteSegment(raw: string, fallback: string, maxLen = 12): string {
+  const s = String(raw || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, '')
+  return (s || fallback).slice(0, maxLen)
+}
+
+function generateUniqueInviteCode(jobCode: string, recruiterCode?: string): string {
+  const jobSeg = sanitizeInviteSegment(jobCode, 'JOB', 16)
+  const recSeg = sanitizeInviteSegment(String(recruiterCode || ''), 'RCR', 16)
+  const rand = crypto.randomBytes(3).toString('hex').toUpperCase()
+  return `INV-${jobSeg}-${recSeg}-${rand}`
 }
 
 /** HR：为某岗位生成一条待处理面试邀请（写入 interview_invitations，候选人可在小程序「邀请」列表或登录页输入 INV… 码） */
@@ -1473,22 +1484,38 @@ app.post('/api/admin/invitations', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const jobCode = String(req.body?.jobCode || '').trim().toUpperCase()
   if (!jobCode) return res.status(400).json({ message: 'jobCode required' })
+  const recruiterCode = String(req.body?.recruiterCode || '').trim()
   const rawDays = Number(req.body?.expiresInDays)
   const days = Number.isFinite(rawDays) && rawDays > 0 ? Math.min(Math.floor(rawDays), 365) : 7
   try {
     const [jobs] = await mysqlPool.query<any[]>('SELECT id FROM jobs WHERE job_code=? LIMIT 1', [jobCode])
     if (!jobs.length) return res.status(404).json({ message: 'job not found' })
     const jobId = jobs[0].id as number
+    let interviewerUserId: number | null = null
+    if (recruiterCode) {
+      const [urs] = await mysqlPool.query<any[]>(
+        'SELECT id FROM users WHERE username=? LIMIT 1',
+        [recruiterCode]
+      )
+      if (urs.length > 0) interviewerUserId = Number(urs[0].id) || null
+    }
     let lastErr: unknown
     for (let attempt = 0; attempt < 8; attempt++) {
-      const inviteCode = generateUniqueInviteCode()
+      const inviteCode = generateUniqueInviteCode(jobCode, recruiterCode)
       try {
         await mysqlPool.query(
-          `INSERT INTO interview_invitations (invite_code, job_id, status, expires_at)
-           VALUES (?, ?, 'pending', DATE_ADD(NOW(), INTERVAL ? DAY))`,
-          [inviteCode, jobId, days]
+          `INSERT INTO interview_invitations (invite_code, job_id, interviewer_user_id, status, expires_at)
+           VALUES (?, ?, ?, 'pending', DATE_ADD(NOW(), INTERVAL ? DAY))`,
+          [inviteCode, jobId, interviewerUserId, days]
         )
-        return res.json({ data: { inviteCode, jobCode, expiresInDays: days } })
+        return res.json({
+          data: {
+            inviteCode,
+            jobCode,
+            recruiterCode: recruiterCode || '',
+            expiresInDays: days
+          }
+        })
       } catch (e: unknown) {
         lastErr = e
         const code = (e as { code?: string })?.code

@@ -52,10 +52,15 @@ CREATE TABLE IF NOT EXISTS interviewer_phone_whitelist (
 CREATE TABLE IF NOT EXISTS projects (
   id VARCHAR(64) NOT NULL,
   name VARCHAR(255) NOT NULL,
+  project_code VARCHAR(64) NULL DEFAULT NULL,
   client VARCHAR(255) NULL,
   dept VARCHAR(128) NULL,
   manager VARCHAR(64) NULL,
   status VARCHAR(32) NOT NULL DEFAULT '进行中',
+  start_date DATE NULL,
+  end_date DATE NULL,
+  description TEXT NULL,
+  member_count INT UNSIGNED NOT NULL DEFAULT 0,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id)
@@ -196,15 +201,32 @@ CREATE TABLE IF NOT EXISTS interview_messages (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Optional seeds (align with existing mock job codes in frontend/miniapp)
-INSERT INTO projects (id, name, client, dept, manager, status)
+INSERT INTO projects (id, name, project_code, client, dept, manager, status, start_date, end_date, description, member_count)
 VALUES
-  ('P001', '2026春季核心研发招聘', '北京字节跳动科技有限公司', '华北交付中心', '李交付', '进行中')
+  (
+    'P001',
+    '2024技术部招聘',
+    'PRJ-2024-001',
+    '北京字节跳动科技有限公司',
+    '技术部',
+    '李交付',
+    '进行中',
+    '2024-01-01',
+    '2024-06-30',
+    '技术部年度招聘计划，包含前端、后端、测试等多个岗位',
+    2
+  )
 ON DUPLICATE KEY UPDATE
   name = VALUES(name),
+  project_code = VALUES(project_code),
   client = VALUES(client),
   dept = VALUES(dept),
   manager = VALUES(manager),
-  status = VALUES(status);
+  status = VALUES(status),
+  start_date = VALUES(start_date),
+  end_date = VALUES(end_date),
+  description = VALUES(description),
+  member_count = VALUES(member_count);
 
 INSERT INTO jobs (
   project_id,
