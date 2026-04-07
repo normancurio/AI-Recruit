@@ -14,12 +14,6 @@ const MOCK_JOBS: Record<string, JobInfo> = {
   J003: { id: 'J003', title: '高级前端架构师', department: '基础架构部' }
 }
 
-const MOCK_QUESTIONS: InterviewQuestion[] = [
-  { id: 'Q1', text: '请介绍一个你参与过的前端项目，并说明你的核心贡献。' },
-  { id: 'Q2', text: '你如何理解浏览器渲染流程？性能优化通常会从哪些点切入？' },
-  { id: 'Q3', text: '遇到跨端兼容问题时，你会如何排查和制定修复方案？' }
-]
-
 function useMock() {
   return !getApiBase()
 }
@@ -94,17 +88,24 @@ export async function validateInviteCode(code: string): Promise<JobInfo> {
   return res.data.data
 }
 
-export async function fetchInterviewQuestions(jobId: string): Promise<InterviewQuestion[]> {
-  if (useMock()) return MOCK_QUESTIONS
+export async function fetchInterviewQuestions(
+  jobId: string,
+  candidateName?: string
+): Promise<InterviewQuestion[]> {
+  if (useMock()) {
+    throw new Error(
+      '面试题由服务端大模型实时生成：请配置 TARO_APP_API_BASE 并确保后端已设置 DASHSCOPE_API_KEY'
+    )
+  }
 
-  const res = await Taro.request<{ data: InterviewQuestion[] }>({
+  const res = await Taro.request<{ data: InterviewQuestion[]; message?: string }>({
     url: `${getApiBase()}/api/candidate/interview-questions`,
     method: 'GET',
-    data: { jobId }
+    data: { jobId, candidateName: candidateName?.trim() || '' }
   })
 
   if (res.statusCode >= 400 || !Array.isArray(res.data?.data)) {
-    throw new Error('拉取题目失败')
+    throw new Error(res.data?.message || `拉取题目失败（HTTP ${res.statusCode}）`)
   }
   return res.data.data
 }

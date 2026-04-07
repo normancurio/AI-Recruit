@@ -283,11 +283,44 @@ const JOBS = {
   J003: { id: 'J003', title: '高级前端架构师', department: '基础架构部' }
 } as const
 
-const QUESTION_BANK = [
-  { id: 'Q1', text: '请介绍一个你参与过的项目，并说明你的核心贡献。' },
-  { id: 'Q2', text: '你如何定位线上问题并快速止血？' },
-  { id: 'Q3', text: '请讲一个你做性能优化的案例和结果。' }
-]
+/** 入库简历正文上限，避免单行过大与出题 token 爆炸 */
+const RESUME_PLAINTEXT_MAX_SAVE = 60000
+
+const PERSONALIZED_INTERVIEW_TOTAL = 6
+
+async function fetchResumeTextForCandidate(jobCode: string, candidateNameRaw: string): Promise<string> {
+  const name = String(candidateNameRaw || '').trim()
+  if (!name) return ''
+  const code = String(jobCode || '').trim().toUpperCase()
+  const pack = (row: { resume_plaintext?: string | null; report_summary?: string | null }) => {
+    const full = String(row.resume_plaintext || '').trim()
+    if (full.length >= 120) return full.slice(0, 56000)
+    const sum = String(row.report_summary || '').trim()
+    const merged = [full, sum ? `【AI 简历摘要】${sum}` : ''].filter(Boolean).join('\n\n')
+    return merged.trim().slice(0, 56000)
+  }
+  try {
+    const [rows] = await mysqlPool.query<any[]>(
+      `SELECT resume_plaintext, report_summary FROM resume_screenings
+       WHERE job_code=? AND (TRIM(candidate_name)=? OR candidate_name LIKE ?)
+       ORDER BY id DESC LIMIT 1`,
+      [code, name, `%${name}%`]
+    )
+    if (rows.length) return pack(rows[0])
+  } catch {
+    /* 表无 resume_plaintext 列等 */
+  }
+  return ''
+}
+
+type InterviewQuestionsHttpError = Error & { httpStatus: number }
+
+function throwInterviewQuestionsHttp(status: number, message: string): never {
+  const e = new Error(message) as InterviewQuestionsHttpError
+  e.name = 'InterviewQuestionsHttpError'
+  e.httpStatus = status
+  throw e
+}
 
 function dashScopeCompatibleBaseUrl() {
   return (process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1').replace(/\/$/, '')
@@ -379,11 +412,95 @@ function parseAiInterviewScoreJson(raw: string): AiInterviewScore | null {
   }
 }
 
+type InterviewReportPayload = {
+  sessionId: string
+  jobCode: string
+  candidateName: string
+  candidateOpenId?: string
+  score: number
+  passed: boolean
+  overallFeedback: string
+  dimensionScores: Record<string, number>
+  suggestions: string[]
+  riskPoints: string[]
+  behaviorSignals: Record<string, unknown>
+  qa: Array<{ questionId: string; question: string; answer: string }>
+}
+
+async function upsertInterviewReport(payload: InterviewReportPayload) {
+  if (!payload.sessionId || !payload.jobCode || !payload.candidateName) return
+  await mysqlPool.query(
+    `INSERT INTO interview_reports (
+       session_id, job_code, candidate_name, candidate_openid,
+       overall_score, passed, overall_feedback,
+       dimension_scores, suggestions, risk_points, behavior_signals, qa_json
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+     ON DUPLICATE KEY UPDATE
+       job_code=VALUES(job_code),
+       candidate_name=VALUES(candidate_name),
+       candidate_openid=VALUES(candidate_openid),
+       overall_score=VALUES(overall_score),
+       passed=VALUES(passed),
+       overall_feedback=VALUES(overall_feedback),
+       dimension_scores=VALUES(dimension_scores),
+       suggestions=VALUES(suggestions),
+       risk_points=VALUES(risk_points),
+       behavior_signals=VALUES(behavior_signals),
+       qa_json=VALUES(qa_json),
+       updated_at=NOW()`,
+    [
+      payload.sessionId,
+      payload.jobCode,
+      payload.candidateName,
+      payload.candidateOpenId || null,
+      payload.score,
+      payload.passed ? 1 : 0,
+      payload.overallFeedback,
+      JSON.stringify(payload.dimensionScores || {}),
+      JSON.stringify(payload.suggestions || []),
+      JSON.stringify(payload.riskPoints || []),
+      JSON.stringify(payload.behaviorSignals || {}),
+      JSON.stringify(payload.qa || [])
+    ]
+  )
+}
+
 type ResumeScreeningAiResult = {
   candidateName: string
   matchScore: number
   status: string
   summary: string
+  skillScore: number
+  experienceScore: number
+  educationScore: number
+  stabilityScore: number
+}
+
+function clampResumeScore(n: number): number {
+  if (!Number.isFinite(n)) return 0
+  return Math.max(0, Math.min(100, Math.round(n)))
+}
+
+/** 无模型或旧数据时，用综合分估算四维（与历史前端 toDims 一致） */
+function deriveResumeDimensionScores(overall: number): Pick<
+  ResumeScreeningAiResult,
+  'skillScore' | 'experienceScore' | 'educationScore' | 'stabilityScore'
+> {
+  const s = clampResumeScore(overall)
+  return {
+    skillScore: clampResumeScore(s + 7),
+    experienceScore: clampResumeScore(s + 2),
+    educationScore: clampResumeScore(s + 10),
+    stabilityScore: clampResumeScore(s - 12)
+  }
+}
+
+function firstFiniteNumber(...vals: unknown[]): number | null {
+  for (const v of vals) {
+    const n = Number(v)
+    if (Number.isFinite(n)) return n
+  }
+  return null
 }
 
 function parseResumeScreeningAiJson(raw: string): ResumeScreeningAiResult | null {
@@ -392,17 +509,55 @@ function parseResumeScreeningAiJson(raw: string): ResumeScreeningAiResult | null
       .trim()
       .replace(/^```(?:json)?\s*/i, '')
       .replace(/\s*```\s*$/i, '')
-    const parsed = JSON.parse(cleaned) as Partial<ResumeScreeningAiResult>
+    const parsed = JSON.parse(cleaned) as Record<string, unknown>
     const candidateName = String(parsed?.candidateName || '').trim()
     const matchScore = Number(parsed?.matchScore)
     const status = String(parsed?.status || 'AI分析完成').trim() || 'AI分析完成'
     const summary = String(parsed?.summary || '').trim()
     if (!candidateName || !Number.isFinite(matchScore) || !summary) return null
+    const overall = clampResumeScore(matchScore)
+    const fallbackDims = deriveResumeDimensionScores(overall)
+    const skillScore = clampResumeScore(
+      firstFiniteNumber(
+        parsed.skillScore,
+        parsed.skill_score,
+        (parsed.dimensionScores as Record<string, unknown> | undefined)?.skill,
+        (parsed.dimensionScores as Record<string, unknown> | undefined)?.skillScore
+      ) ?? fallbackDims.skillScore
+    )
+    const experienceScore = clampResumeScore(
+      firstFiniteNumber(
+        parsed.experienceScore,
+        parsed.experience_score,
+        (parsed.dimensionScores as Record<string, unknown> | undefined)?.experience,
+        (parsed.dimensionScores as Record<string, unknown> | undefined)?.experienceScore
+      ) ?? fallbackDims.experienceScore
+    )
+    const educationScore = clampResumeScore(
+      firstFiniteNumber(
+        parsed.educationScore,
+        parsed.education_score,
+        (parsed.dimensionScores as Record<string, unknown> | undefined)?.education,
+        (parsed.dimensionScores as Record<string, unknown> | undefined)?.educationScore
+      ) ?? fallbackDims.educationScore
+    )
+    const stabilityScore = clampResumeScore(
+      firstFiniteNumber(
+        parsed.stabilityScore,
+        parsed.stability_score,
+        (parsed.dimensionScores as Record<string, unknown> | undefined)?.stability,
+        (parsed.dimensionScores as Record<string, unknown> | undefined)?.stabilityScore
+      ) ?? fallbackDims.stabilityScore
+    )
     return {
       candidateName,
-      matchScore: Math.max(0, Math.min(100, Math.round(matchScore))),
+      matchScore: overall,
       status,
-      summary
+      summary,
+      skillScore,
+      experienceScore,
+      educationScore,
+      stabilityScore
     }
   } catch {
     return null
@@ -434,6 +589,7 @@ function fallbackResumeScreening(resumeText: string, jdText: string, jobTitle: s
   }
   const ratio = uniq.length ? hits / uniq.length : 0
   const matchScore = Math.min(100, Math.max(35, Math.round(42 + ratio * 58)))
+  const dims = deriveResumeDimensionScores(matchScore)
   return {
     candidateName,
     matchScore,
@@ -441,7 +597,8 @@ function fallbackResumeScreening(resumeText: string, jdText: string, jobTitle: s
     summary:
       `（未调用大模型或调用失败：仅根据岗位 JD 与简历文本的关键词重叠度估算分数，仅供参考。）\n` +
       `目标岗位：${jobTitle || '—'}\n` +
-      `若要结构化 AI 评估：在根目录 .env.local 配置 DASHSCOPE_API_KEY（阿里云百炼），可选 QWEN_RESUME_MODEL，重启 npm run dev:api 后重新筛查。`
+      `若要结构化 AI 评估：在根目录 .env.local 配置 DASHSCOPE_API_KEY（阿里云百炼），可选 QWEN_RESUME_MODEL，重启 npm run dev:api 后重新筛查。`,
+    ...dims
   }
 }
 
@@ -493,7 +650,7 @@ async function runResumeScreeningWithAi(params: {
       {
         role: 'system',
         content:
-          '你是资深招聘顾问。根据「岗位 JD」与「简历文本」评估匹配度。只输出一个 JSON 对象，不要 markdown 代码块，不要其它文字。格式：{"candidateName":"从简历推断的中文姓名或合理称呼","matchScore":0到100的整数,"status":"AI分析完成 或 不匹配 等简短状态","summary":"3～6 句中文，说明匹配点、风险与是否建议推进"}'
+          '你是资深招聘顾问。根据「岗位 JD」与「简历文本」评估匹配度。只输出一个 JSON 对象，不要 markdown 代码块，不要其它文字。字段：candidateName（从简历推断的中文姓名或合理称呼）、matchScore（0～100 整数，综合匹配分）、skillScore、experienceScore、educationScore、stabilityScore（均为 0～100 整数，分别表示技能匹配、岗位经验、学历与资质、职业稳定性）、status（如 AI分析完成 / 不匹配 等简短状态）、summary（3～6 句中文，说明匹配点、风险与是否建议推进）。示例：{"candidateName":"张三","matchScore":82,"skillScore":85,"experienceScore":78,"educationScore":88,"stabilityScore":72,"status":"AI分析完成","summary":"…"}'
       },
       { role: 'user', content: userPrompt }
     ]
@@ -556,62 +713,78 @@ function genTrtcUserSig(sdkAppId: number, secretKey: string, userId: string, exp
   return api.genSig(userId, expireSeconds)
 }
 
-function logAiQuestionFallback(reason: string, detail?: string) {
-  const clip = detail ? String(detail).replace(/\s+/g, ' ').slice(0, 600) : ''
-  console.warn(`[AI-questions] 回退到内置题库 | ${reason}${clip ? ` | ${clip}` : ''}`)
-  if (flowLogEnabled) flowLog('AI 出题回退', false, `${reason}${clip ? ` | ${clip}` : ''}`)
-}
-
-function fallbackQuestionBank(count: number) {
-  return QUESTION_BANK.slice(0, count).map((q, idx) => ({ id: `Q${idx + 1}`, text: q.text }))
-}
-
-async function generateAiQuestions(params: { title: string; department?: string; jdText?: string; count?: number }) {
-  const count = params.count || 3
+/** 小程序 AI 面：Q1 自我介绍；Q2～Q3 基于简历项目；Q4～Q6 纯技术（结合 JD）。仅大模型生成，无内置题库兜底。 */
+async function generatePersonalizedInterviewSix(params: {
+  title: string
+  department?: string
+  jdText: string
+  resumeText: string
+  candidateName: string
+}) {
+  const total = PERSONALIZED_INTERVIEW_TOTAL
+  const hasResume = Boolean(String(params.resumeText || '').trim())
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
   if (!apiKey) {
-    logAiQuestionFallback('未配置 DASHSCOPE_API_KEY')
-    return fallbackQuestionBank(count)
+    if (flowLogEnabled) flowLog('interview-questions AI', false, '未配置 DASHSCOPE_API_KEY')
+    throwInterviewQuestionsHttp(503, '未配置大模型密钥（DASHSCOPE_API_KEY），面试题仅由模型生成')
   }
   const model = process.env.QWEN_QUESTION_MODEL || 'qwen3.5-plus'
+  const clipResume = String(params.resumeText || '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 20000)
+  const clipJd = String(params.jdText || '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 12000)
+  const userPrompt = [
+    `候选人姓名：${params.candidateName || '未知'}`,
+    `岗位名称：${params.title}`,
+    `部门：${params.department || '未知'}`,
+    `JD：${clipJd || '（无正文）'}`,
+    hasResume
+      ? `简历全文（节选）：${clipResume}`
+      : '（未提供匹配到该候选人姓名的简历正文：Q2、Q3 请结合 JD 设计「假设候选人具备典型背景」的项目深挖题，题干中不要写「因无简历」之类字样。）'
+  ].join('\n')
   try {
-    const userPrompt = [
-      `岗位名称：${params.title}`,
-      `部门：${params.department || '未知'}`,
-      `JD：${params.jdText || '无'}`,
-      `请生成恰好 ${count} 道中文专业技术面试题，要求具体、可考察真实能力。`
-    ].join('\n')
     const data = await dashScopeChatCompletions({
       model,
       messages: [
         {
           role: 'system',
           content:
-            '你是资深技术面试官。请根据用户给出的岗位信息输出恰好要求的题目数量。只输出一个 JSON 对象，格式：{"questions":[{"id":"Q1","text":"题干"}]}，id 从 Q1 起递增，不要 markdown 代码块，不要其它说明。'
+            `你是资深技术面试官。请严格输出恰好 ${total} 道中文面试题，放在一个 JSON 对象里，格式：{"questions":[{"id":"Q1","text":"题干"},…]}。` +
+            '要求：\n' +
+            '1) Q1：开场自我介绍题，约 2～3 分钟，可提示包含教育、工作/项目亮点。\n' +
+            '2) Q2、Q3：必须围绕简历中的具体项目、实习或工作经历追问（技术细节、职责边界、难点与结果）；若上文说明无简历则结合 JD 设计两道「项目/交付」情景深挖题。\n' +
+            '3) Q4、Q5、Q6：与岗位 JD 强相关的纯技术题（可含原理、方案对比、排错、性能、安全等），不要行为面或空泛的「你怎么看」。\n' +
+            'id 必须为 Q1 到 Q6 递增；不要 markdown 代码块，不要其它说明文字。'
         },
         { role: 'user', content: userPrompt }
       ],
-      temperature: 0.6
+      temperature: 0.45
     })
     const raw = data?.choices?.[0]?.message?.content
     const text = typeof raw === 'string' ? raw : ''
     if (!text.trim()) {
-      logAiQuestionFallback(`模型返回空内容 model=${model}`, JSON.stringify(data).slice(0, 400))
-      return fallbackQuestionBank(count)
+      if (flowLogEnabled) {
+        flowLog('interview-questions AI', false, `模型返回空 model=${model} ${JSON.stringify(data).slice(0, 400)}`)
+      }
+      throwInterviewQuestionsHttp(502, '大模型未返回有效题目，请稍后重试')
     }
-    const parsed = parseQuestionsJson(text, count)
+    const parsed = parseQuestionsJson(text, total)
     if (parsed?.length) {
-      return parsed.slice(0, count).map((q, idx) => ({
+      const out = parsed.slice(0, total).map((q, idx) => ({
         id: q.id || `Q${idx + 1}`,
         text: q.text
       }))
+      if (out.length === total && out.every((q) => q.text)) return out
     }
-    logAiQuestionFallback(`JSON 解析失败或 questions 为空 model=${model}`, text)
-    return fallbackQuestionBank(count)
+    if (flowLogEnabled) flowLog('interview-questions AI', false, `JSON 解析失败或题量不足 model=${model}`)
+    throwInterviewQuestionsHttp(502, '大模型输出格式异常或未生成完整 6 道题，请稍后重试')
   } catch (e) {
+    if ((e as InterviewQuestionsHttpError).httpStatus) throw e
     const msg = e instanceof Error ? e.message : String(e)
-    logAiQuestionFallback(`DashScope 调用异常 model=${model}`, msg)
-    return fallbackQuestionBank(count)
+    if (flowLogEnabled) flowLog('interview-questions AI', false, `DashScope 异常 model=${model} ${msg}`)
+    throwInterviewQuestionsHttp(502, `大模型出题失败：${msg.slice(0, 200)}`)
   }
 }
 
@@ -1372,7 +1545,9 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   try {
     const [rows] = await mysqlPool.query<any[]>(
-      `SELECT id, job_code, candidate_name, matched_job_title, match_score, status, report_summary, file_name, created_at
+      `SELECT id, job_code, candidate_name, matched_job_title, match_score,
+              skill_score, experience_score, education_score, stability_score,
+              status, report_summary, file_name, created_at
        FROM resume_screenings ORDER BY id DESC LIMIT 200`
     )
     res.json({ data: rows })
@@ -1380,6 +1555,64 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
     const code = (e as { code?: string })?.code
     if (code === 'ER_NO_SUCH_TABLE') {
       return res.status(503).json({ message: 'resume_screenings 表未创建，请执行 server/migration_resume_screenings.sql' })
+    }
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.get('/api/admin/interview-report', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const screeningId = Number(req.query?.screeningId)
+  if (!Number.isFinite(screeningId) || screeningId <= 0) {
+    return res.status(400).json({ message: 'screeningId required' })
+  }
+  try {
+    const [screenRows] = await mysqlPool.query<any[]>(
+      'SELECT job_code, candidate_name FROM resume_screenings WHERE id=? LIMIT 1',
+      [screeningId]
+    )
+    if (!screenRows.length) return res.status(404).json({ message: '筛查记录不存在' })
+    const screen = screenRows[0] as { job_code: string; candidate_name: string }
+    const [repRows] = await mysqlPool.query<any[]>(
+      `SELECT session_id, job_code, candidate_name, overall_score, passed, overall_feedback,
+              dimension_scores, suggestions, risk_points, behavior_signals, qa_json, updated_at
+       FROM interview_reports
+       WHERE job_code=? AND candidate_name=?
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [String(screen.job_code || '').trim().toUpperCase(), String(screen.candidate_name || '').trim()]
+    )
+    if (!repRows.length) return res.status(404).json({ message: '暂无面试报告（候选人可能尚未完成答题）' })
+    const row = repRows[0] as Record<string, unknown>
+    const parseJson = (v: unknown, fallback: unknown) => {
+      if (v == null) return fallback
+      if (typeof v === 'object') return v
+      try {
+        return JSON.parse(String(v))
+      } catch {
+        return fallback
+      }
+    }
+    res.json({
+      data: {
+        sessionId: String(row.session_id || ''),
+        jobCode: String(row.job_code || ''),
+        candidateName: String(row.candidate_name || ''),
+        score: Number(row.overall_score) || 0,
+        passed: Number(row.passed) === 1,
+        overallFeedback: String(row.overall_feedback || ''),
+        dimensionScores: parseJson(row.dimension_scores, {}),
+        suggestions: parseJson(row.suggestions, []),
+        riskPoints: parseJson(row.risk_points, []),
+        behaviorSignals: parseJson(row.behavior_signals, {}),
+        qa: parseJson(row.qa_json, []),
+        updatedAt: String(row.updated_at || '')
+      }
+    })
+  } catch (e: unknown) {
+    const code = (e as { code?: string })?.code
+    if (code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({ message: '缺少 interview_reports 表，请执行 server/migration_interview_reports.sql' })
     }
     res.status(500).json({ message: 'db error' })
   }
@@ -1428,16 +1661,25 @@ app.post(
         result = fallbackResumeScreening(plain, String(job.jd_text || ''), String(job.title || ''))
       }
 
+      const plainStore = plain.slice(0, RESUME_PLAINTEXT_MAX_SAVE)
       const [ins] = await mysqlPool.query<ResultSetHeader>(
-        `INSERT INTO resume_screenings (job_code, candidate_name, matched_job_title, match_score, status, report_summary, file_name)
-         VALUES (?,?,?,?,?,?,?)`,
+        `INSERT INTO resume_screenings (
+           job_code, candidate_name, matched_job_title, match_score,
+           skill_score, experience_score, education_score, stability_score,
+           status, report_summary, resume_plaintext, file_name
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           jobCode,
           result.candidateName,
           String(job.title || ''),
           result.matchScore,
+          result.skillScore,
+          result.experienceScore,
+          result.educationScore,
+          result.stabilityScore,
           result.status,
           result.summary,
+          plainStore,
           String(req.file.originalname || '').slice(0, 255)
         ]
       )
@@ -1449,6 +1691,10 @@ app.post(
           candidateName: result.candidateName,
           matchedJobTitle: String(job.title || ''),
           matchScore: result.matchScore,
+          skillScore: result.skillScore,
+          experienceScore: result.experienceScore,
+          educationScore: result.educationScore,
+          stabilityScore: result.stabilityScore,
           status: result.status,
           summary: result.summary
         }
@@ -1896,9 +2142,14 @@ app.post('/api/candidate/login-invite', async (req, res) => {
 
 app.get('/api/candidate/interview-questions', async (req, res) => {
   const jobId = String(req.query.jobId || '').trim().toUpperCase()
+  const candidateName = String(req.query.candidateName || req.query.name || '').trim()
   if (!jobId) return res.status(400).json({ message: 'jobId required' })
   try {
-    flowLog('interview-questions 开始', true, `jobId=${jobId}`)
+    flowLog(
+      'interview-questions 开始',
+      true,
+      `jobId=${jobId} candidate=${candidateName ? candidateName.slice(0, 8) : '(none)'}`
+    )
     const [rows] = await mysqlPool.query<any[]>(
       'SELECT title, department, jd_text FROM jobs WHERE job_code=? LIMIT 1',
       [jobId]
@@ -1906,16 +2157,26 @@ app.get('/api/candidate/interview-questions', async (req, res) => {
     const row = rows.length ? rows[0] : null
     const fallbackJob = JOBS[jobId as keyof typeof JOBS]
     if (!row && !fallbackJob) return res.status(404).json({ message: 'job not found' })
-    const aiQuestions = await generateAiQuestions({
-      title: String(row?.title || fallbackJob?.title || jobId),
-      department: String(row?.department || fallbackJob?.department || ''),
-      jdText: String(row?.jd_text || ''),
-      count: 3
+    const title = String(row?.title || fallbackJob?.title || jobId)
+    const department = String(row?.department || fallbackJob?.department || '')
+    const jdText = String(row?.jd_text || '')
+    const resumeText = candidateName ? await fetchResumeTextForCandidate(jobId, candidateName) : ''
+    const aiQuestions = await generatePersonalizedInterviewSix({
+      title,
+      department,
+      jdText,
+      resumeText,
+      candidateName: candidateName || '候选人'
     })
-    flowLog('interview-questions 成功', true, `count=${aiQuestions.length}`)
+    flowLog('interview-questions 成功', true, `count=${aiQuestions.length} resume=${resumeText ? 'yes' : 'no'}`)
     res.json({ data: aiQuestions })
   } catch (e) {
-    flowLog('interview-questions 失败', false, e instanceof Error ? e.message : 'generate questions failed')
+    const http = (e as InterviewQuestionsHttpError).httpStatus
+    const msg = e instanceof Error ? e.message : 'generate questions failed'
+    flowLog('interview-questions 失败', false, msg)
+    if (typeof http === 'number' && http >= 400 && http < 600) {
+      return res.status(http).json({ message: msg })
+    }
     res.status(500).json({ message: 'generate questions failed' })
   }
 })
@@ -2361,6 +2622,26 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
   if (!apiKey) {
     flowLog('submit-interview', true, '未配置 DASHSCOPE，使用回退评分')
+    if (sessionId) {
+      await upsertInterviewReport({
+        sessionId,
+        jobCode: jobId,
+        candidateName: String(profile.name || '候选人'),
+        candidateOpenId: String(profile.openid || ''),
+        score: fallback.score,
+        passed: fallback.passed,
+        overallFeedback: fallback.overallFeedback,
+        dimensionScores: fallback.dimensionScores || {},
+        suggestions: fallback.suggestions || [],
+        riskPoints: fallback.riskPoints || [],
+        behaviorSignals: {},
+        qa: answers.map((x) => ({
+          questionId: String(x.questionId || ''),
+          question: String(x.question || ''),
+          answer: String(x.answer || '')
+        }))
+      })
+    }
     return res.json({ data: fallback })
   }
 
@@ -2446,7 +2727,7 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
         {
           role: 'system',
           content:
-            '你是结构化面试评估助手。你必须只输出一个 JSON 对象，不得输出 markdown 或解释。JSON Schema: {"score":0-100数字,"passed":布尔,"overallFeedback":"字符串","dimensionScores":{"communication":0-100,"technical":0-100,"logic":0-100,"stability":0-100},"suggestions":["字符串"],"riskPoints":["字符串"]}。'
+            '你是结构化面试评估助手。请从多个方面给出可执行评价：沟通表达(communication)、技术深度(technicalDepth)、逻辑结构(logic)、岗位匹配(jobFit)、稳定性与抗压(stability)，每项 0-100。你必须只输出一个 JSON 对象，不得输出 markdown 或解释。JSON Schema: {"score":0-100数字,"passed":布尔,"overallFeedback":"字符串","dimensionScores":{"communication":0-100,"technicalDepth":0-100,"logic":0-100,"jobFit":0-100,"stability":0-100},"suggestions":["字符串"],"riskPoints":["字符串"]}。'
         },
         {
           role: 'user',
@@ -2460,18 +2741,52 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
     const parsed = parseAiInterviewScoreJson(text)
     if (!parsed) {
       flowLog('submit-interview AI解析', false, '模型返回非预期 JSON，使用回退评分')
-      return res.json({ data: { ...fallback, meta: { behaviorSignals, aiParsed: false } } })
+      const out = { ...fallback, meta: { behaviorSignals, aiParsed: false } }
+      if (sessionId) {
+        await upsertInterviewReport({
+          sessionId,
+          jobCode: jobId,
+          candidateName: String(profile.name || '候选人'),
+          candidateOpenId: String(profile.openid || ''),
+          score: out.score,
+          passed: out.passed,
+          overallFeedback: out.overallFeedback,
+          dimensionScores: out.dimensionScores || {},
+          suggestions: out.suggestions || [],
+          riskPoints: out.riskPoints || [],
+          behaviorSignals,
+          qa: mergedQa
+        })
+      }
+      return res.json({ data: out })
     }
     flowLog('submit-interview AI评分', true, `score=${parsed.score} passed=${parsed.passed}`)
-    return res.json({
-    data: {
+    const out = {
+      data: {
         ...parsed,
         meta: {
           behaviorSignals,
           aiParsed: true
         }
       }
-    })
+    }
+    if (sessionId) {
+      await upsertInterviewReport({
+        sessionId,
+        jobCode: jobId,
+        candidateName: String(profile.name || '候选人'),
+        candidateOpenId: String(profile.openid || ''),
+        score: parsed.score,
+        passed: parsed.passed,
+        overallFeedback: parsed.overallFeedback,
+        dimensionScores: parsed.dimensionScores || {},
+        suggestions: parsed.suggestions || [],
+        riskPoints: parsed.riskPoints || [],
+        behaviorSignals,
+        qa: mergedQa
+      })
+    }
+    return res.json(out)
   } catch (e) {
     flowLog('submit-interview 异常', false, e instanceof Error ? e.message : 'unknown')
     return res.json({ data: fallback })

@@ -95,6 +95,10 @@ export interface Resume {
   job: string
   jobCode?: string
   matchScore: number
+  skillScore?: number
+  experienceScore?: number
+  educationScore?: number
+  stabilityScore?: number
   status: string
   uploadTime: string
   reportSummary?: string
@@ -1842,12 +1846,45 @@ function JobQueryView({
   );
 }
 
+function deriveResumeDimsFromOverall(score: number) {
+  const s = Math.max(0, Math.min(100, Math.round(score)))
+  return {
+    skill: Math.max(0, Math.min(100, s + 7)),
+    experience: Math.max(0, Math.min(100, s + 2)),
+    education: Math.max(0, Math.min(100, s + 10)),
+    stability: Math.max(0, Math.min(100, s - 12))
+  }
+}
+
+function dimsFromScreeningDbRow(
+  row: {
+    skill_score?: number | null
+    experience_score?: number | null
+    education_score?: number | null
+    stability_score?: number | null
+  },
+  overall: number
+) {
+  const skill = Math.max(0, Math.min(100, Number(row.skill_score) || 0))
+  const experience = Math.max(0, Math.min(100, Number(row.experience_score) || 0))
+  const education = Math.max(0, Math.min(100, Number(row.education_score) || 0))
+  const stability = Math.max(0, Math.min(100, Number(row.stability_score) || 0))
+  if (skill + experience + education + stability === 0) {
+    return deriveResumeDimsFromOverall(overall)
+  }
+  return { skill, experience, education, stability }
+}
+
 function mapScreeningRow(r: {
   id: number | string
   job_code: string
   candidate_name: string
   matched_job_title: string | null
   match_score: number
+  skill_score?: number | null
+  experience_score?: number | null
+  education_score?: number | null
+  stability_score?: number | null
   status: string
   report_summary: string | null
   created_at: string | Date
@@ -1857,12 +1894,18 @@ function mapScreeningRow(r: {
     created instanceof Date
       ? created.toLocaleString('zh-CN', { hour12: false })
       : String(created || '')
+  const overall = Math.max(0, Math.min(100, Number(r.match_score) || 0))
+  const d = dimsFromScreeningDbRow(r, overall)
   return {
     id: String(r.id),
     name: String(r.candidate_name || '候选人'),
     job: String(r.matched_job_title || r.job_code || ''),
     jobCode: String(r.job_code || ''),
-    matchScore: Number(r.match_score) || 0,
+    matchScore: overall,
+    skillScore: d.skill,
+    experienceScore: d.experience,
+    educationScore: d.education,
+    stabilityScore: d.stability,
     status: String(r.status || ''),
     uploadTime,
     reportSummary: String(r.report_summary || '')
@@ -1905,6 +1948,10 @@ function ResumeScreeningView() {
           candidate_name: string
           matched_job_title: string | null
           match_score: number
+          skill_score?: number | null
+          experience_score?: number | null
+          education_score?: number | null
+          stability_score?: number | null
           status: string
           report_summary: string | null
           created_at: string | Date
@@ -2268,7 +2315,11 @@ function ResumeScreeningView() {
                 </button>
               </div>
               <div className="flex-1 overflow-y-auto px-6 py-4">
-                <p className="text-xs font-medium text-slate-500 mb-2">匹配度 {reportResume.matchScore} 分 · {reportResume.status}</p>
+                <p className="text-xs font-medium text-slate-500 mb-1">匹配度 {reportResume.matchScore} 分 · {reportResume.status}</p>
+                <p className="text-xs text-slate-500 mb-3">
+                  维度：技能 {reportResume.skillScore ?? '—'} / 经验 {reportResume.experienceScore ?? '—'} / 学历{' '}
+                  {reportResume.educationScore ?? '—'} / 稳定 {reportResume.stabilityScore ?? '—'}
+                </p>
                 <div className="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">
                   {reportResume.reportSummary?.trim() || '暂无报告正文。'}
                 </div>
@@ -2297,20 +2348,29 @@ function ApplicationManagementView() {
     jobCode: string
     jobTitle: string
     score: number
+    skill: number
+    experience: number
+    education: number
+    stability: number
     status: string
     summary: string
   }>>([])
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
-  const [creatingInvite, setCreatingInvite] = useState<string | null>(null)
-  const [lastInvite, setLastInvite] = useState<{ code: string; jobCode: string } | null>(null)
-
-  const toDims = (score: number) => ({
-    skill: Math.max(0, Math.min(100, score + 7)),
-    experience: Math.max(0, Math.min(100, score + 2)),
-    education: Math.max(0, Math.min(100, score + 10)),
-    stability: Math.max(0, Math.min(100, score - 12))
-  })
+  const [reportLoadingId, setReportLoadingId] = useState<string | null>(null)
+  const [reportModal, setReportModal] = useState<null | {
+    candidateName: string
+    jobCode: string
+    score: number
+    passed: boolean
+    overallFeedback: string
+    dimensionScores: Record<string, number>
+    suggestions: string[]
+    riskPoints: string[]
+    behaviorSignals: Record<string, unknown>
+    qa: Array<{ questionId?: string; question?: string; answer?: string }>
+    updatedAt: string
+  }>(null)
 
   const loadRows = useCallback(() => {
     setLoading(true)
@@ -2323,12 +2383,26 @@ function ApplicationManagementView() {
         setRows(
           data.map((x) => {
             const row = x as Record<string, unknown>
+            const overall = Math.max(0, Math.min(100, Number(row.match_score) || 0))
+            const d = dimsFromScreeningDbRow(
+              {
+                skill_score: row.skill_score as number | null | undefined,
+                experience_score: row.experience_score as number | null | undefined,
+                education_score: row.education_score as number | null | undefined,
+                stability_score: row.stability_score as number | null | undefined
+              },
+              overall
+            )
             return {
               id: String(row.id ?? ''),
               candidateName: String(row.candidate_name ?? '候选人'),
               jobCode: String(row.job_code ?? ''),
               jobTitle: String(row.matched_job_title ?? row.job_code ?? ''),
-              score: Math.max(0, Math.min(100, Number(row.match_score) || 0)),
+              score: overall,
+              skill: d.skill,
+              experience: d.experience,
+              education: d.education,
+              stability: d.stability,
               status: String(row.status ?? '待初面'),
               summary: String(row.report_summary ?? '')
             }
@@ -2346,23 +2420,30 @@ function ApplicationManagementView() {
     loadRows()
   }, [loadRows])
 
-  const handleInvite = async (jobCode: string) => {
-    setCreatingInvite(jobCode)
+  const handleOpenInterviewReport = async (row: { id: string; candidateName: string; jobCode: string }) => {
+    setReportLoadingId(row.id)
     try {
-      const recruiterCode = getAdminLoginProfile()?.username || ''
-      const r = await miniappApiFetch('/api/admin/invitations', {
-        method: 'POST',
-        body: JSON.stringify({ jobCode, expiresInDays: 7, recruiterCode })
+      const r = await miniappApiFetch(`/api/admin/interview-report?screeningId=${encodeURIComponent(row.id)}`)
+      const j = (await r.json()) as { data?: Record<string, unknown>; message?: string }
+      if (!r.ok || !j.data) throw new Error(j.message || `加载失败 ${r.status}`)
+      const d = j.data
+      setReportModal({
+        candidateName: row.candidateName,
+        jobCode: row.jobCode,
+        score: Math.max(0, Math.min(100, Number(d.score) || 0)),
+        passed: Boolean(d.passed),
+        overallFeedback: String(d.overallFeedback || ''),
+        dimensionScores: (d.dimensionScores as Record<string, number>) || {},
+        suggestions: Array.isArray(d.suggestions) ? d.suggestions.map((x) => String(x)) : [],
+        riskPoints: Array.isArray(d.riskPoints) ? d.riskPoints.map((x) => String(x)) : [],
+        behaviorSignals: (d.behaviorSignals as Record<string, unknown>) || {},
+        qa: Array.isArray(d.qa) ? (d.qa as Array<{ questionId?: string; question?: string; answer?: string }>) : [],
+        updatedAt: String(d.updatedAt || '')
       })
-      const j = (await r.json()) as { data?: { inviteCode: string; jobCode: string }; message?: string }
-      if (!r.ok) throw new Error(j.message || `发起失败 ${r.status}`)
-      if (j.data?.inviteCode) {
-        setLastInvite({ code: j.data.inviteCode, jobCode: j.data.jobCode })
-      }
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : '发起面试失败')
+      window.alert(e instanceof Error ? e.message : '加载面试报告失败')
     } finally {
-      setCreatingInvite(null)
+      setReportLoadingId(null)
     }
   }
 
@@ -2379,12 +2460,6 @@ function ApplicationManagementView() {
             刷新
           </button>
         </div>
-        {lastInvite ? (
-          <div className="px-6 py-3 border-b border-slate-100 bg-emerald-50 text-emerald-900 text-sm">
-            最新邀请码：<code className="font-mono bg-white/70 px-1.5 py-0.5 rounded">{lastInvite.code}</code>
-            <span className="ml-2 text-emerald-700">岗位 {lastInvite.jobCode}</span>
-          </div>
-        ) : null}
         {err ? <div className="px-6 py-3 text-sm text-red-600 border-b border-slate-100">{err}</div> : null}
         <table className="w-full text-left text-sm">
           <thead className="bg-white border-b border-slate-200 text-slate-600">
@@ -2404,9 +2479,7 @@ function ApplicationManagementView() {
             ) : rows.length === 0 ? (
               <tr><td className="px-6 py-8 text-slate-500" colSpan={7}>暂无数据，请先在简历筛查上传简历</td></tr>
             ) : (
-              rows.map((row) => {
-                const d = toDims(row.score)
-                return (
+              rows.map((row) => (
                   <tr key={row.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-6 py-4 font-bold text-slate-900">{row.candidateName}</td>
                     <td className="px-6 py-4 text-slate-600">{row.jobTitle}（{row.jobCode}）</td>
@@ -2416,7 +2489,7 @@ function ApplicationManagementView() {
                       </span>
                     </td>
                     <td className="px-6 py-4 text-xs text-slate-600 leading-relaxed">
-                      技能 {d.skill} / 经验 {d.experience} / 学历 {d.education} / 稳定 {d.stability}
+                      技能 {row.skill} / 经验 {row.experience} / 学历 {row.education} / 稳定 {row.stability}
                     </td>
                     <td className="px-6 py-4 text-slate-500 text-xs leading-relaxed">{row.summary || '—'}</td>
                     <td className="px-6 py-4">
@@ -2425,20 +2498,115 @@ function ApplicationManagementView() {
                     <td className="px-6 py-4 text-right">
                       <button
                         type="button"
-                        disabled={Boolean(creatingInvite)}
-                        onClick={() => void handleInvite(row.jobCode)}
-                        className="text-emerald-600 hover:text-emerald-800 font-medium disabled:opacity-50"
+                        disabled={Boolean(reportLoadingId)}
+                        onClick={() => void handleOpenInterviewReport(row)}
+                        className="text-indigo-600 hover:text-indigo-800 font-medium disabled:opacity-50"
                       >
-                        {creatingInvite === row.jobCode ? '生成中…' : '发起面试'}
+                        {reportLoadingId === row.id ? '加载中…' : '面试报告'}
                       </button>
                     </td>
                   </tr>
-                )
-              })
+              ))
             )}
           </tbody>
         </table>
       </div>
+      <AnimatePresence>
+        {reportModal ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50"
+            role="dialog"
+            aria-modal="true"
+            onClick={() => setReportModal(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              transition={{ duration: 0.2 }}
+              className="bg-white rounded-xl shadow-xl border border-slate-200 w-full max-w-3xl max-h-[84vh] flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-4 px-6 py-4 border-b border-slate-100">
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900">面试报告 · {reportModal.candidateName}</h3>
+                  <p className="text-sm text-slate-500 mt-0.5">
+                    岗位 {reportModal.jobCode} · 更新时间 {reportModal.updatedAt || '—'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setReportModal(null)}
+                  className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                  aria-label="关闭"
+                >
+                  <XCircle className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+                <div className="rounded-lg border border-slate-200 p-4 bg-slate-50">
+                  <p className="text-sm text-slate-600">
+                    综合评分 <span className="font-bold text-slate-900">{reportModal.score}</span> · 结果{' '}
+                    <span className={reportModal.passed ? 'text-emerald-600 font-semibold' : 'text-rose-600 font-semibold'}>
+                      {reportModal.passed ? '通过' : '待提升'}
+                    </span>
+                  </p>
+                  <p className="mt-2 text-sm text-slate-700 whitespace-pre-wrap">{reportModal.overallFeedback || '暂无综合结论'}</p>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                  {Object.entries(reportModal.dimensionScores || {}).map(([k, v]) => (
+                    <div key={k} className="rounded-lg border border-slate-200 px-3 py-2 text-sm bg-white">
+                      <div className="text-slate-500">{k}</div>
+                      <div className="font-semibold text-slate-900">{Number(v) || 0}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="grid md:grid-cols-2 gap-4">
+                  <div>
+                    <h4 className="text-sm font-semibold text-slate-800 mb-2">改进建议</h4>
+                    <ul className="text-sm text-slate-700 space-y-1">
+                      {(reportModal.suggestions || []).length ? reportModal.suggestions.map((x, idx) => <li key={idx}>- {x}</li>) : <li>- 暂无</li>}
+                    </ul>
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-semibold text-slate-800 mb-2">风险点</h4>
+                    <ul className="text-sm text-slate-700 space-y-1">
+                      {(reportModal.riskPoints || []).length ? reportModal.riskPoints.map((x, idx) => <li key={idx}>- {x}</li>) : <li>- 暂无</li>}
+                    </ul>
+                  </div>
+                </div>
+                <div>
+                  <h4 className="text-sm font-semibold text-slate-800 mb-2">答题明细</h4>
+                  <div className="space-y-2">
+                    {(reportModal.qa || []).length ? (
+                      reportModal.qa.map((item, idx) => (
+                        <div key={`${item.questionId || idx}`} className="border border-slate-200 rounded-lg p-3">
+                          <p className="text-sm font-medium text-slate-900">Q{idx + 1}：{String(item.question || '—')}</p>
+                          <p className="text-xs text-slate-600 mt-1 whitespace-pre-wrap">{String(item.answer || '（无作答）')}</p>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-sm text-slate-500">暂无答题明细</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 rounded-b-xl flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setReportModal(null)}
+                  className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors"
+                >
+                  关闭
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </div>
   )
 }

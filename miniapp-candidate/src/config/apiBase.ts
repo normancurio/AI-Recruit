@@ -6,8 +6,23 @@ const ENV_API_BASE = String(process.env.TARO_APP_API_BASE || '').trim().replace(
 const DEV_STORAGE_KEY = 'DEV_API_BASE'
 declare const TARO_FLOW_DEBUG: string
 
+function isProdApiBase(base: string) {
+  if (!base) return false
+  try {
+    const u = new URL(base)
+    const host = String(u.host || '').toLowerCase()
+    return host === 'mind.cisetech.com'
+  } catch {
+    return /mind\.cisetech\.com/i.test(base)
+  }
+}
+
 function allowDevApiOverride() {
-  return String(typeof TARO_FLOW_DEBUG !== 'undefined' ? TARO_FLOW_DEBUG : '').trim() === '1'
+  const debugEnabled = String(typeof TARO_FLOW_DEBUG !== 'undefined' ? TARO_FLOW_DEBUG : '').trim() === '1'
+  if (!debugEnabled) return false
+  // 正式域名构建时强制禁用 DEV_API_BASE 覆盖，避免本地调试地址串到发版包
+  if (isProdApiBase(ENV_API_BASE)) return false
+  return true
 }
 
 /**
@@ -17,7 +32,15 @@ function allowDevApiOverride() {
  *   `wx.setStorageSync('DEV_API_BASE', 'http://192.168.1.16:3001')` 后重进小程序，可立刻指向新 IP，无需重编。
  */
 export function getApiBase(): string {
-  if (!allowDevApiOverride()) return ENV_API_BASE
+  if (!allowDevApiOverride()) {
+    // 防止调试覆盖残留导致误判：在禁用覆盖的构建中清理本地覆盖值
+    try {
+      Taro.removeStorageSync(DEV_STORAGE_KEY)
+    } catch {
+      /* 非小程序环境等 */
+    }
+    return ENV_API_BASE
+  }
   try {
     const v = Taro.getStorageSync(DEV_STORAGE_KEY) as string
     if (typeof v === 'string') {

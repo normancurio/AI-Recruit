@@ -42,6 +42,9 @@ export default function LobbyPage() {
           <Text>1. 邀请由企业方发出，请勿向他人泄露邀请码</Text>
           <Text>2. 请在安静环境、网络稳定下进行，并允许相机与麦克风权限</Text>
           <Text>3. 面试为 AI 对话：需开启摄像头（本机预览），语音将转写为文字用于作答与评估</Text>
+          <Text>
+            4. 题目在进入答题页时由服务端大模型根据 JD 与简历实时生成
+          </Text>
         </View>
 
         <Button className='primary-btn' onClick={handleEnterInterview}>

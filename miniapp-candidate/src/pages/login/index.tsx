@@ -33,9 +33,11 @@ export default function LoginPage() {
 
   const handleNext = async () => {
     const code = inviteCode.trim().toUpperCase()
-    const codeOk = /^J\d{3,}$/.test(code) || /^INV[A-Z0-9]{10,}$/.test(code)
+    const isJobCode = /^J\d{3,}$/.test(code)
+    const isInviteCode = /^INV[\w-]{8,}$/.test(code)
+    const codeOk = isJobCode || isInviteCode
     if (!codeOk) {
-      Taro.showToast({ title: '邀请码格式不正确（岗位码 J… 或后台邀请 INV…）', icon: 'none' })
+      Taro.showToast({ title: '邀请码格式不正确（岗位码 J001 或后台 INV-…）', icon: 'none' })
       return
     }
     try {
