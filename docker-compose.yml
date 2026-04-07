@@ -53,4 +53,6 @@ services:
     environment:
       NODE_ENV: production
       ADMIN_UI_PORT: "3010"
+      # 浏览器访问的小程序 API 公网根地址（无尾斜杠），覆盖错误构建里的 localhost:3011
+      MINIAPP_API_PUBLIC_URL: ${MINIAPP_API_PUBLIC_URL:-}
     restart: unless-stopped

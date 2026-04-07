@@ -21,9 +21,16 @@ import {
 } from 'lucide-react';
 
 /**
- * 小程序 API 根地址。未配 VITE_API_BASE 时：在 localhost / 127.0.0.1 打开管理端则默认同主机 :3001（不依赖 import.meta.env.DEV，避免 Vite middleware 模式下 DEV 异常导致基址为空）。
+ * 小程序 API 根地址。
+ * 1) 生产环境由 server.ts 在 index.html 注入 window.__ADMIN_MINIAPP_API_BASE__（见 MINIAPP_API_PUBLIC_URL），避免构建时写死 localhost 导致线上 ERR_CONNECTION_REFUSED。
+ * 2) 否则使用构建期 VITE_API_BASE。
+ * 3) 未配时在 localhost 打开则默认同主机 :3001。
  */
 function resolveMiniappApiBase(): string {
+  if (typeof window !== 'undefined') {
+    const injected = String((window as unknown as { __ADMIN_MINIAPP_API_BASE__?: string }).__ADMIN_MINIAPP_API_BASE__ || '').trim()
+    if (injected) return injected.replace(/\/$/, '')
+  }
   const v = (import.meta.env.VITE_API_BASE || '').trim()
   if (v) return v
   if (typeof window !== 'undefined') {

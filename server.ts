@@ -572,9 +572,35 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
+    const publicApi = String(
+      process.env.MINIAPP_API_PUBLIC_URL || process.env.PUBLIC_API_BASE || ''
+    )
+      .trim()
+      .replace(/\/$/, '');
+    let spaIndexHtml: string | null = null;
+    const loadSpaIndexHtml = (): string => {
+      if (spaIndexHtml) return spaIndexHtml;
+      const raw = fs.readFileSync(path.join(distPath, 'index.html'), 'utf8');
+      if (publicApi) {
+        const snip = `<script>window.__ADMIN_MINIAPP_API_BASE__=${JSON.stringify(publicApi)}</script>`;
+        spaIndexHtml = raw.includes('</head>')
+          ? raw.replace('</head>', `${snip}</head>`)
+          : `${snip}${raw}`;
+      } else {
+        spaIndexHtml = raw;
+      }
+      return spaIndexHtml;
+    };
+    if (publicApi) {
+      console.log(`[server.ts] 管理端将请求小程序 API：${publicApi}（来自 MINIAPP_API_PUBLIC_URL / PUBLIC_API_BASE）`);
+    } else {
+      console.warn(
+        '[server.ts] 未设置 MINIAPP_API_PUBLIC_URL：管理端将使用构建期 VITE_API_BASE；若仍为 localhost，线上登录会 ERR_CONNECTION_REFUSED'
+      );
+    }
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+    app.get('*', (_req, res) => {
+      res.type('html').send(loadSpaIndexHtml());
     });
   }
 
