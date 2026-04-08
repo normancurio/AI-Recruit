@@ -14,7 +14,7 @@ x-app-build: &app-build
   context: .
   dockerfile: Dockerfile
   args:
-    VITE_API_BASE: ${PUBLIC_API_BASE:-http://localhost:3011}
+    VITE_API_BASE: ${PUBLIC_API_BASE:-http://47.102.85.156:3011}
     VITE_ADMIN_API_TOKEN: ${VITE_ADMIN_API_TOKEN_BUILD:-}
 
 services:
