@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -322,8 +322,8 @@ export default function App() {
       case 'clients': return <ClientManagementView />;
       case 'project-list': return <ProjectManagementView role={currentRole} />;
       case 'job-query': return <JobQueryView onNavigate={setActiveMenu} currentRole={currentRole} authProfile={authProfile} />;
-      case 'resume-screening': return <ResumeScreeningView />;
-      case 'application-mgmt': return <ApplicationManagementView />;
+      case 'resume-screening': return <ResumeScreeningView currentRole={currentRole} authProfile={authProfile} />;
+      case 'application-mgmt': return <ApplicationManagementView currentRole={currentRole} authProfile={authProfile} />;
       case 'sys-dept': return <SystemDeptView />;
       case 'sys-user': return <SystemUserView />;
       case 'sys-role': return <SystemRoleView />;
@@ -1491,6 +1491,64 @@ function parseRecruitersInput(s: string): string[] {
     .filter(Boolean);
 }
 
+function recruiterIdentityKeys(profile: AdminLoginProfile | null): string[] {
+  const uname = String(profile?.username || '').trim().toLowerCase();
+  const name = String(profile?.name || '').trim().toLowerCase();
+  return [uname, name].filter(Boolean);
+}
+
+function recruitersContainMe(recruiters: string[] | undefined, meKeys: string[]): boolean {
+  if (!meKeys.length) return false;
+  const rs = (recruiters || []).map((x) => String(x || '').trim().toLowerCase()).filter(Boolean);
+  if (!rs.length) return false;
+  return rs.some((r) => meKeys.includes(r));
+}
+
+function useRecruiterScopedJobCodes(currentRole: Role, authProfile: AdminLoginProfile | null) {
+  const [codes, setCodes] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(() => {
+    if (currentRole !== 'recruiter') {
+      setCodes([]);
+      setLoading(false);
+      return;
+    }
+    const meKeys = recruiterIdentityKeys(authProfile);
+    if (!meKeys.length) {
+      setCodes([]);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    void fetch('/api/projects')
+      .then((res) => res.json())
+      .then((rows: Project[]) => {
+        if (!Array.isArray(rows)) {
+          setCodes([]);
+          return;
+        }
+        const out = new Set<string>();
+        for (const p of rows) {
+          for (const j of p.jobs || []) {
+            if (recruitersContainMe(j.recruiters, meKeys)) {
+              if (j.id) out.add(String(j.id));
+            }
+          }
+        }
+        setCodes(Array.from(out));
+      })
+      .catch(() => setCodes([]))
+      .finally(() => setLoading(false));
+  }, [authProfile, currentRole]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  return { codes, loading };
+}
+
 function jobAssignmentOwner(job: Job, projectManager: string): string {
   if (job.recruiters?.length) return job.recruiters.join('、');
   if (projectManager && projectManager !== '-') return projectManager;
@@ -1538,19 +1596,14 @@ function JobQueryView({
         }
         setProjectOptions(data);
         const out: JobAssignmentRow[] = [];
-        const meUsername = (authProfile?.username || '').trim().toLowerCase();
-        const meName = (authProfile?.name || '').trim().toLowerCase();
-        const meKeys = [meUsername, meName].filter(Boolean);
+        const meKeys = recruiterIdentityKeys(authProfile);
         for (const p of data) {
           if (p.id === 'EMPTY') continue;
           const pname = p.id === 'UNASSIGNED' ? '未分配项目岗位' : p.name;
           const pm = p.manager || '—';
           for (const job of p.jobs || []) {
             if (currentRole === 'recruiter') {
-              const jr = (job.recruiters || []).map((x) => String(x).trim().toLowerCase());
-              if (!jr.length) continue;
-              const matched = jr.some((r) => meKeys.includes(r));
-              if (!matched) continue;
+              if (!recruitersContainMe(job.recruiters, meKeys)) continue;
             }
             out.push({ job, projectName: pname, projectManager: pm });
           }
@@ -1717,6 +1770,7 @@ function JobQueryView({
                 <th className="px-5 py-3 font-medium whitespace-nowrap">岗位名称</th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">所属部门</th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">负责人</th>
+                <th className="px-5 py-3 font-medium whitespace-nowrap">JD</th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">HC</th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">薪资范围</th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">地点</th>
@@ -1728,7 +1782,7 @@ function JobQueryView({
             <tbody className="divide-y divide-slate-100">
               {rows.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-5 py-12 text-center text-slate-500">
+                  <td colSpan={10} className="px-5 py-12 text-center text-slate-500">
                     暂无岗位数据，请点击右上角「+」添加
                   </td>
                 </tr>
@@ -1748,6 +1802,11 @@ function JobQueryView({
                       <td className="px-5 py-4 text-slate-700 align-top max-w-[140px]">
                         <span className="line-clamp-2" title={owner}>
                           {owner}
+                        </span>
+                      </td>
+                      <td className="px-5 py-4 text-slate-700 align-top max-w-[320px]">
+                        <span className="line-clamp-2" title={job.jdText || '—'}>
+                          {job.jdText || '—'}
                         </span>
                       </td>
                       <td className="px-5 py-4 text-slate-800 font-medium tabular-nums align-top">{hc}</td>
@@ -2087,7 +2146,13 @@ function mapScreeningRow(r: {
   }
 }
 
-function ResumeScreeningView() {
+function ResumeScreeningView({
+  currentRole,
+  authProfile
+}: {
+  currentRole: Role;
+  authProfile: AdminLoginProfile | null;
+}) {
   const [resumes, setResumes] = useState<Resume[]>([]);
   const [sessRev, setSessRev] = useState(0);
   useEffect(() => subscribeAdminSession(() => setSessRev((n) => n + 1)), []);
@@ -2105,6 +2170,12 @@ function ResumeScreeningView() {
   const [screenListError, setScreenListError] = useState('');
   const [reportResume, setReportResume] = useState<Resume | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const { codes: recruiterJobCodes, loading: recruiterScopeLoading } = useRecruiterScopedJobCodes(
+    currentRole,
+    authProfile
+  );
+  const isRecruiter = currentRole === 'recruiter';
+  const recruiterCodeSet = useMemo(() => new Set(recruiterJobCodes), [recruiterJobCodes]);
 
   const loadScreenings = useCallback(() => {
     if (!apiBase || !hasToken) {
@@ -2131,13 +2202,16 @@ function ResumeScreeningView() {
           report_summary: string | null
           created_at: string | Date
         }>
-        setResumes(rows.map((row) => mapScreeningRow(row)));
+        const mapped = rows.map((row) => mapScreeningRow(row));
+        setResumes(
+          isRecruiter ? mapped.filter((x) => x.jobCode && recruiterCodeSet.has(String(x.jobCode))) : mapped
+        );
       })
       .catch(() => {
         setResumes([]);
         setScreenListError('筛查记录暂时无法加载，请稍后重试或联系管理员检查系统是否已升级、网络是否正常。');
       });
-  }, [apiBase, hasToken, sessRev]);
+  }, [apiBase, hasToken, isRecruiter, recruiterCodeSet, sessRev]);
 
   useEffect(() => {
     loadScreenings();
@@ -2166,7 +2240,9 @@ function ResumeScreeningView() {
                 : `服务异常（${r.status}），请稍后再试或联系管理员。`);
           throw new Error(hint);
         }
-        setInviteJobs(j.data || []);
+        const all = j.data || [];
+        const scoped = isRecruiter ? all.filter((x) => recruiterCodeSet.has(String(x.job_code))) : all;
+        setInviteJobs(scoped);
       })
       .catch((e) => {
         const msg = e instanceof Error ? e.message : String(e);
@@ -2180,7 +2256,7 @@ function ResumeScreeningView() {
         setInviteJobs([]);
       })
       .finally(() => setInviteJobsLoading(false));
-  }, [apiBase, hasToken, sessRev]);
+  }, [apiBase, hasToken, isRecruiter, recruiterCodeSet, sessRev]);
 
   useEffect(() => {
     if (inviteJobs.length === 0) return;
@@ -2228,7 +2304,7 @@ function ResumeScreeningView() {
     }
     const name = (resume.job || '').trim();
     if (!name) {
-      setInviteBanner('该简历未标注匹配岗位，请在上方岗位列表中手动发起面试。');
+      setInviteBanner('该简历未标注匹配岗位，请联系管理员补充岗位关联后再发起面试。');
       return;
     }
     const matched =
@@ -2236,7 +2312,7 @@ function ResumeScreeningView() {
       inviteJobs.find((j) => j.title === name) ||
       inviteJobs.find((j) => name.includes(j.title) || j.title.includes(name));
     if (!matched) {
-      setInviteBanner(`未在岗位列表中找到与「${name}」对应的岗位，请在上方列表中选择正确岗位发起面试。`);
+      setInviteBanner(`未在可操作岗位中找到与「${name}」对应的岗位，请联系管理员确认岗位分配。`);
       return;
     }
     void handleMiniappInvite(matched.job_code);
@@ -2284,6 +2360,11 @@ function ResumeScreeningView() {
       {inviteBanner ? (
         <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">{inviteBanner}</div>
       ) : null}
+      {isRecruiter && !recruiterScopeLoading && recruiterJobCodes.length === 0 ? (
+        <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">
+          当前账号未分配可操作岗位，请联系管理员在岗位分配中添加您的岗位负责人配置。
+        </div>
+      ) : null}
       <div className="space-y-6">
         {/* Upload Area */}
         <div>
@@ -2294,7 +2375,7 @@ function ResumeScreeningView() {
               <select
                 value={selectedJobCode}
                 onChange={(e) => setSelectedJobCode(e.target.value)}
-                disabled={!inviteJobs.length || inviteJobsLoading}
+                disabled={!inviteJobs.length || inviteJobsLoading || recruiterScopeLoading}
                 className="w-full border border-slate-200 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 outline-none text-sm disabled:bg-slate-100"
               >
                 {inviteJobs.length === 0 ? (
@@ -2515,7 +2596,13 @@ function ResumeScreeningView() {
   );
 }
 
-function ApplicationManagementView() {
+function ApplicationManagementView({
+  currentRole,
+  authProfile
+}: {
+  currentRole: Role;
+  authProfile: AdminLoginProfile | null;
+}) {
   const [rows, setRows] = useState<Array<{
     id: string
     candidateName: string
@@ -2532,6 +2619,9 @@ function ApplicationManagementView() {
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
   const [reportLoadingId, setReportLoadingId] = useState<string | null>(null)
+  const [keyword, setKeyword] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
+  const [scoreFilter, setScoreFilter] = useState<'all' | 'high' | 'mid' | 'low'>('all')
   const [reportModal, setReportModal] = useState<null | {
     candidateName: string
     jobCode: string
@@ -2545,6 +2635,12 @@ function ApplicationManagementView() {
     qa: Array<{ questionId?: string; question?: string; answer?: string }>
     updatedAt: string
   }>(null)
+  const { codes: recruiterJobCodes, loading: recruiterScopeLoading } = useRecruiterScopedJobCodes(
+    currentRole,
+    authProfile
+  )
+  const isRecruiter = currentRole === 'recruiter'
+  const recruiterCodeSet = useMemo(() => new Set(recruiterJobCodes), [recruiterJobCodes])
 
   const loadRows = useCallback(() => {
     setLoading(true)
@@ -2554,8 +2650,7 @@ function ApplicationManagementView() {
         const j = (await r.json()) as { data?: unknown[]; message?: string }
         if (!r.ok) throw new Error(j.message || `加载失败 ${r.status}`)
         const data = Array.isArray(j.data) ? j.data : []
-        setRows(
-          data.map((x) => {
+        const mapped = data.map((x) => {
             const row = x as Record<string, unknown>
             const overall = Math.max(0, Math.min(100, Number(row.match_score) || 0))
             const d = dimsFromScreeningDbRow(
@@ -2581,6 +2676,8 @@ function ApplicationManagementView() {
               summary: String(row.report_summary ?? '')
             }
           })
+        setRows(
+          isRecruiter ? mapped.filter((x) => x.jobCode && recruiterCodeSet.has(String(x.jobCode))) : mapped
         )
       })
       .catch((e: unknown) => {
@@ -2588,11 +2685,32 @@ function ApplicationManagementView() {
         setErr(e instanceof Error ? e.message : '加载失败')
       })
       .finally(() => setLoading(false))
-  }, [])
+  }, [isRecruiter, recruiterCodeSet])
 
   useEffect(() => {
     loadRows()
   }, [loadRows])
+
+  const filteredRows = rows.filter((row) => {
+    const kw = keyword.trim().toLowerCase()
+    if (kw) {
+      const hit =
+        row.candidateName.toLowerCase().includes(kw) ||
+        row.jobTitle.toLowerCase().includes(kw) ||
+        row.jobCode.toLowerCase().includes(kw)
+      if (!hit) return false
+    }
+    if (statusFilter && row.status !== statusFilter) return false
+    if (scoreFilter === 'high' && row.score < 80) return false
+    if (scoreFilter === 'mid' && (row.score < 60 || row.score >= 80)) return false
+    if (scoreFilter === 'low' && row.score >= 60) return false
+    return true
+  })
+
+  const statusOptions = Array.from(new Set(rows.map((x) => x.status).filter(Boolean)))
+  const highCount = rows.filter((x) => x.score >= 80).length
+  const midCount = rows.filter((x) => x.score >= 60 && x.score < 80).length
+  const lowCount = rows.filter((x) => x.score < 60).length
 
   const handleOpenInterviewReport = async (row: { id: string; candidateName: string; jobCode: string }) => {
     setReportLoadingId(row.id)
@@ -2623,16 +2741,71 @@ function ApplicationManagementView() {
 
   return (
     <div className="space-y-6">
+      {isRecruiter && !recruiterScopeLoading && recruiterJobCodes.length === 0 ? (
+        <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">
+          当前账号未分配可查看岗位，请联系管理员在岗位分配中添加您的岗位负责人配置。
+        </div>
+      ) : null}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-          <h3 className="font-bold text-slate-900">初面管理（AI 简历评估）</h3>
-          <button
-            type="button"
-            onClick={loadRows}
-            className="text-sm text-indigo-600 hover:text-indigo-800 font-medium"
-          >
-            刷新
-          </button>
+        <div className="p-6 border-b border-slate-100 bg-slate-50 space-y-4">
+          <div className="flex justify-between items-center gap-3 flex-wrap">
+            <h3 className="font-bold text-slate-900">初面管理（AI 简历评估）</h3>
+            <button
+              type="button"
+              onClick={loadRows}
+              className="text-sm text-indigo-600 hover:text-indigo-800 font-medium"
+            >
+              刷新
+            </button>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+            <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2">
+              <p className="text-xs text-emerald-700">高匹配（80+）</p>
+              <p className="text-lg font-bold text-emerald-900">{highCount}</p>
+            </div>
+            <div className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2">
+              <p className="text-xs text-amber-700">待观察（60-79）</p>
+              <p className="text-lg font-bold text-amber-900">{midCount}</p>
+            </div>
+            <div className="rounded-lg border border-rose-100 bg-rose-50 px-3 py-2">
+              <p className="text-xs text-rose-700">低匹配（&lt;60）</p>
+              <p className="text-lg font-bold text-rose-900">{lowCount}</p>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+              <p className="text-xs text-slate-500">当前筛选结果</p>
+              <p className="text-lg font-bold text-slate-900">{filteredRows.length}</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+            <input
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              placeholder="搜索候选人/岗位/编码"
+              className="md:col-span-2 border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="">全部状态</option>
+              {statusOptions.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+            <select
+              value={scoreFilter}
+              onChange={(e) => setScoreFilter(e.target.value as 'all' | 'high' | 'mid' | 'low')}
+              className="border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="all">全部分段</option>
+              <option value="high">高匹配（80+）</option>
+              <option value="mid">待观察（60-79）</option>
+              <option value="low">低匹配（&lt;60）</option>
+            </select>
+          </div>
         </div>
         {err ? <div className="px-6 py-3 text-sm text-red-600 border-b border-slate-100">{err}</div> : null}
         <table className="w-full text-left text-sm">
@@ -2650,10 +2823,10 @@ function ApplicationManagementView() {
           <tbody className="divide-y divide-slate-100">
             {loading ? (
               <tr><td className="px-6 py-8 text-slate-500" colSpan={7}>加载中...</td></tr>
-            ) : rows.length === 0 ? (
+            ) : filteredRows.length === 0 ? (
               <tr><td className="px-6 py-8 text-slate-500" colSpan={7}>暂无数据，请先在简历筛查上传简历</td></tr>
             ) : (
-              rows.map((row) => (
+              filteredRows.map((row) => (
                   <tr key={row.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-6 py-4 font-bold text-slate-900">{row.candidateName}</td>
                     <td className="px-6 py-4 text-slate-600">{row.jobTitle}（{row.jobCode}）</td>
