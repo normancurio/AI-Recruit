@@ -1141,6 +1141,57 @@ function verifyAdminPassword(password: string, stored: string): boolean {
   }
 }
 
+/** 与 server.ts 管理库 users.password_hash 写入格式一致 */
+function hashAdminPasswordForDb(password: string): string {
+  const salt = `adm_${crypto.randomBytes(12).toString('hex')}`
+  const hex = crypto.scryptSync(password, salt, 64).toString('hex')
+  return `${salt}:${hex}`
+}
+
+function extractAdminRequestToken(req: express.Request): string {
+  const auth = String(req.headers.authorization || '')
+  const bearer = auth.startsWith('Bearer ') ? auth.slice(7).trim() : ''
+  const headerToken = String(req.headers['x-admin-token'] || '').trim()
+  return bearer || headerToken
+}
+
+/** 在 assertAdminToken 已通过的前提下，解析当前会话对应的管理库登录用户名（非环境令牌） */
+async function resolveAdminDbUsernameFromToken(token: string): Promise<string | null> {
+  const legacy = String(process.env.ADMIN_API_TOKEN || '').trim()
+  if (legacy && token === legacy) return null
+
+  if (token.includes('.')) {
+    const dot = token.lastIndexOf('.')
+    const payloadStr = token.slice(0, dot)
+    try {
+      const raw = JSON.parse(Buffer.from(payloadStr, 'base64url').toString('utf8')) as {
+        v?: number
+        exp?: number
+        u?: string
+      }
+      if (typeof raw.exp !== 'number' || raw.exp < Math.floor(Date.now() / 1000)) return null
+      if ((raw.v === 1 || raw.v === 2) && typeof raw.u === 'string' && raw.u.trim()) return raw.u.trim()
+    } catch {
+      return null
+    }
+    return null
+  }
+
+  if (!adminRedisConfigured()) return null
+  const r = getRedisClient()
+  if (!r) return null
+  const key = `${ADMIN_SESSION_KEY_PREFIX}${token}`
+  try {
+    const v = await r.get(key)
+    if (!v) return null
+    const p = JSON.parse(v) as { u?: string }
+    const u = String(p.u || '').trim()
+    return u || null
+  } catch {
+    return null
+  }
+}
+
 function signAdminSessionToken(userId: string, username: string): string | null {
   const secret = getAdminSessionSecret()
   if (!secret) return null
@@ -1328,6 +1379,67 @@ async function assertAdminToken(req: express.Request, res: express.Response): Pr
   return false
 }
 
+/** 已登录用户修改管理库 users 密码（需账号密码登录会话，不支持纯环境 API 令牌） */
+app.post('/api/admin/change-password', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const token = extractAdminRequestToken(req)
+  const username = await resolveAdminDbUsernameFromToken(token)
+  if (!username) {
+    res.status(400).json({
+      message: '当前登录方式不支持在此修改密码，请使用管理员分配的账号密码登录后再试。'
+    })
+    return
+  }
+  const currentPassword = String(req.body?.currentPassword ?? '')
+  const newPassword = String(req.body?.newPassword ?? '')
+  if (!currentPassword || !newPassword) {
+    res.status(400).json({ message: '请填写当前密码和新密码' })
+    return
+  }
+  if (newPassword.length < 6) {
+    res.status(400).json({ message: '新密码至少 6 位' })
+    return
+  }
+  if (newPassword === currentPassword) {
+    res.status(400).json({ message: '新密码不能与当前密码相同' })
+    return
+  }
+  try {
+    const [rows] = await mysqlAdminPool.query<RowDataPacket[]>(
+      'SELECT password_hash, status FROM users WHERE username = ? LIMIT 1',
+      [username]
+    )
+    const row = rows[0] as { password_hash?: string | null; status?: string | null } | undefined
+    if (!row) {
+      res.status(404).json({ message: '未找到您的账号信息，请联系管理员' })
+      return
+    }
+    const st = String(row.status ?? '').trim()
+    if (st && st !== '正常') {
+      res.status(403).json({ message: '账号已停用，无法修改密码' })
+      return
+    }
+    const stored = String(row.password_hash || '').trim()
+    if (!stored || !verifyAdminPassword(currentPassword, stored)) {
+      res.status(401).json({ message: '当前密码不正确' })
+      return
+    }
+    const nextHash = hashAdminPasswordForDb(newPassword)
+    const [hdr] = await mysqlAdminPool.query<ResultSetHeader>(
+      'UPDATE users SET password_hash = ? WHERE username = ?',
+      [nextHash, username]
+    )
+    if (!hdr.affectedRows) {
+      res.status(500).json({ message: '更新失败，请稍后重试' })
+      return
+    }
+    res.json({ ok: true })
+  } catch (e) {
+    console.error('[POST /api/admin/change-password]', e)
+    res.status(500).json({ message: '系统繁忙，请稍后重试' })
+  }
+})
+
 // MVP 管理接口：用手机号标注面试官（需 ADMIN_API_TOKEN）
 app.post('/api/admin/interviewer/mark-phone', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
@@ -1387,6 +1499,29 @@ function recruitersFromRow(raw: unknown): string[] {
   return []
 }
 
+/** mysql2 对 BIGINT 等可能返回 bigint，JSON.stringify 会抛错 */
+function jsonSafeMysqlCell(v: unknown): unknown {
+  if (typeof v === 'bigint') return v.toString()
+  return v
+}
+
+function adminJobRowForJson(r: Record<string, unknown>) {
+  return {
+    id: jsonSafeMysqlCell(r.id),
+    project_id: r.project_id,
+    job_code: r.job_code,
+    title: r.title,
+    department: r.department,
+    jd_text: r.jd_text,
+    demand: jsonSafeMysqlCell(r.demand),
+    location: r.location,
+    skills: r.skills,
+    level: r.level,
+    salary: r.salary,
+    recruiters: recruitersFromRow(r.recruiters)
+  }
+}
+
 /** HR 后台：岗位列表（与小程序 / 会话共用 jobs 表） */
 app.get('/api/admin/jobs', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
@@ -1396,12 +1531,10 @@ app.get('/api/admin/jobs', async (req, res) => {
        FROM jobs ORDER BY id DESC`
     )
     res.json({
-      data: rows.map((r) => ({
-        ...r,
-        recruiters: recruitersFromRow(r.recruiters)
-      }))
+      data: (rows as Record<string, unknown>[]).map((r) => adminJobRowForJson(r))
     })
-  } catch {
+  } catch (e) {
+    console.error('[GET /api/admin/jobs]', e)
     res.status(500).json({ message: 'db error' })
   }
 })
@@ -1725,6 +1858,15 @@ function generateUniqueInviteCode(jobCode: string, recruiterCode?: string): stri
   return `INV-${jobSeg}-${recSeg}-${rand}`
 }
 
+/** 业务库 jobs/users 的 BIGINT id：勿用 Number()，避免超过 MAX_SAFE_INTEGER 时外键写入失败 */
+function mysqlRowIdForParam(v: unknown): string | number | null {
+  if (v == null) return null
+  if (typeof v === 'bigint') return v.toString()
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  const s = String(v).trim()
+  return s.length ? s : null
+}
+
 /** HR：为某岗位生成一条待处理面试邀请（写入 interview_invitations，候选人可在小程序「邀请」列表或登录页输入 INV… 码） */
 app.post('/api/admin/invitations', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
@@ -1736,24 +1878,34 @@ app.post('/api/admin/invitations', async (req, res) => {
   try {
     const [jobs] = await mysqlPool.query<any[]>('SELECT id FROM jobs WHERE job_code=? LIMIT 1', [jobCode])
     if (!jobs.length) return res.status(404).json({ message: 'job not found' })
-    const jobId = jobs[0].id as number
-    let interviewerUserId: number | null = null
+    const jobId = mysqlRowIdForParam(jobs[0].id)
+    if (jobId == null) return res.status(500).json({ message: 'job id invalid' })
+    /** 业务库 users 无 username，仅有 phone 等；HR 后台登录名（如 admin）不能映射到 interviewer_user_id */
+    let interviewerUserId: string | number | null = null
     if (recruiterCode) {
-      const [urs] = await mysqlPool.query<any[]>(
-        'SELECT id FROM users WHERE username=? LIMIT 1',
-        [recruiterCode]
-      )
-      if (urs.length > 0) interviewerUserId = Number(urs[0].id) || null
+      const phoneKey = normalizePhoneForMatch(recruiterCode).replace(/\D/g, '')
+      if (/^1\d{10}$/.test(phoneKey)) {
+        const [urs] = await mysqlPool.query<any[]>(
+          `SELECT id FROM users
+           WHERE phone IS NOT NULL AND TRIM(CAST(phone AS CHAR(32))) IN (?, ?, ?)
+           LIMIT 1`,
+          [phoneKey, `+86${phoneKey}`, `86${phoneKey}`]
+        )
+        if (urs.length > 0) interviewerUserId = mysqlRowIdForParam(urs[0].id)
+      }
     }
     let lastErr: unknown
     for (let attempt = 0; attempt < 8; attempt++) {
       const inviteCode = generateUniqueInviteCode(jobCode, recruiterCode)
-      try {
+      const tryInsert = async (interviewer: string | number | null) => {
         await mysqlPool.query(
           `INSERT INTO interview_invitations (invite_code, job_id, interviewer_user_id, status, expires_at)
            VALUES (?, ?, ?, 'pending', DATE_ADD(NOW(), INTERVAL ? DAY))`,
-          [inviteCode, jobId, interviewerUserId, days]
+          [inviteCode, jobId, interviewer, days]
         )
+      }
+      try {
+        await tryInsert(interviewerUserId)
         return res.json({
           data: {
             inviteCode,
@@ -1766,13 +1918,45 @@ app.post('/api/admin/invitations', async (req, res) => {
         lastErr = e
         const code = (e as { code?: string })?.code
         if (code === 'ER_DUP_ENTRY') continue
+        // 管理员用户名在 admin 库存在，但业务库 ai_recruit.users 无对应行时，interviewer_user_id 会触发外键错误
+        if (code === 'ER_NO_REFERENCED_ROW_2' && interviewerUserId != null) {
+          if (flowLogEnabled) flowLog('admin/invitations', false, 'interviewer_user_id FK 失败，改为不绑定面试官后重试')
+          try {
+            await tryInsert(null)
+            return res.json({
+              data: {
+                inviteCode,
+                jobCode,
+                recruiterCode: recruiterCode || '',
+                expiresInDays: days
+              }
+            })
+          } catch (e2) {
+            lastErr = e2
+            const c2 = (e2 as { code?: string })?.code
+            if (c2 === 'ER_DUP_ENTRY') continue
+            throw e2
+          }
+        }
         throw e
       }
     }
     console.error('[admin/invitations] allocate failed', lastErr)
     return res.status(500).json({ message: 'could not allocate invite code' })
-  } catch {
-    res.status(500).json({ message: 'db error' })
+  } catch (e: unknown) {
+    const err = e as { code?: string; errno?: number; sqlMessage?: string; message?: string }
+    console.error('[admin/invitations]', err?.code || err?.message, err?.sqlMessage || '')
+    if (err?.code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({
+        message: '数据库缺少 interview_invitations 表，请在业务库执行 server/schema.sql 中相关建表或迁移'
+      })
+    }
+    if (err?.code === 'ER_NO_REFERENCED_ROW_2') {
+      return res.status(400).json({
+        message: '外键校验失败：请确认岗位存在于 jobs 表，且业务库 users 与 interviewer 配置一致'
+      })
+    }
+    res.status(500).json({ message: err?.sqlMessage || err?.message || 'db error' })
   }
 })
 

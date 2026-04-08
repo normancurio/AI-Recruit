@@ -90,6 +90,33 @@ export default function InterviewPage() {
    */
   const answerTranscriptOpenRef = useRef(false)
   const questionInnerAudioRef = useRef<ReturnType<typeof Taro.createInnerAudioContext> | null>(null)
+  /** WechatSI onRecognize 触发极频繁，直接打 /transcript 会像「一字一请求」；防抖后合并上报 */
+  const TRANSCRIPT_REMOTE_DEBOUNCE_MS = 600
+  const transcriptRemoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const latestLiveTranscriptSyncRef = useRef('')
+  const cancelTranscriptRemoteDebounce = useCallback(() => {
+    if (transcriptRemoteTimerRef.current) {
+      clearTimeout(transcriptRemoteTimerRef.current)
+      transcriptRemoteTimerRef.current = null
+    }
+  }, [])
+  const pushTranscriptRemoteNow = useCallback((sidInner: string, fullText: string) => {
+    const t = String(fullText || '').trim()
+    if (!t) return
+    syncLiveTranscript(sidInner, t)
+    void syncTrtcRoomSignal(sidInner, t, 'subtitle')
+    trySendTrtcPusherCustomMessage(trtcRef.current, t)
+  }, [])
+  const scheduleTranscriptRemote = useCallback(
+    (sidInner: string) => {
+      cancelTranscriptRemoteDebounce()
+      transcriptRemoteTimerRef.current = setTimeout(() => {
+        transcriptRemoteTimerRef.current = null
+        pushTranscriptRemoteNow(sidInner, latestLiveTranscriptSyncRef.current)
+      }, TRANSCRIPT_REMOTE_DEBOUNCE_MS)
+    },
+    [cancelTranscriptRemoteDebounce, pushTranscriptRemoteNow]
+  )
   const closeAnswerTranscriptDisplay = useCallback(() => {
     answerTranscriptOpenRef.current = false
     setShowAnswerTranscript(false)
@@ -100,6 +127,7 @@ export default function InterviewPage() {
   }, [])
 
   const stopSegmentedAsr = useCallback(() => {
+    cancelTranscriptRemoteDebounce()
     pendingRestartSidRef.current = null
     answerTranscriptOpenRef.current = false
     if (answerPhaseGateTimerRef.current) {
@@ -115,7 +143,7 @@ export default function InterviewPage() {
     } catch {
       /* ignore */
     }
-  }, [])
+  }, [cancelTranscriptRemoteDebounce])
 
   const syncPusherFromTrtc = useCallback(() => {
     const trtc = trtcRef.current
@@ -318,12 +346,12 @@ export default function InterviewPage() {
           setTranscriptStreaming('')
           return
         }
+        cancelTranscriptRemoteDebounce()
         setTranscriptFinalized((prev) => {
           const next = [...prev, t]
           const full = next.join('')
-          syncLiveTranscript(sidInner, full)
-          void syncTrtcRoomSignal(sidInner, full, 'subtitle')
-          trySendTrtcPusherCustomMessage(trtcRef.current, full)
+          latestLiveTranscriptSyncRef.current = full
+          pushTranscriptRemoteNow(sidInner, full)
           return next
         })
         setTranscriptStreaming('')
@@ -359,9 +387,8 @@ export default function InterviewPage() {
           flowLog('WechatSI onRecognize', true, `len=${text.length}`)
           setTranscriptStreaming(text)
           const fullLive = transcriptFinalizedRef.current.join('') + text
-          syncLiveTranscript(sidInner, fullLive)
-          void syncTrtcRoomSignal(sidInner, fullLive, 'subtitle')
-          trySendTrtcPusherCustomMessage(trtcRef.current, fullLive)
+          latestLiveTranscriptSyncRef.current = fullLive
+          scheduleTranscriptRemote(sidInner)
         }
         manager.onStop = (res: { result?: string }) => {
           if (recordManagerRef.current !== manager) {
@@ -469,8 +496,10 @@ export default function InterviewPage() {
         answerTranscriptOpenRef.current = false
         answerPhaseGateTimerRef.current = setTimeout(() => {
           answerPhaseGateTimerRef.current = null
+          cancelTranscriptRemoteDebounce()
           setTranscriptFinalized([])
           setTranscriptStreaming('')
+          latestLiveTranscriptSyncRef.current = ''
           answerTranscriptOpenRef.current = true
           setShowAnswerTranscript(true)
         }, gateDelayMs)
@@ -582,7 +611,7 @@ export default function InterviewPage() {
     }
 
     resumeAfterStop(sid)
-  }, [])
+  }, [cancelTranscriptRemoteDebounce, scheduleTranscriptRemote, pushTranscriptRemoteNow])
 
   useDidShow(() => {
     visibleRef.current = true
@@ -667,6 +696,9 @@ export default function InterviewPage() {
 
   const handleNext = async () => {
     if (!current || !canNext || !profile || !job) return
+
+    cancelTranscriptRemoteDebounce()
+    pushTranscriptRemoteNow(sessionId, composedAnswer)
 
     const currentQa = { questionId: current.id, question: current.text, answer: composedAnswer }
     const nextAnswers = [...answers, currentQa]

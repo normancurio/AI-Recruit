@@ -2,6 +2,7 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'node:crypto';
 import dotenv from 'dotenv';
 import mysql from 'mysql2/promise';
 import type { ResultSetHeader } from 'mysql2/promise';
@@ -124,6 +125,19 @@ function uniqRecruiterCountFromJobs(
     }
   }
   return s.size;
+}
+
+/** 与 server/index.ts 库表登录一致：salt:hex(scrypt) */
+function hashAdminPassword(password: string): string {
+  const salt = `adm_${crypto.randomBytes(12).toString('hex')}`;
+  const hex = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${hex}`;
+}
+
+function mysqlDupKey(err: unknown): boolean {
+  return Boolean(
+    err && typeof err === 'object' && 'code' in err && (err as { code?: string }).code === 'ER_DUP_ENTRY'
+  );
 }
 
 async function startServer() {
@@ -526,8 +540,109 @@ async function startServer() {
 
   app.get('/api/depts', async (_req, res) => {
     try {
-      const [rows] = await adminPool.query('SELECT * FROM depts');
+      const [rows] = await adminPool.query(
+        'SELECT * FROM depts ORDER BY level ASC, name ASC'
+      );
       res.json(rows);
+    } catch {
+      res.status(500).json({ message: 'db error' });
+    }
+  });
+
+  app.post('/api/depts', async (req, res) => {
+    const b = req.body || {};
+    const name = String(b.name || '').trim();
+    if (!name) {
+      res.status(400).json({ message: '请填写部门名称' });
+      return;
+    }
+    const id = String(b.id || '').trim() || `D${Date.now()}`;
+    const level = Number(b.level);
+    const manager = String(b.manager || '').trim() || '-';
+    const count = Number(b.count);
+    const lv = Number.isFinite(level) ? level : 0;
+    const ct = Number.isFinite(count) ? count : 0;
+    try {
+      await adminPool.query(
+        'INSERT INTO depts (id, name, level, manager, count) VALUES (?, ?, ?, ?, ?)',
+        [id, name, lv, manager, ct]
+      );
+      res.status(201).json({ id });
+    } catch (e) {
+      if (mysqlDupKey(e)) {
+        res.status(409).json({ message: '部门 id 已存在' });
+        return;
+      }
+      console.error('[POST /api/depts]', e);
+      res.status(500).json({ message: 'db error' });
+    }
+  });
+
+  app.patch('/api/depts/:id', async (req, res) => {
+    const id = String(req.params.id || '').trim();
+    const b = req.body || {};
+    if (!id) {
+      res.status(400).json({ message: '缺少部门 id' });
+      return;
+    }
+    const patches: string[] = [];
+    const vals: unknown[] = [];
+    if (b.name !== undefined) {
+      const name = String(b.name || '').trim();
+      if (!name) {
+        res.status(400).json({ message: '部门名称不能为空' });
+        return;
+      }
+      patches.push('name = ?');
+      vals.push(name);
+    }
+    if (b.level !== undefined) {
+      const level = Number(b.level);
+      patches.push('level = ?');
+      vals.push(Number.isFinite(level) ? level : 0);
+    }
+    if (b.manager !== undefined) {
+      patches.push('manager = ?');
+      vals.push(String(b.manager || '').trim() || '-');
+    }
+    if (b.count !== undefined) {
+      const count = Number(b.count);
+      patches.push('count = ?');
+      vals.push(Number.isFinite(count) ? count : 0);
+    }
+    if (patches.length === 0) {
+      res.status(400).json({ message: '无有效更新字段' });
+      return;
+    }
+    vals.push(id);
+    try {
+      const [hdr] = await adminPool.query<ResultSetHeader>(
+        `UPDATE depts SET ${patches.join(', ')} WHERE id = ?`,
+        vals
+      );
+      if (!hdr.affectedRows) {
+        res.status(404).json({ message: '部门不存在' });
+        return;
+      }
+      res.json({ ok: true });
+    } catch {
+      res.status(500).json({ message: 'db error' });
+    }
+  });
+
+  app.delete('/api/depts/:id', async (req, res) => {
+    const id = String(req.params.id || '').trim();
+    if (!id) {
+      res.status(400).json({ message: '缺少部门 id' });
+      return;
+    }
+    try {
+      const [hdr] = await adminPool.query<ResultSetHeader>('DELETE FROM depts WHERE id = ?', [id]);
+      if (!hdr.affectedRows) {
+        res.status(404).json({ message: '部门不存在' });
+        return;
+      }
+      res.json({ ok: true });
     } catch {
       res.status(500).json({ message: 'db error' });
     }
@@ -535,8 +650,139 @@ async function startServer() {
 
   app.get('/api/users', async (_req, res) => {
     try {
-      const [rows] = await adminPool.query('SELECT * FROM users');
+      const [rows] = await adminPool.query(
+        'SELECT id, name, username, dept, role, status FROM users ORDER BY username ASC'
+      );
       res.json(rows);
+    } catch {
+      res.status(500).json({ message: 'db error' });
+    }
+  });
+
+  app.post('/api/users', async (req, res) => {
+    const b = req.body || {};
+    const name = String(b.name || '').trim();
+    const username = String(b.username || '').trim();
+    const password = String(b.password || '');
+    const dept = String(b.dept || '').trim() || '-';
+    const role = String(b.role || '').trim() || '招聘人员';
+    const status = String(b.status || '正常').trim();
+    if (!name || !username) {
+      res.status(400).json({ message: '请填写姓名与登录账号' });
+      return;
+    }
+    if (!password) {
+      res.status(400).json({ message: '请设置初始密码' });
+      return;
+    }
+    if (status !== '正常' && status !== '停用') {
+      res.status(400).json({ message: '状态须为「正常」或「停用」' });
+      return;
+    }
+    const id = String(b.id || '').trim() || `U${Date.now()}`;
+    const hash = hashAdminPassword(password);
+    try {
+      await adminPool.query(
+        'INSERT INTO users (id, name, username, dept, role, status, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [id, name, username, dept, role, status, hash]
+      );
+      res.status(201).json({ id });
+    } catch (e) {
+      if (mysqlDupKey(e)) {
+        res.status(409).json({ message: '登录账号已存在' });
+        return;
+      }
+      console.error('[POST /api/users]', e);
+      res.status(500).json({ message: 'db error' });
+    }
+  });
+
+  app.patch('/api/users/:id', async (req, res) => {
+    const id = String(req.params.id || '').trim();
+    const b = req.body || {};
+    if (!id) {
+      res.status(400).json({ message: '缺少用户 id' });
+      return;
+    }
+    const patches: string[] = [];
+    const vals: unknown[] = [];
+    if (b.name !== undefined) {
+      const name = String(b.name || '').trim();
+      if (!name) {
+        res.status(400).json({ message: '姓名不能为空' });
+        return;
+      }
+      patches.push('name = ?');
+      vals.push(name);
+    }
+    if (b.username !== undefined) {
+      const username = String(b.username || '').trim();
+      if (!username) {
+        res.status(400).json({ message: '登录账号不能为空' });
+        return;
+      }
+      patches.push('username = ?');
+      vals.push(username);
+    }
+    if (b.dept !== undefined) {
+      patches.push('dept = ?');
+      vals.push(String(b.dept || '').trim() || '-');
+    }
+    if (b.role !== undefined) {
+      patches.push('role = ?');
+      vals.push(String(b.role || '').trim() || '招聘人员');
+    }
+    if (b.status !== undefined) {
+      const status = String(b.status).trim();
+      if (status !== '正常' && status !== '停用') {
+        res.status(400).json({ message: '状态须为「正常」或「停用」' });
+        return;
+      }
+      patches.push('status = ?');
+      vals.push(status);
+    }
+    if (b.password !== undefined && String(b.password).length > 0) {
+      patches.push('password_hash = ?');
+      vals.push(hashAdminPassword(String(b.password)));
+    }
+    if (patches.length === 0) {
+      res.status(400).json({ message: '无有效更新字段' });
+      return;
+    }
+    vals.push(id);
+    try {
+      const [hdr] = await adminPool.query<ResultSetHeader>(
+        `UPDATE users SET ${patches.join(', ')} WHERE id = ?`,
+        vals
+      );
+      if (!hdr.affectedRows) {
+        res.status(404).json({ message: '用户不存在' });
+        return;
+      }
+      res.json({ ok: true });
+    } catch (e) {
+      if (mysqlDupKey(e)) {
+        res.status(409).json({ message: '登录账号已存在' });
+        return;
+      }
+      console.error('[PATCH /api/users]', e);
+      res.status(500).json({ message: 'db error' });
+    }
+  });
+
+  app.delete('/api/users/:id', async (req, res) => {
+    const id = String(req.params.id || '').trim();
+    if (!id) {
+      res.status(400).json({ message: '缺少用户 id' });
+      return;
+    }
+    try {
+      const [hdr] = await adminPool.query<ResultSetHeader>('DELETE FROM users WHERE id = ?', [id]);
+      if (!hdr.affectedRows) {
+        res.status(404).json({ message: '用户不存在' });
+        return;
+      }
+      res.json({ ok: true });
     } catch {
       res.status(500).json({ message: 'db error' });
     }
@@ -544,8 +790,102 @@ async function startServer() {
 
   app.get('/api/roles', async (_req, res) => {
     try {
-      const [rows] = await adminPool.query('SELECT * FROM roles');
+      const [rows] = await adminPool.query('SELECT * FROM roles ORDER BY id ASC');
       res.json(rows);
+    } catch {
+      res.status(500).json({ message: 'db error' });
+    }
+  });
+
+  app.post('/api/roles', async (req, res) => {
+    const b = req.body || {};
+    const name = String(b.name || '').trim();
+    if (!name) {
+      res.status(400).json({ message: '请填写角色名称' });
+      return;
+    }
+    const id = String(b.id || '').trim() || `R${Date.now()}`;
+    const desc = String(b.desc ?? '').trim();
+    const users = Number(b.users);
+    const u = Number.isFinite(users) ? users : 0;
+    try {
+      await adminPool.query('INSERT INTO roles (id, name, `desc`, users) VALUES (?, ?, ?, ?)', [
+        id,
+        name,
+        desc,
+        u
+      ]);
+      res.status(201).json({ id });
+    } catch (e) {
+      if (mysqlDupKey(e)) {
+        res.status(409).json({ message: '角色 id 已存在' });
+        return;
+      }
+      console.error('[POST /api/roles]', e);
+      res.status(500).json({ message: 'db error' });
+    }
+  });
+
+  app.patch('/api/roles/:id', async (req, res) => {
+    const id = String(req.params.id || '').trim();
+    const b = req.body || {};
+    if (!id) {
+      res.status(400).json({ message: '缺少角色 id' });
+      return;
+    }
+    const patches: string[] = [];
+    const vals: unknown[] = [];
+    if (b.name !== undefined) {
+      const name = String(b.name || '').trim();
+      if (!name) {
+        res.status(400).json({ message: '角色名称不能为空' });
+        return;
+      }
+      patches.push('name = ?');
+      vals.push(name);
+    }
+    if (b.desc !== undefined) {
+      patches.push('`desc` = ?');
+      vals.push(String(b.desc ?? '').trim());
+    }
+    if (b.users !== undefined) {
+      const users = Number(b.users);
+      patches.push('users = ?');
+      vals.push(Number.isFinite(users) ? users : 0);
+    }
+    if (patches.length === 0) {
+      res.status(400).json({ message: '无有效更新字段' });
+      return;
+    }
+    vals.push(id);
+    try {
+      const [hdr] = await adminPool.query<ResultSetHeader>(
+        `UPDATE roles SET ${patches.join(', ')} WHERE id = ?`,
+        vals
+      );
+      if (!hdr.affectedRows) {
+        res.status(404).json({ message: '角色不存在' });
+        return;
+      }
+      res.json({ ok: true });
+    } catch {
+      res.status(500).json({ message: 'db error' });
+    }
+  });
+
+  app.delete('/api/roles/:id', async (req, res) => {
+    const id = String(req.params.id || '').trim();
+    if (!id) {
+      res.status(400).json({ message: '缺少角色 id' });
+      return;
+    }
+    try {
+      const [hdr] = await adminPool.query<ResultSetHeader>('DELETE FROM roles WHERE id = ?', [id]);
+      if (!hdr.affectedRows) {
+        res.status(404).json({ message: '角色不存在' });
+        return;
+      }
+      res.json({ ok: true });
     } catch {
       res.status(500).json({ message: 'db error' });
     }
@@ -553,8 +893,110 @@ async function startServer() {
 
   app.get('/api/menus', async (_req, res) => {
     try {
-      const [rows] = await adminPool.query('SELECT * FROM menus');
+      const [rows] = await adminPool.query('SELECT * FROM menus ORDER BY level ASC, id ASC');
       res.json(rows);
+    } catch {
+      res.status(500).json({ message: 'db error' });
+    }
+  });
+
+  app.post('/api/menus', async (req, res) => {
+    const b = req.body || {};
+    const name = String(b.name || '').trim();
+    if (!name) {
+      res.status(400).json({ message: '请填写菜单名称' });
+      return;
+    }
+    const id = String(b.id || '').trim() || `M${Date.now()}`;
+    const type = String(b.type || '菜单').trim();
+    const icon = String(b.icon || 'Menu').trim();
+    const path = String(b.path || '').trim() || '/';
+    const level = Number(b.level);
+    const lv = Number.isFinite(level) ? level : 0;
+    try {
+      await adminPool.query(
+        'INSERT INTO menus (id, name, type, icon, path, level) VALUES (?, ?, ?, ?, ?, ?)',
+        [id, name, type, icon, path, lv]
+      );
+      res.status(201).json({ id });
+    } catch (e) {
+      if (mysqlDupKey(e)) {
+        res.status(409).json({ message: '菜单 id 已存在' });
+        return;
+      }
+      console.error('[POST /api/menus]', e);
+      res.status(500).json({ message: 'db error' });
+    }
+  });
+
+  app.patch('/api/menus/:id', async (req, res) => {
+    const id = String(req.params.id || '').trim();
+    const b = req.body || {};
+    if (!id) {
+      res.status(400).json({ message: '缺少菜单 id' });
+      return;
+    }
+    const patches: string[] = [];
+    const vals: unknown[] = [];
+    if (b.name !== undefined) {
+      const name = String(b.name || '').trim();
+      if (!name) {
+        res.status(400).json({ message: '菜单名称不能为空' });
+        return;
+      }
+      patches.push('name = ?');
+      vals.push(name);
+    }
+    if (b.type !== undefined) {
+      patches.push('type = ?');
+      vals.push(String(b.type || '').trim() || '菜单');
+    }
+    if (b.icon !== undefined) {
+      patches.push('icon = ?');
+      vals.push(String(b.icon || '').trim() || 'Menu');
+    }
+    if (b.path !== undefined) {
+      patches.push('path = ?');
+      vals.push(String(b.path || '').trim() || '/');
+    }
+    if (b.level !== undefined) {
+      const level = Number(b.level);
+      patches.push('level = ?');
+      vals.push(Number.isFinite(level) ? level : 0);
+    }
+    if (patches.length === 0) {
+      res.status(400).json({ message: '无有效更新字段' });
+      return;
+    }
+    vals.push(id);
+    try {
+      const [hdr] = await adminPool.query<ResultSetHeader>(
+        `UPDATE menus SET ${patches.join(', ')} WHERE id = ?`,
+        vals
+      );
+      if (!hdr.affectedRows) {
+        res.status(404).json({ message: '菜单不存在' });
+        return;
+      }
+      res.json({ ok: true });
+    } catch {
+      res.status(500).json({ message: 'db error' });
+    }
+  });
+
+  app.delete('/api/menus/:id', async (req, res) => {
+    const id = String(req.params.id || '').trim();
+    if (!id) {
+      res.status(400).json({ message: '缺少菜单 id' });
+      return;
+    }
+    try {
+      const [hdr] = await adminPool.query<ResultSetHeader>('DELETE FROM menus WHERE id = ?', [id]);
+      if (!hdr.affectedRows) {
+        res.status(404).json({ message: '菜单不存在' });
+        return;
+      }
+      res.json({ ok: true });
     } catch {
       res.status(500).json({ message: 'db error' });
     }
