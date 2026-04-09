@@ -1,5 +1,9 @@
 # AI-Recruit：小程序 API（3001）+ 管理后台（3000）
 #
+# 若构建拉取 node 镜像失败（metadata / content size of zero），可先：
+#   export NODE_IMAGE=docker.m.daocloud.io/library/node:22-bookworm-slim
+# 或配置 Docker Hub 镜像加速后再 build。
+#
 # 首次构建（PUBLIC_API_BASE 填浏览器可访问的 API 根 URL，含协议与端口）：
 #   export PUBLIC_API_BASE=https://api.example.com
 # 可选：export VITE_ADMIN_API_TOKEN_BUILD=与 ADMIN_API_TOKEN 相同（不配则管理端用登录页换 token）
@@ -14,6 +18,7 @@ x-app-build: &app-build
   context: .
   dockerfile: Dockerfile
   args:
+    NODE_IMAGE: ${NODE_IMAGE:-node:22-bookworm-slim}
     VITE_API_BASE: ${PUBLIC_API_BASE:-http://47.102.85.156:3011}
     VITE_ADMIN_API_TOKEN: ${VITE_ADMIN_API_TOKEN_BUILD:-}
 
