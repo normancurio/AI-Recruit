@@ -427,6 +427,30 @@ type InterviewReportPayload = {
   qa: Array<{ questionId: string; question: string; answer: string }>
 }
 
+async function markResumeScreeningPipelineReportDone(jobCode: string, candidateName: string) {
+  const jc = String(jobCode || '').trim()
+  const cn = String(candidateName || '').trim()
+  if (!jc || !cn) return
+  try {
+    await mysqlPool.query(
+      `UPDATE resume_screenings SET pipeline_stage = 'report_done'
+       WHERE UPPER(TRIM(job_code)) = UPPER(?) AND TRIM(candidate_name) = TRIM(?)`,
+      [jc, cn]
+    )
+  } catch (e: unknown) {
+    const err = e as { errno?: number; code?: string; sqlMessage?: string }
+    if (
+      err.errno === 1054 ||
+      err.code === 'ER_BAD_FIELD_ERROR' ||
+      (String(err.sqlMessage || '').includes('Unknown column') &&
+        String(err.sqlMessage || '').includes('pipeline_stage'))
+    ) {
+      return
+    }
+    console.warn('[markResumeScreeningPipelineReportDone]', e)
+  }
+}
+
 async function upsertInterviewReport(payload: InterviewReportPayload) {
   if (!payload.sessionId || !payload.jobCode || !payload.candidateName) return
   await mysqlPool.query(
@@ -463,6 +487,7 @@ async function upsertInterviewReport(payload: InterviewReportPayload) {
       JSON.stringify(payload.qa || [])
     ]
   )
+  await markResumeScreeningPipelineReportDone(payload.jobCode, payload.candidateName)
 }
 
 type ResumeScreeningAiResult = {
@@ -1674,21 +1699,288 @@ app.patch('/api/admin/jobs/:jobCode', async (req, res) => {
   }
 })
 
+function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: boolean): string {
+  const ps = withPipelineStage ? 's.pipeline_stage, ' : ''
+  const sessCols = withSessionJoin
+    ? `sess.status AS interview_session_status,
+              sess.voip_status AS interview_session_voip,
+              sess.updated_at AS interview_session_updated_at`
+    : `NULL AS interview_session_status,
+              NULL AS interview_session_voip,
+              NULL AS interview_session_updated_at`
+  const sessJoin = withSessionJoin
+    ? `LEFT JOIN interview_sessions sess
+         ON CONVERT(sess.session_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+            CONVERT(lr.session_id USING utf8mb4) COLLATE utf8mb4_unicode_ci`
+    : ''
+  // 标量子查询取最新报告；CONVERT+COLLATE 避免表间 utf8mb4_unicode_ci / utf8mb4_0900_ai_ci 混用报错
+  return `SELECT s.id, s.job_code, s.candidate_name, s.matched_job_title, s.match_score,
+              s.skill_score, s.experience_score, s.education_score, s.stability_score,
+              s.status, ${ps}s.report_summary, s.file_name, s.created_at,
+              lr.overall_score AS interview_overall_score,
+              lr.passed AS interview_passed,
+              lr.updated_at AS interview_report_updated_at,
+              lr.session_id AS interview_report_session_id,
+              ${sessCols}
+       FROM resume_screenings s
+       LEFT JOIN interview_reports lr ON lr.id = (
+         SELECT ir.id
+         FROM interview_reports ir
+         WHERE CONVERT(TRIM(ir.job_code) USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+               CONVERT(TRIM(s.job_code) USING utf8mb4) COLLATE utf8mb4_unicode_ci
+           AND CONVERT(TRIM(ir.candidate_name) USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+               CONVERT(TRIM(s.candidate_name) USING utf8mb4) COLLATE utf8mb4_unicode_ci
+         ORDER BY ir.updated_at DESC, ir.id DESC
+         LIMIT 1
+       )
+       ${sessJoin}
+       ORDER BY s.id DESC
+       LIMIT 200`
+}
+
+function resumeScreeningsPlainSql(withPipelineStage: boolean): string {
+  const ps = withPipelineStage ? 'pipeline_stage, ' : ''
+  return `SELECT id, job_code, candidate_name, matched_job_title, match_score,
+              skill_score, experience_score, education_score, stability_score,
+              status, ${ps}report_summary, file_name, created_at
+       FROM resume_screenings
+       ORDER BY id DESC
+       LIMIT 200`
+}
+
+function isMissingPipelineStageColumn(e: unknown): boolean {
+  const err = e as { errno?: number; message?: string }
+  const m = String(err.message || '')
+  return err.errno === 1054 && m.includes('pipeline_stage')
+}
+
+function isMissingInterviewSessionsRelation(e: unknown): boolean {
+  const err = e as { code?: string; errno?: number; message?: string }
+  const m = String(err.message || '')
+  return err.code === 'ER_NO_SUCH_TABLE' && m.includes('interview_sessions')
+}
+
+function isCollationMismatch(e: unknown): boolean {
+  const err = e as { code?: string; errno?: number }
+  return err.code === 'ER_CANT_AGGREGATE_2COLLATIONS' || err.errno === 1267
+}
+
+async function queryResumeScreeningsJoinedRows(): Promise<any[]> {
+  let usePipeline = true
+  let useSession = true
+  let lastErr: unknown
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const [rows] = await mysqlPool.query<any[]>(resumeScreeningsJoinSql(usePipeline, useSession))
+      let out = rows || []
+      if (!usePipeline) out = out.map((r) => ({ ...r, pipeline_stage: r.pipeline_stage ?? 'resume_done' }))
+      return out
+    } catch (e) {
+      lastErr = e
+      if (isMissingPipelineStageColumn(e) && usePipeline) {
+        usePipeline = false
+        continue
+      }
+      if (isMissingInterviewSessionsRelation(e) && useSession) {
+        useSession = false
+        continue
+      }
+      if (isCollationMismatch(e) && useSession) {
+        useSession = false
+        continue
+      }
+      throw e
+    }
+  }
+  throw lastErr
+}
+
 app.get('/api/admin/resume-screenings', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   try {
-    const [rows] = await mysqlPool.query<any[]>(
-      `SELECT id, job_code, candidate_name, matched_job_title, match_score,
-              skill_score, experience_score, education_score, stability_score,
-              status, report_summary, file_name, created_at
-       FROM resume_screenings ORDER BY id DESC LIMIT 200`
-    )
+    const rows = await queryResumeScreeningsJoinedRows()
     res.json({ data: rows })
+  } catch (e: unknown) {
+    const code = (e as { code?: string })?.code
+    if (code === 'ER_NO_SUCH_TABLE') {
+      try {
+        let rows: any[]
+        try {
+          ;[rows] = await mysqlPool.query<any[]>(resumeScreeningsPlainSql(true))
+        } catch (e2: unknown) {
+          if (isMissingPipelineStageColumn(e2)) {
+            ;[rows] = await mysqlPool.query<any[]>(resumeScreeningsPlainSql(false))
+            rows = (rows || []).map((r) => ({ ...r, pipeline_stage: 'resume_done' }))
+          } else {
+            throw e2
+          }
+        }
+        const patched = (rows || []).map((r) => ({
+          ...r,
+          interview_overall_score: null,
+          interview_passed: null,
+          interview_report_updated_at: null,
+          interview_report_session_id: null,
+          interview_session_status: null,
+          interview_session_voip: null,
+          interview_session_updated_at: null
+        }))
+        return res.json({ data: patched })
+      } catch (e2: unknown) {
+        const c2 = (e2 as { code?: string })?.code
+        if (c2 === 'ER_NO_SUCH_TABLE') {
+          return res.status(503).json({ message: 'resume_screenings 表未创建，请执行 server/migration_resume_screenings.sql' })
+        }
+        console.error('[GET /api/admin/resume-screenings] fallback', (e2 as { code?: string; errno?: number; message?: string })?.code, (e2 as { message?: string })?.message, e2)
+        return res.status(500).json({ message: 'db error' })
+      }
+    }
+    const ex = e as { code?: string; errno?: number; message?: string }
+    console.error('[GET /api/admin/resume-screenings]', ex.code, ex.errno, ex.message, e)
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
+/** 工作台：聚合 resume_screenings + interview_reports，不读管理库演示表 */
+app.get('/api/admin/workbench-stats', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  try {
+    const [[agg]] = await mysqlPool.query<RowDataPacket[]>(
+      `SELECT
+        (SELECT COUNT(*) FROM resume_screenings) AS resume_screening_count,
+        (SELECT COUNT(*) FROM resume_screenings rs
+         WHERE (rs.report_summary IS NULL OR TRIM(rs.report_summary) = '')
+            OR rs.status LIKE '%待分析%'
+            OR rs.status LIKE '%分析中%'
+            OR rs.status LIKE '%排队%'
+            OR rs.status LIKE '%处理中%') AS pending_analysis_count,
+        (SELECT COUNT(*) FROM resume_screenings rs2 WHERE rs2.status LIKE '%待定%') AS pending_review_count`
+    )
+    let interviewReportCount = 0
+    let interviewPassedCount = 0
+    try {
+      const [[rep]] = await mysqlPool.query<RowDataPacket[]>(
+        `SELECT
+          COUNT(*) AS total,
+          COALESCE(SUM(CASE WHEN passed = 1 THEN 1 ELSE 0 END), 0) AS passed_n
+         FROM interview_reports`
+      )
+      interviewReportCount = Number(rep?.total) || 0
+      interviewPassedCount = Number(rep?.passed_n) || 0
+    } catch (e: unknown) {
+      const code = (e as { code?: string })?.code
+      if (code !== 'ER_NO_SUCH_TABLE') throw e
+    }
+    const [recentRows] = await mysqlPool.query<
+      RowDataPacket[]
+    >(
+      `SELECT id, candidate_name, matched_job_title, match_score, status
+       FROM resume_screenings ORDER BY id DESC LIMIT 8`
+    )
+    const recentScreenings = (recentRows || []).map((r) => ({
+      id: jsonSafeMysqlCell(r.id),
+      candidate_name: String(r.candidate_name ?? ''),
+      matched_job_title: String(r.matched_job_title ?? ''),
+      match_score: Number(r.match_score) || 0,
+      status: String(r.status ?? '')
+    }))
+    let pendingInviteCount = 0
+    let pendingReportCount = 0
+    let timeoutResumeCount = 0
+    let timeoutInviteCount = 0
+    let exceptionCount = 0
+    let focusJobAlertCount = 0
+    try {
+      const [[row]] = await mysqlPool.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS n
+         FROM resume_screenings
+         WHERE pipeline_stage = 'resume_done' AND match_score >= 70`
+      )
+      pendingInviteCount = Number(row?.n) || 0
+    } catch {}
+    try {
+      const [[row]] = await mysqlPool.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS n
+         FROM interview_sessions s
+         LEFT JOIN interview_reports r ON r.session_id = s.session_id
+         WHERE r.id IS NULL
+           AND (s.status IN ('completed', 'finished', 'ended') OR s.voip_status IN ('ended', 'finished', 'closed'))`
+      )
+      pendingReportCount = Number(row?.n) || 0
+    } catch {}
+    try {
+      const [[row]] = await mysqlPool.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS n
+         FROM resume_screenings
+         WHERE pipeline_stage = 'resume_done'
+           AND created_at < (NOW() - INTERVAL 1 DAY)`
+      )
+      timeoutResumeCount = Number(row?.n) || 0
+    } catch {}
+    try {
+      const [[row]] = await mysqlPool.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS n
+         FROM interview_invitations
+         WHERE status = 'pending'
+           AND created_at < (NOW() - INTERVAL 2 DAY)`
+      )
+      timeoutInviteCount = Number(row?.n) || 0
+    } catch {}
+    try {
+      const [[row]] = await mysqlPool.query<RowDataPacket[]>(
+        `SELECT
+           COALESCE((
+             SELECT COUNT(*) FROM resume_screenings
+             WHERE status LIKE '%失败%' OR status LIKE '%异常%'
+           ), 0)
+           +
+           COALESCE((
+             SELECT COUNT(*) FROM interview_sessions
+             WHERE voip_status IN ('failed', 'abnormal', 'error')
+           ), 0) AS n`
+      )
+      exceptionCount = Number(row?.n) || 0
+    } catch {}
+    try {
+      const [[row]] = await mysqlPool.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS n
+         FROM (
+           SELECT j.job_code
+           FROM jobs j
+           LEFT JOIN (
+             SELECT job_code, COUNT(*) AS screening_n
+             FROM resume_screenings
+             GROUP BY job_code
+           ) rs
+             ON CONVERT(j.job_code USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                CONVERT(rs.job_code USING utf8mb4) COLLATE utf8mb4_unicode_ci
+           WHERE j.demand > COALESCE(rs.screening_n, 0)
+         ) t`
+      )
+      focusJobAlertCount = Number(row?.n) || 0
+    } catch {}
+    res.json({
+      data: {
+        resumeScreeningCount: Number(agg?.resume_screening_count) || 0,
+        pendingAnalysisCount: Number(agg?.pending_analysis_count) || 0,
+        pendingReviewCount: Number(agg?.pending_review_count) || 0,
+        interviewReportCount,
+        interviewPassedCount,
+        pendingInviteCount,
+        pendingReportCount,
+        timeoutResumeCount,
+        timeoutInviteCount,
+        exceptionCount,
+        focusJobAlertCount,
+        recentScreenings
+      }
+    })
   } catch (e: unknown) {
     const code = (e as { code?: string })?.code
     if (code === 'ER_NO_SUCH_TABLE') {
       return res.status(503).json({ message: 'resume_screenings 表未创建，请执行 server/migration_resume_screenings.sql' })
     }
+    console.error('[GET /api/admin/workbench-stats]', e)
     res.status(500).json({ message: 'db error' })
   }
 })
@@ -1867,6 +2159,21 @@ function mysqlRowIdForParam(v: unknown): string | number | null {
   return s.length ? s : null
 }
 
+async function markResumeScreeningPipelineInvited(screeningId: number, jobCodeUpper: string) {
+  if (!Number.isFinite(screeningId) || screeningId <= 0 || !jobCodeUpper) return
+  try {
+    await mysqlPool.query(
+      `UPDATE resume_screenings SET pipeline_stage = IF(pipeline_stage = 'report_done', pipeline_stage, 'invited')
+       WHERE id = ? AND UPPER(TRIM(job_code)) = ?`,
+      [Math.floor(screeningId), jobCodeUpper.trim()]
+    )
+  } catch (e: unknown) {
+    const err = e as { errno?: number; code?: string; sqlMessage?: string }
+    if (err.errno === 1054 || err.code === 'ER_BAD_FIELD_ERROR') return
+    console.warn('[markResumeScreeningPipelineInvited]', e)
+  }
+}
+
 /** HR：为某岗位生成一条待处理面试邀请（写入 interview_invitations，候选人可在小程序「邀请」列表或登录页输入 INV… 码） */
 app.post('/api/admin/invitations', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
@@ -1875,6 +2182,8 @@ app.post('/api/admin/invitations', async (req, res) => {
   const recruiterCode = String(req.body?.recruiterCode || '').trim()
   const rawDays = Number(req.body?.expiresInDays)
   const days = Number.isFinite(rawDays) && rawDays > 0 ? Math.min(Math.floor(rawDays), 365) : 7
+  const screeningIdRaw = Number(req.body?.screeningId)
+  const screeningIdForPipeline = Number.isFinite(screeningIdRaw) && screeningIdRaw > 0 ? screeningIdRaw : 0
   try {
     const [jobs] = await mysqlPool.query<any[]>('SELECT id FROM jobs WHERE job_code=? LIMIT 1', [jobCode])
     if (!jobs.length) return res.status(404).json({ message: 'job not found' })
@@ -1906,6 +2215,7 @@ app.post('/api/admin/invitations', async (req, res) => {
       }
       try {
         await tryInsert(interviewerUserId)
+        if (screeningIdForPipeline) await markResumeScreeningPipelineInvited(screeningIdForPipeline, jobCode)
         return res.json({
           data: {
             inviteCode,
@@ -1923,6 +2233,7 @@ app.post('/api/admin/invitations', async (req, res) => {
           if (flowLogEnabled) flowLog('admin/invitations', false, 'interviewer_user_id FK 失败，改为不绑定面试官后重试')
           try {
             await tryInsert(null)
+            if (screeningIdForPipeline) await markResumeScreeningPipelineInvited(screeningIdForPipeline, jobCode)
             return res.json({
               data: {
                 inviteCode,

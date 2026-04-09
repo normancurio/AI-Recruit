@@ -181,7 +181,7 @@ export default function InterviewerPage() {
   }
 
   const startVideoCall = async () => {
-    if (!activeSessionId || !canStartVoip) {
+    if (!activeSessionId || !canPrimaryVoip) {
       Taro.showToast({ title: '双方未就绪或不支持视频', icon: 'none' })
       return
     }

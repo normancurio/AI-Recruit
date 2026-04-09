@@ -75,6 +75,8 @@ export interface Job {
   department?: string;
   /** jobs.updated_at，用于列表展示 */
   updatedAt?: string;
+  /** resume_screenings 表中该 job_code 的记录条数 */
+  screeningCount?: number;
 }
 export interface Project {
   id: string;
@@ -101,7 +103,10 @@ export interface Resume {
   experienceScore?: number
   educationScore?: number
   stabilityScore?: number
+  /** AI 对简历给出的结论文案（如 AI分析完成、待定） */
   status: string
+  /** 招聘漏斗阶段：简历筛查完成 / 已发邀请 / 初面通过 等 */
+  flowStage?: string
   uploadTime: string
   reportSummary?: string
 }
@@ -298,7 +303,7 @@ export default function App() {
       icon: <Users className="w-5 h-5" />,
       roles: ['admin', 'recruiter'],
       children: [
-        { id: 'resume-screening', title: '简历筛查 (AI)', roles: ['admin', 'recruiter'] },
+        { id: 'resume-screening', title: '简历筛查', roles: ['admin', 'recruiter'] },
         { id: 'application-mgmt', title: '初面管理', roles: ['admin', 'recruiter'] }
       ]
     },
@@ -320,7 +325,7 @@ export default function App() {
     switch (activeMenu) {
       case 'workbench': return <WorkbenchView onNavigate={setActiveMenu} currentRole={currentRole} />;
       case 'clients': return <ClientManagementView />;
-      case 'project-list': return <ProjectManagementView role={currentRole} />;
+      case 'project-list': return <ProjectManagementView role={currentRole} onNavigate={setActiveMenu} />;
       case 'job-query': return <JobQueryView onNavigate={setActiveMenu} currentRole={currentRole} authProfile={authProfile} />;
       case 'resume-screening': return <ResumeScreeningView currentRole={currentRole} authProfile={authProfile} />;
       case 'application-mgmt': return <ApplicationManagementView currentRole={currentRole} authProfile={authProfile} />;
@@ -697,7 +702,13 @@ function defaultNewProjectCode() {
   return `PRJ-${y}-${String(n).padStart(3, '0')}`;
 }
 
-function ProjectManagementView({ role }: { role: Role }) {
+function ProjectManagementView({
+  role,
+  onNavigate
+}: {
+  role: Role;
+  onNavigate?: (id: string) => void;
+}) {
   const [expandedProject, setExpandedProject] = useState<string | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [depts, setDepts] = useState<Dept[]>([]);
@@ -710,6 +721,11 @@ function ProjectManagementView({ role }: { role: Role }) {
   const [formStart, setFormStart] = useState('');
   const [formEnd, setFormEnd] = useState('');
   const [formDesc, setFormDesc] = useState('');
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const [formManager, setFormManager] = useState('');
+  const [formStatus, setFormStatus] = useState('进行中');
+  const [formMemberCount, setFormMemberCount] = useState('0');
+  const [formProjectCode, setFormProjectCode] = useState('');
 
   const loadProjects = useCallback(() => {
     void fetch('/api/projects')
@@ -729,16 +745,56 @@ function ProjectManagementView({ role }: { role: Role }) {
       .catch(() => setDepts([]));
   }, []);
 
+  const closeProjectModal = () => {
+    if (createSubmitting) return;
+    setCreateOpen(false);
+    setEditingProjectId(null);
+  };
+
   const openCreateModal = () => {
     const code = defaultNewProjectCode();
+    setEditingProjectId(null);
     setFormId(code);
     setFormName('');
     setFormDept('');
     setFormStart('');
     setFormEnd('');
     setFormDesc('');
+    setFormManager('');
+    setFormStatus('进行中');
+    setFormMemberCount('0');
+    setFormProjectCode('');
     setCreateError('');
     setCreateOpen(true);
+  };
+
+  const openEditProject = (p: Project) => {
+    setEditingProjectId(p.id);
+    setFormId(p.id);
+    setFormName(p.name);
+    setFormDept(p.dept && p.dept !== '-' ? p.dept : '');
+    setFormStart((p.startDate || '').trim());
+    setFormEnd((p.endDate || '').trim());
+    setFormDesc((p.description || '').trim());
+    setFormManager(p.manager && p.manager !== '-' ? p.manager : '');
+    setFormStatus((p.status || '进行中').trim() || '进行中');
+    setFormMemberCount(String(p.memberCount ?? 0));
+    setFormProjectCode((p.projectCode || p.id || '').trim());
+    setCreateError('');
+    setCreateOpen(true);
+  };
+
+  const handleDeleteProject = async (p: Project) => {
+    if (!window.confirm(`确定删除项目「${p.name}」（${p.id}）？下属岗位的 project_id 将清空为未分配。`)) return;
+    try {
+      const r = await fetch(`/api/projects/${encodeURIComponent(p.id)}`, { method: 'DELETE' });
+      const j = (await r.json().catch(() => ({}))) as { message?: string };
+      if (!r.ok) throw new Error(j.message || `删除失败 ${r.status}`);
+      setExpandedProject((ex) => (ex === p.id ? null : ex));
+      loadProjects();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : '删除失败');
+    }
   };
 
   const submitCreate = async (e: React.FormEvent) => {
@@ -746,32 +802,61 @@ function ProjectManagementView({ role }: { role: Role }) {
     setCreateError('');
     const id = formId.trim();
     const name = formName.trim();
-    if (!id || !name) {
+    const isEdit = Boolean(editingProjectId);
+    if (!isEdit && (!id || !name)) {
       setCreateError('请填写项目编号与项目名称');
       return;
     }
+    if (isEdit && !name) {
+      setCreateError('请填写项目名称');
+      return;
+    }
+    const memberCount = Math.max(0, Math.min(9999, Number(formMemberCount) || 0));
     setCreateSubmitting(true);
     try {
-      const r = await fetch('/api/projects', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id,
-          name,
-          projectCode: id,
-          dept: formDept.trim() || undefined,
-          startDate: formStart || undefined,
-          endDate: formEnd || undefined,
-          description: formDesc.trim() || undefined,
-          memberCount: 0
-        })
-      });
-      const j = (await r.json().catch(() => ({}))) as { message?: string };
-      if (!r.ok) throw new Error(j.message || `创建失败 ${r.status}`);
+      if (isEdit) {
+        const r = await fetch(`/api/projects/${encodeURIComponent(editingProjectId!)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name,
+            dept: formDept.trim() || null,
+            manager: formManager.trim() || null,
+            status: formStatus.trim() || '进行中',
+            startDate: formStart || null,
+            endDate: formEnd || null,
+            description: formDesc.trim() || null,
+            memberCount,
+            projectCode: formProjectCode.trim() || null
+          })
+        });
+        const j = (await r.json().catch(() => ({}))) as { message?: string };
+        if (!r.ok) throw new Error(j.message || `保存失败 ${r.status}`);
+      } else {
+        const r = await fetch('/api/projects', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id,
+            name,
+            projectCode: id,
+            dept: formDept.trim() || undefined,
+            manager: formManager.trim() || undefined,
+            status: formStatus.trim() || undefined,
+            startDate: formStart || undefined,
+            endDate: formEnd || undefined,
+            description: formDesc.trim() || undefined,
+            memberCount
+          })
+        });
+        const j = (await r.json().catch(() => ({}))) as { message?: string };
+        if (!r.ok) throw new Error(j.message || `创建失败 ${r.status}`);
+      }
       setCreateOpen(false);
+      setEditingProjectId(null);
       loadProjects();
     } catch (err) {
-      setCreateError(err instanceof Error ? err.message : '创建失败');
+      setCreateError(err instanceof Error ? err.message : isEdit ? '保存失败' : '创建失败');
     } finally {
       setCreateSubmitting(false);
     }
@@ -795,20 +880,31 @@ function ProjectManagementView({ role }: { role: Role }) {
       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">项目管理</h1>
-          <p className="text-slate-500 mt-1">管理所有招聘项目</p>
-          {role === 'delivery_manager' ? (
-            <p className="text-sm text-slate-400 mt-2">您只能看到本部门（华北交付中心）的项目信息。</p>
+          <p className="text-slate-500 mt-1">管理所有招聘项目（数据来自业务库 projects / jobs）</p>
+          <p className="text-xs text-slate-400 mt-2 max-w-2xl leading-relaxed">
+            岗位的新增与编辑请在「岗位分配」中进行；此处可展开查看明细。列表暂不按角色过滤部门，若需权限隔离请在接口层实现。
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {canManage ? (
+            <button
+              type="button"
+              onClick={openCreateModal}
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-900 text-white px-5 py-2.5 text-sm font-semibold hover:bg-slate-800 transition-colors shadow-sm"
+            >
+              <Plus className="w-4 h-4" /> 创建项目
+            </button>
+          ) : null}
+          {(role === 'admin' || role === 'recruiter') && onNavigate ? (
+            <button
+              type="button"
+              onClick={() => onNavigate('job-query')}
+              className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white text-slate-800 px-5 py-2.5 text-sm font-semibold hover:bg-slate-50 transition-colors shadow-sm"
+            >
+              <UserCog className="w-4 h-4" /> 岗位分配
+            </button>
           ) : null}
         </div>
-        {canManage ? (
-          <button
-            type="button"
-            onClick={openCreateModal}
-            className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-900 text-white px-5 py-2.5 text-sm font-semibold hover:bg-slate-800 transition-colors shadow-sm shrink-0"
-          >
-            <Plus className="w-4 h-4" /> 创建项目
-          </button>
-        ) : null}
       </div>
 
       {listProjects.length === 0 ? (
@@ -837,10 +933,32 @@ function ProjectManagementView({ role }: { role: Role }) {
               >
                 <div className="p-6 flex-1">
                   <div className="flex items-start justify-between gap-3 mb-4">
-                    <h2 className="text-lg font-bold text-slate-900 leading-snug pr-2">{project.name}</h2>
-                    <span className="shrink-0 text-xs font-semibold px-2.5 py-1 rounded-md bg-slate-900 text-white">
-                      {project.status || '进行中'}
-                    </span>
+                    <h2 className="text-lg font-bold text-slate-900 leading-snug pr-2 flex-1 min-w-0">{project.name}</h2>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {canManage ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => openEditProject(project)}
+                            className="p-2 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+                            aria-label="编辑项目"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteProject(project)}
+                            className="p-2 rounded-lg text-slate-500 hover:text-red-600 hover:bg-red-50 transition-colors"
+                            aria-label="删除项目"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </>
+                      ) : null}
+                      <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-slate-900 text-white">
+                        {project.status || '进行中'}
+                      </span>
+                    </div>
                   </div>
                   <p className="text-xs font-mono text-slate-500 mb-3">{code}</p>
                   <div className="space-y-2 text-sm text-slate-600">
@@ -907,7 +1025,8 @@ function ProjectManagementView({ role }: { role: Role }) {
                                 </div>
                                 <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
                                   <span>
-                                    需求 <strong className="text-slate-700">{job.demand} 人</strong>
+                                    筛查 <strong className="text-slate-700">{job.screeningCount ?? 0}</strong> 条 · 需求{' '}
+                                    <strong className="text-slate-700">{job.demand} 人</strong>
                                   </span>
                                   <span>地点 {job.location}</span>
                                 </div>
@@ -928,9 +1047,19 @@ function ProjectManagementView({ role }: { role: Role }) {
                             </div>
                           ))
                         )}
-                        {canManage ? (
-                          <p className="text-xs text-slate-400 px-2 pt-1">岗位请在业务库或同步流程中维护</p>
-                        ) : null}
+                        {(role === 'admin' || role === 'recruiter') && onNavigate ? (
+                          <button
+                            type="button"
+                            onClick={() => onNavigate('job-query')}
+                            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium px-2 pt-1 text-left w-full"
+                          >
+                            在「岗位分配」中编辑岗位、JD 与招聘负责人 →
+                          </button>
+                        ) : (
+                          <p className="text-xs text-slate-400 px-2 pt-1">
+                            岗位由管理员或招聘同学在「岗位分配」中维护。
+                          </p>
+                        )}
                       </div>
                     </motion.div>
                   )}
@@ -951,7 +1080,7 @@ function ProjectManagementView({ role }: { role: Role }) {
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
                   className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-900/50"
-                  onClick={() => !createSubmitting && setCreateOpen(false)}
+                  onClick={() => !createSubmitting && closeProjectModal()}
                 >
                   <motion.div
                     key="create-project-modal"
@@ -963,11 +1092,13 @@ function ProjectManagementView({ role }: { role: Role }) {
                     onClick={(e) => e.stopPropagation()}
                   >
               <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-                <h3 className="text-lg font-bold text-slate-900">创建新招聘项目</h3>
+                <h3 className="text-lg font-bold text-slate-900">
+                  {editingProjectId ? '编辑项目' : '创建新招聘项目'}
+                </h3>
                 <button
                   type="button"
                   disabled={createSubmitting}
-                  onClick={() => setCreateOpen(false)}
+                  onClick={closeProjectModal}
                   className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
                   aria-label="关闭"
                 >
@@ -991,12 +1122,26 @@ function ProjectManagementView({ role }: { role: Role }) {
                     <input
                       value={formId}
                       onChange={(e) => setFormId(e.target.value)}
-                      className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-slate-900/20 focus:border-slate-400 outline-none"
+                      disabled={Boolean(editingProjectId)}
+                      className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-slate-900/20 focus:border-slate-400 outline-none disabled:bg-slate-50 disabled:text-slate-500"
                       placeholder="PRJ-2024-001"
-                      required
+                      required={!editingProjectId}
                     />
-                    <p className="text-[11px] text-slate-400 mt-1">作为主键写入数据库，需唯一</p>
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      {editingProjectId ? '项目主键不可修改' : '作为主键写入数据库，需唯一'}
+                    </p>
                   </div>
+                  {editingProjectId ? (
+                    <div>
+                      <label className="block text-xs font-medium text-slate-500 mb-1.5">展示编号（project_code）</label>
+                      <input
+                        value={formProjectCode}
+                        onChange={(e) => setFormProjectCode(e.target.value)}
+                        className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-slate-900/20 focus:border-slate-400 outline-none"
+                        placeholder="与列表展示一致"
+                      />
+                    </div>
+                  ) : null}
                   <div>
                     <label className="block text-xs font-medium text-slate-500 mb-1.5">所属部门</label>
                     <select
@@ -1011,6 +1156,41 @@ function ProjectManagementView({ role }: { role: Role }) {
                         </option>
                       ))}
                     </select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-500 mb-1.5">负责人</label>
+                      <input
+                        value={formManager}
+                        onChange={(e) => setFormManager(e.target.value)}
+                        className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-slate-900/20 outline-none"
+                        placeholder="可选"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-500 mb-1.5">项目状态</label>
+                      <select
+                        value={formStatus}
+                        onChange={(e) => setFormStatus(e.target.value)}
+                        className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-slate-900/20 outline-none"
+                      >
+                        <option value="进行中">进行中</option>
+                        <option value="待归档">待归档</option>
+                        <option value="已结束">已结束</option>
+                        <option value="已关闭">已关闭</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1.5">团队人数（member_count）</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={9999}
+                      value={formMemberCount}
+                      onChange={(e) => setFormMemberCount(e.target.value)}
+                      className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm tabular-nums focus:ring-2 focus:ring-slate-900/20 outline-none"
+                    />
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
@@ -1048,7 +1228,7 @@ function ProjectManagementView({ role }: { role: Role }) {
                   <button
                     type="button"
                     disabled={createSubmitting}
-                    onClick={() => setCreateOpen(false)}
+                    onClick={closeProjectModal}
                     className="px-4 py-2 text-sm font-medium text-slate-700 border border-slate-200 rounded-lg hover:bg-white"
                   >
                     取消
@@ -1058,7 +1238,13 @@ function ProjectManagementView({ role }: { role: Role }) {
                     disabled={createSubmitting}
                     className="px-5 py-2 text-sm font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-60"
                   >
-                    {createSubmitting ? '创建中…' : '创建项目'}
+                    {createSubmitting
+                      ? editingProjectId
+                        ? '保存中…'
+                        : '创建中…'
+                      : editingProjectId
+                        ? '保存更改'
+                        : '创建项目'}
                   </button>
                 </div>
               </form>
@@ -1100,25 +1286,38 @@ async function miniappApiFetch(path: string, init?: RequestInit): Promise<Respon
   return res;
 }
 
-function normalizeApplicationRow(r: Record<string, unknown>): Application {
-  return {
-    id: String(r.id ?? ''),
-    name: String(r.name ?? ''),
-    job: String(r.job ?? ''),
-    resumeScore: Number(r.resumeScore ?? r.resumescore ?? 0) || 0,
-    interviewScore: Number(r.interviewScore ?? r.interviewscore ?? 0) || 0,
-    aiEval: String(r.aiEval ?? r.aieval ?? ''),
-    status: String(r.status ?? '')
-  };
-}
-
 type WorkbenchTodo = {
   key: string;
   title: string;
+  note: string;
+  cta: string;
+  priority: number;
   tag: string;
   tagClass: string;
   borderClass: string;
   menuId: string;
+  show: boolean;
+};
+
+type WorkbenchStatsPayload = {
+  resumeScreeningCount: number;
+  pendingAnalysisCount: number;
+  pendingReviewCount: number;
+  interviewReportCount: number;
+  interviewPassedCount: number;
+  pendingInviteCount: number;
+  pendingReportCount: number;
+  timeoutResumeCount: number;
+  timeoutInviteCount: number;
+  exceptionCount: number;
+  focusJobAlertCount: number;
+  recentScreenings: Array<{
+    id: number | string;
+    candidate_name: string;
+    matched_job_title: string;
+    match_score: number;
+    status: string;
+  }>;
 };
 
 function WorkbenchView({
@@ -1129,17 +1328,9 @@ function WorkbenchView({
   currentRole: Role;
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
-  const [applications, setApplications] = useState<Application[]>([]);
-  const [adminResumes, setAdminResumes] = useState<Resume[]>([]);
-  const [screenRows, setScreenRows] = useState<
-    Array<{
-      id: number | string;
-      status: string;
-      report_summary: string | null;
-      candidate_name?: string;
-    }>
-  >([]);
-  const [screeningsOk, setScreeningsOk] = useState(false);
+  const [wbStats, setWbStats] = useState<WorkbenchStatsPayload | null>(null);
+  const [wbStatsLoading, setWbStatsLoading] = useState(false);
+  const [wbStatsOk, setWbStatsOk] = useState(false);
   const [sessRev, setSessRev] = useState(0);
   useEffect(() => subscribeAdminSession(() => setSessRev((n) => n + 1)), []);
   const apiBase = resolveMiniappApiBase();
@@ -1154,165 +1345,196 @@ function WorkbenchView({
   }, []);
 
   useEffect(() => {
-    void fetch('/api/applications')
-      .then((res) => res.json())
-      .then((rows: unknown[]) =>
-        setApplications(
-          Array.isArray(rows) ? rows.map((x) => normalizeApplicationRow(x as Record<string, unknown>)) : []
-        )
-      )
-      .catch(() => setApplications([]));
-  }, []);
-
-  useEffect(() => {
-    void fetch('/api/resumes')
-      .then((res) => res.json())
-      .then((rows: unknown[]) => {
-        if (!Array.isArray(rows)) {
-          setAdminResumes([]);
-          return;
-        }
-        setAdminResumes(
-          rows.map((raw) => {
-            const r = raw as Record<string, unknown>;
-            return {
-              id: String(r.id ?? ''),
-              name: String(r.name ?? ''),
-              job: String(r.job ?? ''),
-              matchScore: Number(r.matchScore ?? r.matchscore ?? 0) || 0,
-              status: String(r.status ?? ''),
-              uploadTime: String(r.uploadTime ?? r.uploadtime ?? '')
-            };
-          })
-        );
-      })
-      .catch(() => setAdminResumes([]));
-  }, []);
-
-  useEffect(() => {
     if (!apiBase || !hasToken) {
-      setScreenRows([]);
-      setScreeningsOk(false);
+      setWbStats(null);
+      setWbStatsOk(false);
+      setWbStatsLoading(false);
       return;
     }
-    void miniappApiFetch('/api/admin/resume-screenings')
+    setWbStatsLoading(true);
+    void miniappApiFetch('/api/admin/workbench-stats')
       .then(async (r) => {
-        const j = (await r.json()) as { data?: unknown[]; message?: string };
+        const j = (await r.json()) as { data?: WorkbenchStatsPayload; message?: string };
         if (!r.ok) throw new Error(j.message || 'fail');
-        const data = j.data || [];
-        setScreeningsOk(true);
-        setScreenRows(
-          data.map((x) => {
-            const row = x as Record<string, unknown>;
-            return {
-              id: row.id as number | string,
-              status: String(row.status ?? ''),
-              report_summary: (row.report_summary as string | null) ?? null,
-              candidate_name: String(row.candidate_name ?? '')
-            };
-          })
-        );
+        const d = j.data;
+        if (!d || typeof d !== 'object') throw new Error('invalid payload');
+        setWbStats({
+          resumeScreeningCount: Number(d.resumeScreeningCount) || 0,
+          pendingAnalysisCount: Number(d.pendingAnalysisCount) || 0,
+          pendingReviewCount: Number(d.pendingReviewCount) || 0,
+          interviewReportCount: Number(d.interviewReportCount) || 0,
+          interviewPassedCount: Number(d.interviewPassedCount) || 0,
+          pendingInviteCount: Number(d.pendingInviteCount) || 0,
+          pendingReportCount: Number(d.pendingReportCount) || 0,
+          timeoutResumeCount: Number(d.timeoutResumeCount) || 0,
+          timeoutInviteCount: Number(d.timeoutInviteCount) || 0,
+          exceptionCount: Number(d.exceptionCount) || 0,
+          focusJobAlertCount: Number(d.focusJobAlertCount) || 0,
+          recentScreenings: Array.isArray(d.recentScreenings) ? d.recentScreenings : []
+        });
+        setWbStatsOk(true);
       })
       .catch(() => {
-        setScreenRows([]);
-        setScreeningsOk(false);
-      });
+        setWbStats(null);
+        setWbStatsOk(false);
+      })
+      .finally(() => setWbStatsLoading(false));
   }, [apiBase, hasToken, sessRev]);
 
   const activeProjectCount = projects.filter(
     (p) => !['EMPTY', 'UNASSIGNED'].includes(p.id) && !/待归档|已结束|已关闭/.test(p.status)
   ).length;
 
-  const resumeReceivedCount = screeningsOk
-    ? screenRows.length
-    : adminResumes.length;
+  const resumeReceivedCount = wbStatsOk && wbStats ? wbStats.resumeScreeningCount : null;
+  const aiInterviewCount = wbStatsOk && wbStats ? wbStats.interviewReportCount : null;
+  const interviewPassedCount = wbStatsOk && wbStats ? wbStats.interviewPassedCount : null;
 
-  const aiInterviewCount = applications.filter((a) => (a.interviewScore ?? 0) > 0).length;
+  const pendingAiAnalysis =
+    wbStatsOk && wbStats ? wbStats.pendingAnalysisCount : 0;
+  const pendingReviewCount = wbStatsOk && wbStats ? wbStats.pendingReviewCount : 0;
+  const pendingInviteCount = wbStatsOk && wbStats ? wbStats.pendingInviteCount : 0;
+  const pendingReportCount = wbStatsOk && wbStats ? wbStats.pendingReportCount : 0;
+  const timeoutResumeCount = wbStatsOk && wbStats ? wbStats.timeoutResumeCount : 0;
+  const timeoutInviteCount = wbStatsOk && wbStats ? wbStats.timeoutInviteCount : 0;
+  const exceptionCount = wbStatsOk && wbStats ? wbStats.exceptionCount : 0;
+  const focusJobAlertCount = wbStatsOk && wbStats ? wbStats.focusJobAlertCount : 0;
 
-  const hiredCount = applications.filter((a) => /录用|已入职|Offer|offer/i.test(a.status)).length;
-
-  const pendingAiAnalysis = screeningsOk
-    ? screenRows.filter(
-        (s) =>
-          !String(s.report_summary || '').trim() ||
-          /待分析|分析中|排队|处理中/i.test(s.status)
-      ).length
-    : adminResumes.filter((r) => !/AI分析完成|不匹配|已拒绝/i.test(r.status)).length;
-
-  const pendingScreenCount = applications.filter(
-    (a) => a.status === '待初试' || a.status === '新建' || a.status === '待筛选'
-  ).length;
-
-  const hireApprovalCount = applications.filter((a) =>
-    /待审批|录用审批|待录用|待 offer/i.test(a.status)
-  ).length;
-
-  const todos: WorkbenchTodo[] = [];
-  if (pendingAiAnalysis > 0 && (currentRole === 'admin' || currentRole === 'recruiter')) {
-    todos.push({
+  const todos: WorkbenchTodo[] = [
+    {
       key: 'ai',
       title: `${pendingAiAnalysis} 份简历待 AI 分析`,
+      note: '建议今天内完成首轮分析，避免候选人长时间停留在初筛阶段。',
+      cta: '去简历筛查处理',
+      priority: 100,
       tag: '紧急',
       tagClass: 'bg-red-500 text-white',
       borderClass: 'border-red-200 bg-red-50/40',
-      menuId: 'resume-screening'
-    });
-  }
-  if (pendingScreenCount > 0 && (currentRole === 'admin' || currentRole === 'recruiter')) {
-    todos.push({
-      key: 'screen',
-      title: `${pendingScreenCount} 位候选人待筛选`,
+      menuId: 'resume-screening',
+      show: pendingAiAnalysis > 0 && (currentRole === 'admin' || currentRole === 'recruiter')
+    },
+    {
+      key: 'review',
+      title: `${pendingReviewCount} 条筛查为「待定」，建议复核`,
+      note: '优先复核高匹配但状态未推进的候选人，缩短决策链路。',
+      cta: '去复核筛查结果',
+      priority: 80,
       tag: '待处理',
       tagClass: 'bg-white text-slate-800 border border-slate-200',
       borderClass: 'border-amber-200 bg-amber-50/30',
-      menuId: 'resume-screening'
-    });
-  }
-  if (hireApprovalCount > 0) {
-    todos.push({
-      key: 'hire',
-      title: `${hireApprovalCount} 个录用审批待处理`,
-      tag: '待审批',
-      tagClass: 'bg-slate-900 text-white',
+      menuId: 'resume-screening',
+      show: pendingReviewCount > 0 && (currentRole === 'admin' || currentRole === 'recruiter')
+    },
+    {
+      key: 'invite',
+      title: `${pendingInviteCount} 位候选人达到邀约条件，待发送初面邀请`,
+      note: '建议 24 小时内完成邀约，减少候选人流失。',
+      cta: '去发送初面邀请',
+      priority: 75,
+      tag: '动作',
+      tagClass: 'bg-indigo-600 text-white',
+      borderClass: 'border-indigo-200 bg-indigo-50/40',
+      menuId: 'application-mgmt',
+      show: pendingInviteCount > 0 && (currentRole === 'admin' || currentRole === 'recruiter')
+    },
+    {
+      key: 'report',
+      title: `${pendingReportCount} 场面试已完成，待补充面试报告`,
+      note: '报告补齐后可用于工作台与筛查联动，建议当日闭环。',
+      cta: '去补录面试报告',
+      priority: 70,
+      tag: '动作',
+      tagClass: 'bg-violet-600 text-white',
+      borderClass: 'border-violet-200 bg-violet-50/40',
+      menuId: 'application-mgmt',
+      show: pendingReportCount > 0 && (currentRole === 'admin' || currentRole === 'delivery_manager')
+    },
+    {
+      key: 'timeout',
+      title: `${timeoutResumeCount + timeoutInviteCount} 条任务已超时（简历/邀约）`,
+      note: '含超过 24h 未推进简历与超过 48h 未响应邀约，建议优先清理。',
+      cta: '去处理超时任务',
+      priority: 95,
+      tag: '超时',
+      tagClass: 'bg-rose-600 text-white',
+      borderClass: 'border-rose-200 bg-rose-50/40',
+      menuId: 'resume-screening',
+      show: timeoutResumeCount + timeoutInviteCount > 0
+    },
+    {
+      key: 'exception',
+      title: `${exceptionCount} 条异常记录待人工处理`,
+      note: '包含处理失败/异常状态，建议先排障再恢复流程推进。',
+      cta: '去查看异常记录',
+      priority: 90,
+      tag: '异常',
+      tagClass: 'bg-slate-800 text-white',
+      borderClass: 'border-slate-300 bg-slate-50',
+      menuId: 'application-mgmt',
+      show: exceptionCount > 0
+    },
+    {
+      key: 'hc',
+      title: `${focusJobAlertCount} 个重点岗位存在 HC 缺口`,
+      note: '岗位筛查量不足以覆盖需求编制，建议加大投放或调整优先级。',
+      cta: '去查看岗位缺口',
+      priority: 60,
+      tag: '关注',
+      tagClass: 'bg-emerald-600 text-white',
       borderClass: 'border-emerald-200 bg-emerald-50/40',
-      menuId: 'application-mgmt'
-    });
-  }
+      menuId: 'job-query',
+      show: focusJobAlertCount > 0
+    }
+  ]
+    .filter((t) => t.show)
+    .sort((a, b) => b.priority - a.priority);
 
   const recentProjects = projects
     .filter((p) => !['EMPTY', 'UNASSIGNED'].includes(p.id))
     .slice(0, 5);
 
-  const recentCandidates = applications.slice(0, 8);
+  const recentCandidates = wbStatsOk && wbStats ? wbStats.recentScreenings : [];
 
-  const statCards = [
+  const statCards: Array<{
+    key: string;
+    label: string;
+    sublabel?: string;
+    icon: typeof FolderOpen;
+    iconWrap: string;
+    displayValue: string;
+  }> = [
     {
       key: 'proj',
       label: '在招项目',
-      value: activeProjectCount,
       icon: FolderOpen,
-      iconWrap: 'bg-sky-100 text-sky-600'
+      iconWrap: 'bg-sky-100 text-sky-600',
+      displayValue: String(activeProjectCount)
     },
     {
       key: 'resume',
       label: '收到简历',
-      value: resumeReceivedCount,
+      sublabel: '简历筛查记录数',
       icon: Users,
-      iconWrap: 'bg-emerald-100 text-emerald-600'
+      iconWrap: 'bg-emerald-100 text-emerald-600',
+      displayValue:
+        !hasToken ? '—' : wbStatsLoading ? '…' : wbStatsOk && resumeReceivedCount !== null ? String(resumeReceivedCount) : '—'
     },
     {
       key: 'ai',
-      label: 'AI 面试',
-      value: aiInterviewCount,
+      label: '面试报告',
+      sublabel: '候选人完成答题生成的报告',
       icon: Bot,
-      iconWrap: 'bg-violet-100 text-violet-600'
+      iconWrap: 'bg-violet-100 text-violet-600',
+      displayValue:
+        !hasToken ? '—' : wbStatsLoading ? '…' : wbStatsOk && aiInterviewCount !== null ? String(aiInterviewCount) : '—'
     },
     {
       key: 'hire',
-      label: '已录用',
-      value: hiredCount,
+      label: '面试通过',
+      sublabel: '报告中标记为通过',
       icon: UserCheck,
-      iconWrap: 'bg-orange-100 text-orange-600'
+      iconWrap: 'bg-orange-100 text-orange-600',
+      displayValue:
+        !hasToken ? '—' : wbStatsLoading ? '…' : wbStatsOk && interviewPassedCount !== null ? String(interviewPassedCount) : '—'
     }
   ];
 
@@ -1321,25 +1543,10 @@ function WorkbenchView({
       <div>
         <h1 className="text-2xl font-bold text-slate-900">工作台</h1>
         <p className="text-slate-500 mt-1">欢迎使用智能招聘管理系统</p>
+        <p className="text-xs text-slate-400 mt-2 max-w-2xl leading-relaxed">
+          简历与面试相关统计来自「简历筛查」与「面试报告」；在招项目数来自项目列表。请先登录以加载业务数据（本页已不使用管理库中的演示投递/简历数据）。
+        </p>
       </div>
-
-      {hireApprovalCount > 0 ? (
-        <button
-          type="button"
-          onClick={() => onNavigate('application-mgmt')}
-          className="w-full flex items-center justify-between gap-4 rounded-xl border border-emerald-200 bg-emerald-50/90 px-5 py-3.5 text-left shadow-sm hover:bg-emerald-50 transition-colors"
-        >
-          <div className="flex items-center gap-3 min-w-0">
-            <Info className="w-5 h-5 text-emerald-600 shrink-0" />
-            <span className="text-sm font-medium text-emerald-900 truncate">
-              {hireApprovalCount} 个录用审批待处理
-            </span>
-          </div>
-          <span className="shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full bg-slate-900 text-white">
-            待审批
-          </span>
-        </button>
-      ) : null}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
         {statCards.map((c) => (
@@ -1352,9 +1559,12 @@ function WorkbenchView({
             >
               <c.icon className="w-7 h-7" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-sm text-slate-500">{c.label}</p>
-              <p className="text-3xl font-bold text-slate-900 tabular-nums">{c.value}</p>
+              {c.sublabel ? (
+                <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">{c.sublabel}</p>
+              ) : null}
+              <p className="text-3xl font-bold text-slate-900 tabular-nums mt-1">{c.displayValue}</p>
             </div>
           </div>
         ))}
@@ -1369,16 +1579,23 @@ function WorkbenchView({
           {todos.length === 0 ? (
             <div className="px-6 py-10 text-center text-sm text-slate-500">暂无待办，数据将随业务自动汇总</div>
           ) : (
-            todos.map((t) => (
+            todos.map((t, idx) => (
               <button
                 key={t.key}
                 type="button"
                 onClick={() => onNavigate(t.menuId)}
                 className={`w-full flex items-center justify-between gap-4 px-6 py-4 text-left border-l-4 border-l-transparent hover:bg-slate-50/80 transition-colors ${t.borderClass}`}
               >
-                <span className="text-sm text-slate-800">
-                  <span className="text-slate-400 mr-1">①</span>
-                  {t.title}
+                <span className="min-w-0">
+                  <span className="text-sm text-slate-800 block">
+                    <span className="text-slate-400 mr-1">{`${idx + 1}.`}</span>
+                    {t.title}
+                  </span>
+                  <span className="text-xs text-slate-500 mt-1 block">{t.note}</span>
+                  <span className="text-xs font-medium text-indigo-600 mt-1.5 inline-flex items-center gap-1">
+                    {t.cta}
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </span>
                 </span>
                 <span className={`shrink-0 text-xs font-semibold px-2.5 py-1 rounded-md ${t.tagClass}`}>
                   {t.tag}
@@ -1432,41 +1649,48 @@ function WorkbenchView({
 
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-            <h2 className="font-bold text-slate-900">最近候选人</h2>
+            <div>
+              <h2 className="font-bold text-slate-900">最近筛查候选人</h2>
+              <p className="text-[11px] text-slate-400 mt-0.5">与简历筛查列表一致，登录后展示</p>
+            </div>
             {(currentRole === 'admin' || currentRole === 'recruiter') && (
               <button
                 type="button"
-                onClick={() => onNavigate('application-mgmt')}
+                onClick={() => onNavigate('resume-screening')}
                 className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
               >
-                初面管理
+                简历筛查
               </button>
             )}
           </div>
           <div className="p-4 space-y-3">
-            {recentCandidates.length === 0 ? (
-              <p className="text-sm text-slate-500 px-2 py-6 text-center">暂无候选人记录</p>
+            {!hasToken ? (
+              <p className="text-sm text-slate-500 px-2 py-6 text-center">请登录后查看最近筛查记录</p>
+            ) : wbStatsLoading ? (
+              <p className="text-sm text-slate-500 px-2 py-6 text-center">加载中…</p>
+            ) : recentCandidates.length === 0 ? (
+              <p className="text-sm text-slate-500 px-2 py-6 text-center">暂无筛查记录，可在简历上传中提交简历</p>
             ) : (
-              recentCandidates.map((a) => (
+              recentCandidates.map((row) => (
                 <button
-                  key={a.id}
+                  key={String(row.id)}
                   type="button"
-                  onClick={() => onNavigate('application-mgmt')}
+                  onClick={() => onNavigate('resume-screening')}
                   className="w-full flex items-center justify-between gap-3 rounded-lg border border-slate-100 bg-slate-50/50 px-4 py-3 text-left hover:bg-slate-50 transition-colors"
                 >
                   <div className="flex items-center gap-3 min-w-0">
                     <div className="w-9 h-9 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-sm shrink-0">
-                      {(a.name || '?')[0]}
+                      {(row.candidate_name || '?')[0]}
                     </div>
                     <div className="min-w-0">
-                      <p className="font-semibold text-slate-900 truncate">{a.name}</p>
+                      <p className="font-semibold text-slate-900 truncate">{row.candidate_name || '—'}</p>
                       <p className="text-xs text-slate-500 truncate">
-                        {a.job} · 简历匹配 {a.resumeScore}
+                        {row.matched_job_title || '—'} · 匹配 {row.match_score}
                       </p>
                     </div>
                   </div>
                   <span className="shrink-0 text-xs font-medium px-2.5 py-1 rounded-md bg-slate-900 text-white">
-                    {a.status || '—'}
+                    {row.status || '—'}
                   </span>
                 </button>
               ))
@@ -1482,6 +1706,8 @@ type JobAssignmentRow = {
   job: Job;
   projectName: string;
   projectManager: string;
+  /** 来自所属 projects.status，岗位表无单独状态时作展示参考 */
+  projectStatus: string;
 };
 
 function parseRecruitersInput(s: string): string[] {
@@ -1605,7 +1831,12 @@ function JobQueryView({
             if (currentRole === 'recruiter') {
               if (!recruitersContainMe(job.recruiters, meKeys)) continue;
             }
-            out.push({ job, projectName: pname, projectManager: pm });
+            out.push({
+              job,
+              projectName: pname,
+              projectManager: pm,
+              projectStatus: String(p.status || '').trim() || '—'
+            });
           }
         }
         out.sort((a, b) => {
@@ -1746,6 +1977,12 @@ function JobQueryView({
       <div>
         <h1 className="text-2xl font-bold text-slate-900">岗位分配</h1>
         <p className="text-slate-500 mt-1">为招聘项目分配岗位需求</p>
+        <p className="text-xs text-slate-400 mt-2 max-w-3xl leading-relaxed">
+          HC 列为「简历筛查条数 / 需求人数」：左侧为业务库 <span className="font-mono text-slate-500">resume_screenings</span>{' '}
+          按岗位码汇总；右侧为岗位编制需求。状态列为所属
+          <span className="font-medium text-slate-600">项目</span>
+          状态（非岗位独立状态）。
+        </p>
       </div>
 
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
@@ -1771,11 +2008,16 @@ function JobQueryView({
                 <th className="px-5 py-3 font-medium whitespace-nowrap">所属部门</th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">负责人</th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">JD</th>
-                <th className="px-5 py-3 font-medium whitespace-nowrap">HC</th>
+                <th
+                  className="px-5 py-3 font-medium whitespace-nowrap"
+                  title="筛查记录数 / 需求人数"
+                >
+                  HC
+                </th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">薪资范围</th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">地点</th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">列表时间</th>
-                <th className="px-5 py-3 font-medium whitespace-nowrap">状态</th>
+                <th className="px-5 py-3 font-medium whitespace-nowrap">项目状态</th>
                 <th className="px-5 py-3 font-medium text-right whitespace-nowrap">操作</th>
               </tr>
             </thead>
@@ -1787,15 +2029,21 @@ function JobQueryView({
                   </td>
                 </tr>
               ) : (
-                rows.map(({ job, projectName, projectManager }) => {
+                rows.map(({ job, projectName, projectManager, projectStatus }) => {
                   const dept = job.department && job.department !== '-' ? job.department : '—';
-                  const hc = `0/${job.demand}`;
+                  const screenN = job.screeningCount ?? 0;
+                  const hc = `${screenN}/${job.demand}`;
                   const owner = jobAssignmentOwner(job, projectManager);
                   const when = (job.updatedAt || '').trim() || '—';
+                  const ps = projectStatus || '—';
+                  const statusMuted = /待归档|已结束|已关闭/.test(ps);
                   return (
                     <tr key={`${job.project_id}-${job.id}`} className="hover:bg-slate-50/80 transition-colors">
                       <td className="px-5 py-4 align-top">
                         <p className="font-semibold text-slate-900">{job.title}</p>
+                        <p className="text-xs font-mono text-slate-500 mt-0.5" title="岗位码，用于筛查/邀请/报告关联">
+                          {job.id}
+                        </p>
                         <p className="text-xs text-slate-500 mt-0.5">{projectName}</p>
                       </td>
                       <td className="px-5 py-4 text-slate-700 align-top">{dept}</td>
@@ -1809,15 +2057,27 @@ function JobQueryView({
                           {job.jdText || '—'}
                         </span>
                       </td>
-                      <td className="px-5 py-4 text-slate-800 font-medium tabular-nums align-top">{hc}</td>
+                      <td
+                        className="px-5 py-4 text-slate-800 font-medium tabular-nums align-top"
+                        title="左侧：该岗位在简历筛查中的记录条数；右侧：需求人数"
+                      >
+                        {hc}
+                      </td>
                       <td className="px-5 py-4 text-slate-800 align-top whitespace-nowrap">{job.salary}</td>
                       <td className="px-5 py-4 text-slate-700 align-top">{job.location}</td>
                       <td className="px-5 py-4 text-slate-600 tabular-nums align-top whitespace-nowrap text-xs">
                         {when}
                       </td>
                       <td className="px-5 py-4 align-top">
-                        <span className="inline-flex px-2.5 py-1 rounded-md text-xs font-medium bg-emerald-50 text-emerald-800 border border-emerald-100">
-                          招聘中
+                        <span
+                          className={`inline-flex px-2.5 py-1 rounded-md text-xs font-medium border ${
+                            statusMuted
+                              ? 'bg-slate-100 text-slate-600 border-slate-200'
+                              : 'bg-emerald-50 text-emerald-800 border-emerald-100'
+                          }`}
+                          title="取自该项目在项目管理中的状态"
+                        >
+                          {ps}
                         </span>
                       </td>
                       <td className="px-5 py-4 align-top text-right">
@@ -2090,6 +2350,72 @@ function deriveResumeDimsFromOverall(score: number) {
   }
 }
 
+/** 流程：AI 筛查 → 发面试邀请 → 候选人答题/面试 → 面试报告；与 pipeline_stage、interview_reports 关联展示 */
+function deriveScreeningFlowLabels(row: Record<string, unknown>): { flowStage: string; aiConclusion: string } {
+  const aiConclusion = String(row.status ?? '').trim() || '—'
+  const ivRaw = row.interview_overall_score
+  const updatedAt = row.interview_report_updated_at
+  const hasUpdated = updatedAt !== null && updatedAt !== undefined && String(updatedAt).trim() !== ''
+  const ivParsed =
+    ivRaw !== null && ivRaw !== undefined && String(ivRaw).trim() !== ''
+      ? Math.max(0, Math.min(100, Number(ivRaw) || 0))
+      : null
+  const hasInterviewReport = hasUpdated || ivParsed !== null
+  if (hasInterviewReport) {
+    const passedN = Number(row.interview_passed)
+    if (passedN === 1) return { flowStage: '初面通过', aiConclusion }
+    if (passedN === 0) return { flowStage: '初面待提升', aiConclusion }
+    return { flowStage: '初面已完成', aiConclusion }
+  }
+  const pip = String(row.pipeline_stage ?? '').trim()
+  if (pip === 'report_done') return { flowStage: '面试报告已出具', aiConclusion }
+  if (pip === 'invited') return { flowStage: '已发面试邀请', aiConclusion }
+  return { flowStage: '简历筛查完成', aiConclusion }
+}
+
+function fmtAdminListDateTime(v: unknown): string {
+  if (v == null || v === '') return ''
+  try {
+    const d = v instanceof Date ? v : new Date(String(v))
+    if (Number.isNaN(d.getTime())) return ''
+    return d.toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    })
+  } catch {
+    return ''
+  }
+}
+
+/** 初面管理「面试情况」：补充流程阶段与报告之间的业务说明 */
+function deriveInterviewSituation(row: Record<string, unknown>, hasInterviewReport: boolean): string {
+  const pip = String(row.pipeline_stage ?? '').trim()
+  const reportAt = fmtAdminListDateTime(row.interview_report_updated_at)
+  const sessSt = String(row.interview_session_status ?? '').trim()
+  const voip = String(row.interview_session_voip ?? '').trim()
+  const sessParts: string[] = []
+  if (sessSt === 'created') sessParts.push('面试会话已创建')
+  else if (sessSt) sessParts.push(`会话：${sessSt}`)
+  if (voip === 'connected') sessParts.push('音视频曾接通')
+  else if (voip && voip !== 'not_started') sessParts.push(`通话：${voip}`)
+  const sessHint = sessParts.join(' · ')
+
+  if (hasInterviewReport) {
+    const timePart = reportAt ? `报告更新 ${reportAt}` : ''
+    return ['已提交初面并生成面试报告', timePart, sessHint].filter(Boolean).join(' · ')
+  }
+  if (pip === 'report_done') {
+    return '库中标记为已有报告，但当前行未关联到报告（多为面试填写姓名与筛查不一致），请核对姓名与岗位码。'
+  }
+  if (pip === 'invited') {
+    return '已对该筛查记录发起邀请；尚未产生可关联的面试报告。请确认候选人已用邀请码登录并完成答题/面试。'
+  }
+  return '尚未从简历筛查页面对该记录发起邀请，候选人未进入面试流程。'
+}
+
 function dimsFromScreeningDbRow(
   row: {
     skill_score?: number | null
@@ -2120,6 +2446,10 @@ function mapScreeningRow(r: {
   education_score?: number | null
   stability_score?: number | null
   status: string
+  pipeline_stage?: string | null
+  interview_overall_score?: unknown
+  interview_passed?: unknown
+  interview_report_updated_at?: unknown
   report_summary: string | null
   created_at: string | Date
 }): Resume {
@@ -2130,6 +2460,7 @@ function mapScreeningRow(r: {
       : String(created || '')
   const overall = Math.max(0, Math.min(100, Number(r.match_score) || 0))
   const d = dimsFromScreeningDbRow(r, overall)
+  const { flowStage, aiConclusion } = deriveScreeningFlowLabels(r as unknown as Record<string, unknown>)
   return {
     id: String(r.id),
     name: String(r.candidate_name || '候选人'),
@@ -2140,7 +2471,8 @@ function mapScreeningRow(r: {
     experienceScore: d.experience,
     educationScore: d.education,
     stabilityScore: d.stability,
-    status: String(r.status || ''),
+    status: aiConclusion,
+    flowStage,
     uploadTime,
     reportSummary: String(r.report_summary || '')
   }
@@ -2199,6 +2531,10 @@ function ResumeScreeningView({
           education_score?: number | null
           stability_score?: number | null
           status: string
+          pipeline_stage?: string | null
+          interview_overall_score?: unknown
+          interview_passed?: unknown
+          interview_report_updated_at?: unknown
           report_summary: string | null
           created_at: string | Date
         }>
@@ -2266,20 +2602,26 @@ function ResumeScreeningView({
     });
   }, [inviteJobs]);
 
-  const handleMiniappInvite = async (jobCode: string) => {
+  const handleMiniappInvite = async (jobCode: string, screeningId?: string) => {
     setLastInvite(null);
     setCreatingInvite(jobCode);
     try {
       const recruiterCode = getAdminLoginProfile()?.username || '';
+      const body: Record<string, unknown> = { jobCode, expiresInDays: 7, recruiterCode };
+      if (screeningId && String(screeningId).trim()) {
+        const sid = Number(screeningId);
+        if (Number.isFinite(sid) && sid > 0) body.screeningId = sid;
+      }
       const r = await miniappApiFetch('/api/admin/invitations', {
         method: 'POST',
-        body: JSON.stringify({ jobCode, expiresInDays: 7, recruiterCode })
+        body: JSON.stringify(body)
       });
       const j = (await r.json()) as { data?: { inviteCode: string; jobCode: string }; message?: string };
       if (!r.ok) throw new Error(j.message || `发起失败 HTTP ${r.status}`);
       if (j.data?.inviteCode) {
         setLastInvite({ inviteCode: j.data.inviteCode, jobCode: j.data.jobCode });
         setInviteBanner('');
+        loadScreenings();
       }
     } catch (e) {
       setInviteBanner(e instanceof Error ? e.message : '发起面试失败');
@@ -2298,7 +2640,7 @@ function ResumeScreeningView({
     if (resume.jobCode) {
       const byCode = inviteJobs.find((j) => j.job_code === resume.jobCode);
       if (byCode) {
-        void handleMiniappInvite(byCode.job_code);
+        void handleMiniappInvite(byCode.job_code, resume.id);
         return;
       }
     }
@@ -2315,7 +2657,7 @@ function ResumeScreeningView({
       setInviteBanner(`未在可操作岗位中找到与「${name}」对应的岗位，请联系管理员确认岗位分配。`);
       return;
     }
-    void handleMiniappInvite(matched.job_code);
+    void handleMiniappInvite(matched.job_code, resume.id);
   };
 
   const runUpload = (file: File | null) => {
@@ -2347,13 +2689,24 @@ function ResumeScreeningView({
       <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-4 flex items-start gap-3">
         <Send className="w-5 h-5 text-emerald-600 mt-0.5" />
         <div>
-          <h4 className="font-bold text-emerald-900">按简历结果发起面试</h4>
-          <p className="text-sm text-emerald-800 mt-1 leading-relaxed">
-            <strong className="font-semibold text-emerald-950">候选人无需事先在小程序里注册或登录。</strong>
-            您先完成简历分析，再在候选人卡片点击「发起面试」生成邀请码，并将码通过微信/短信等发给对方；对方
-            <strong className="font-semibold text-emerald-950">首次打开小程序</strong>，在
-            <strong className="font-semibold text-emerald-950">「欢迎参加面试」登录页</strong>
-            填写真实姓名与邀请码（即下方生成的 INV 开头一串字符），点下一步即可完成登记并进入面试准备页。
+          <h4 className="font-bold text-emerald-900">标准招聘流程（与列表「流程阶段」一致）</h4>
+          <ol className="text-sm text-emerald-900/95 mt-2 space-y-1.5 list-decimal list-inside leading-relaxed">
+            <li>
+              <span className="font-medium text-emerald-950">AI 筛查简历</span>：上传后生成匹配分与 AI 结论文案（状态里的「AI分析完成」等指本步）。
+            </li>
+            <li>
+              <span className="font-medium text-emerald-950">发起面试邀请</span>：在卡片点「发起面试」会生成邀请码，并把这行筛查记为「已发面试邀请」（请从卡片发起以便系统关联）。
+            </li>
+            <li>
+              <span className="font-medium text-emerald-950">候选人面试</span>：对方用邀请码进入小程序，完成答题/面试；姓名需与简历筛查中的姓名一致，便于合并报告。
+            </li>
+            <li>
+              <span className="font-medium text-emerald-950">面试报告</span>：提交后写入报告，列表进入「初面通过/待提升」等，综合分以面试分为准（初面管理同逻辑）。
+            </li>
+          </ol>
+          <p className="text-sm text-emerald-800 mt-3 leading-relaxed border-t border-emerald-200/80 pt-3">
+            <span className="font-semibold text-emerald-950">候选人无需事先注册。</span>
+            将 INV 邀请码发给对方后，其在「欢迎参加面试」登录页填写真实姓名与邀请码即可进入准备页。
           </p>
         </div>
       </div>
@@ -2487,11 +2840,17 @@ function ResumeScreeningView({
                     <FileText className="w-6 h-6 text-slate-500" />
                   </div>
                   <div className="flex-1">
-                    <div className="flex items-center gap-3 mb-1">
+                    <div className="flex items-center gap-3 mb-1 flex-wrap">
                       <h4 className="font-bold text-slate-900 text-lg">{resume.name}</h4>
+                      {resume.flowStage ? (
+                        <span className="text-xs font-medium px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-800">
+                          {resume.flowStage}
+                        </span>
+                      ) : null}
                       <span className="text-xs text-slate-500">匹配岗位: {resume.job}</span>
                     </div>
                     <div className="text-sm text-slate-500">上传时间: {resume.uploadTime}</div>
+                    <div className="text-[11px] text-slate-400 mt-1">AI 简历结论：{resume.status}</div>
                   </div>
                   <div className="w-48">
                     <div className="flex justify-between text-sm mb-1">
@@ -2570,7 +2929,12 @@ function ResumeScreeningView({
                 </button>
               </div>
               <div className="flex-1 overflow-y-auto px-6 py-4">
-                <p className="text-xs font-medium text-slate-500 mb-1">匹配度 {reportResume.matchScore} 分 · {reportResume.status}</p>
+                <p className="text-xs font-medium text-slate-500 mb-1">
+                  {reportResume.flowStage ? (
+                    <span className="text-indigo-600 mr-1">流程：{reportResume.flowStage} · </span>
+                  ) : null}
+                  简历匹配 {reportResume.matchScore} 分 · AI 结论 {reportResume.status}
+                </p>
                 <p className="text-xs text-slate-500 mb-3">
                   维度：技能 {reportResume.skillScore ?? '—'} / 经验 {reportResume.experienceScore ?? '—'} / 学历{' '}
                   {reportResume.educationScore ?? '—'} / 稳定 {reportResume.stabilityScore ?? '—'}
@@ -2608,12 +2972,20 @@ function ApplicationManagementView({
     candidateName: string
     jobCode: string
     jobTitle: string
+    /** 列表主分数：有面试报告用面试综合分，否则用简历 match_score */
     score: number
+    resumeMatchScore: number
+    hasInterviewReport: boolean
     skill: number
     experience: number
     education: number
     stability: number
+    /** 流程阶段：简历筛查完成 / 已发邀请 / 初面通过 … */
     status: string
+    /** AI 对简历的结论文案，与流程阶段分列展示 */
+    aiConclusion: string
+    /** 面试进度说明（邀请/报告/会话等） */
+    interviewSituation: string
     summary: string
   }>>([])
   const [loading, setLoading] = useState(false)
@@ -2652,7 +3024,7 @@ function ApplicationManagementView({
         const data = Array.isArray(j.data) ? j.data : []
         const mapped = data.map((x) => {
             const row = x as Record<string, unknown>
-            const overall = Math.max(0, Math.min(100, Number(row.match_score) || 0))
+            const resumeMatch = Math.max(0, Math.min(100, Number(row.match_score) || 0))
             const d = dimsFromScreeningDbRow(
               {
                 skill_score: row.skill_score as number | null | undefined,
@@ -2660,19 +3032,33 @@ function ApplicationManagementView({
                 education_score: row.education_score as number | null | undefined,
                 stability_score: row.stability_score as number | null | undefined
               },
-              overall
+              resumeMatch
             )
+            const ivRaw = row.interview_overall_score
+            const updatedAt = row.interview_report_updated_at
+            const hasUpdated =
+              updatedAt !== null && updatedAt !== undefined && String(updatedAt).trim() !== ''
+            const ivParsed =
+              ivRaw !== null && ivRaw !== undefined && String(ivRaw).trim() !== ''
+                ? Math.max(0, Math.min(100, Number(ivRaw) || 0))
+                : null
+            const hasInterviewReport = hasUpdated || ivParsed !== null
+            const { flowStage, aiConclusion } = deriveScreeningFlowLabels(row as Record<string, unknown>)
             return {
               id: String(row.id ?? ''),
               candidateName: String(row.candidate_name ?? '候选人'),
               jobCode: String(row.job_code ?? ''),
               jobTitle: String(row.matched_job_title ?? row.job_code ?? ''),
-              score: overall,
+              score: hasInterviewReport ? (ivParsed !== null ? ivParsed : 0) : resumeMatch,
+              resumeMatchScore: resumeMatch,
+              hasInterviewReport,
               skill: d.skill,
               experience: d.experience,
               education: d.education,
               stability: d.stability,
-              status: String(row.status ?? '待初面'),
+              status: flowStage,
+              aiConclusion,
+              interviewSituation: deriveInterviewSituation(row as Record<string, unknown>, hasInterviewReport),
               summary: String(row.report_summary ?? '')
             }
           })
@@ -2749,7 +3135,14 @@ function ApplicationManagementView({
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="p-6 border-b border-slate-100 bg-slate-50 space-y-4">
           <div className="flex justify-between items-center gap-3 flex-wrap">
-            <h3 className="font-bold text-slate-900">初面管理（AI 简历评估）</h3>
+            <div>
+              <h3 className="font-bold text-slate-900">初面管理</h3>
+              <p className="text-xs text-slate-500 mt-1 max-w-3xl leading-relaxed">
+                一条记录对应一次简历筛查。<span className="font-medium text-slate-600">流程阶段</span>随漏斗推进：筛查完成 → 从筛查页「发起面试」后为已发邀请 → 候选人完成面试并生成报告后为初面结果。
+                面试报告按岗位码 + 姓名关联；综合分有报告时显示面试分，否则为简历匹配分。「AI 简历结论」列始终为筛查模型对简历的文案，与初面结果分列展示。
+                「面试情况」根据邀请标记、报告与会话表汇总为可读说明（姓名不一致时可能无法关联报告）。
+              </p>
+            </div>
             <button
               type="button"
               onClick={loadRows}
@@ -2760,15 +3153,15 @@ function ApplicationManagementView({
           </div>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
             <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2">
-              <p className="text-xs text-emerald-700">高匹配（80+）</p>
+              <p className="text-xs text-emerald-700">列表综合分 80+</p>
               <p className="text-lg font-bold text-emerald-900">{highCount}</p>
             </div>
             <div className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2">
-              <p className="text-xs text-amber-700">待观察（60-79）</p>
+              <p className="text-xs text-amber-700">列表综合分 60–79</p>
               <p className="text-lg font-bold text-amber-900">{midCount}</p>
             </div>
             <div className="rounded-lg border border-rose-100 bg-rose-50 px-3 py-2">
-              <p className="text-xs text-rose-700">低匹配（&lt;60）</p>
+              <p className="text-xs text-rose-700">列表综合分 &lt;60</p>
               <p className="text-lg font-bold text-rose-900">{lowCount}</p>
             </div>
             <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
@@ -2801,9 +3194,9 @@ function ApplicationManagementView({
               className="border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
             >
               <option value="all">全部分段</option>
-              <option value="high">高匹配（80+）</option>
-              <option value="mid">待观察（60-79）</option>
-              <option value="low">低匹配（&lt;60）</option>
+              <option value="high">综合分 80+</option>
+              <option value="mid">综合分 60–79</option>
+              <option value="low">综合分 &lt;60</option>
             </select>
           </div>
         </div>
@@ -2814,42 +3207,83 @@ function ApplicationManagementView({
               <th className="px-6 py-4 font-medium">候选人</th>
               <th className="px-6 py-4 font-medium">岗位</th>
               <th className="px-6 py-4 font-medium">综合分</th>
-              <th className="px-6 py-4 font-medium">维度评分</th>
-              <th className="px-6 py-4 font-medium w-1/3">AI 结论</th>
-              <th className="px-6 py-4 font-medium">状态</th>
+              <th className="px-6 py-4 font-medium">简历维度</th>
+              <th className="px-6 py-4 font-medium w-1/3">AI 简历结论</th>
+              <th className="px-6 py-4 font-medium">流程阶段</th>
+              <th className="px-6 py-4 font-medium min-w-[200px]">面试情况</th>
               <th className="px-6 py-4 font-medium text-right">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {loading ? (
-              <tr><td className="px-6 py-8 text-slate-500" colSpan={7}>加载中...</td></tr>
+              <tr><td className="px-6 py-8 text-slate-500" colSpan={8}>加载中...</td></tr>
             ) : filteredRows.length === 0 ? (
-              <tr><td className="px-6 py-8 text-slate-500" colSpan={7}>暂无数据，请先在简历筛查上传简历</td></tr>
+              <tr><td className="px-6 py-8 text-slate-500" colSpan={8}>暂无数据，请先在简历筛查上传简历</td></tr>
             ) : (
               filteredRows.map((row) => (
                   <tr key={row.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-6 py-4 font-bold text-slate-900">{row.candidateName}</td>
                     <td className="px-6 py-4 text-slate-600">{row.jobTitle}（{row.jobCode}）</td>
                     <td className="px-6 py-4">
-                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 font-medium">
-                        <BrainCircuit className="w-3.5 h-3.5" /> {row.score}
-                      </span>
+                      <div className="flex flex-col gap-0.5 items-start">
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 font-medium">
+                          <BrainCircuit className="w-3.5 h-3.5" /> {row.score}
+                          <span className="text-[10px] font-normal text-slate-500">
+                            {row.hasInterviewReport ? '面试' : '简历'}
+                          </span>
+                        </span>
+                        {row.hasInterviewReport ? (
+                          <span className="text-[11px] text-slate-400">简历匹配 {row.resumeMatchScore}</span>
+                        ) : null}
+                      </div>
                     </td>
                     <td className="px-6 py-4 text-xs text-slate-600 leading-relaxed">
                       技能 {row.skill} / 经验 {row.experience} / 学历 {row.education} / 稳定 {row.stability}
                     </td>
                     <td className="px-6 py-4 text-slate-500 text-xs leading-relaxed">{row.summary || '—'}</td>
                     <td className="px-6 py-4">
-                      <span className="px-2 py-1 rounded text-xs font-medium bg-blue-100 text-blue-700">{row.status}</span>
+                      <div className="space-y-1">
+                        <span
+                          className={`inline-block px-2 py-1 rounded text-xs font-medium ${
+                            row.status === '初面通过'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : row.status === '初面待提升'
+                                ? 'bg-rose-100 text-rose-800'
+                                : row.status === '初面已完成' || row.status === '面试报告已出具'
+                                  ? 'bg-violet-100 text-violet-800'
+                                  : row.status === '已发面试邀请'
+                                    ? 'bg-amber-100 text-amber-900'
+                                    : 'bg-sky-100 text-sky-800'
+                          }`}
+                        >
+                          {row.status}
+                        </span>
+                        <p className="text-[11px] text-slate-400 leading-snug">简历 AI：{row.aiConclusion}</p>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 text-xs text-slate-600 leading-relaxed max-w-xs">
+                      {row.interviewSituation}
                     </td>
                     <td className="px-6 py-4 text-right">
                       <button
                         type="button"
-                        disabled={Boolean(reportLoadingId)}
-                        onClick={() => void handleOpenInterviewReport(row)}
-                        className="text-indigo-600 hover:text-indigo-800 font-medium disabled:opacity-50"
+                        disabled={Boolean(reportLoadingId) || !row.hasInterviewReport}
+                        onClick={() => {
+                          if (!row.hasInterviewReport) return
+                          void handleOpenInterviewReport(row)
+                        }}
+                        title={row.hasInterviewReport ? '查看面试报告详情' : '候选人尚未产生可关联的面试报告'}
+                        className={`text-sm font-medium ${
+                          row.hasInterviewReport
+                            ? 'text-indigo-600 hover:text-indigo-800 disabled:opacity-50'
+                            : 'text-slate-400 cursor-not-allowed'
+                        }`}
                       >
-                        {reportLoadingId === row.id ? '加载中…' : '面试报告'}
+                        {reportLoadingId === row.id && row.hasInterviewReport
+                          ? '加载中…'
+                          : row.hasInterviewReport
+                            ? '面试报告'
+                            : '暂无报告'}
                       </button>
                     </td>
                   </tr>
@@ -2971,16 +3405,6 @@ async function adminFetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     throw new Error(msg);
   }
   return data as T;
-}
-
-function SystemCrudHint() {
-  return (
-    <p className="text-sm text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-4 py-2">
-      增删改将直接写入管理库{' '}
-      <code className="text-xs bg-white px-1 rounded border border-slate-200">ai_recruit_admin</code>
-      。新建用户密码与服务端库表登录使用相同的 scrypt 存储格式。
-    </p>
-  );
 }
 
 const systemFieldClass =
@@ -3167,7 +3591,6 @@ function SystemDeptView() {
 
   return (
     <div className="space-y-6">
-      <SystemCrudHint />
       <div className="flex justify-between items-center flex-wrap gap-3">
         <div className="relative">
           <Search className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -3511,7 +3934,6 @@ function SystemUserView() {
 
   return (
     <div className="space-y-6">
-      <SystemCrudHint />
       <div className="flex justify-between items-center flex-wrap gap-3">
         <div className="flex gap-4 flex-wrap">
           <div className="relative">
@@ -3861,7 +4283,6 @@ function SystemRoleView() {
 
   return (
     <div className="space-y-6">
-      <SystemCrudHint />
       <div className="flex justify-between items-center flex-wrap gap-3">
         <div className="relative">
           <Search className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -4198,7 +4619,6 @@ function SystemMenuView() {
 
   return (
     <div className="space-y-6">
-      <SystemCrudHint />
       <div className="flex justify-between items-center flex-wrap gap-3">
         <div className="relative">
           <Search className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />

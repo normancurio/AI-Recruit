@@ -5,7 +5,7 @@ import path from 'path';
 import crypto from 'node:crypto';
 import dotenv from 'dotenv';
 import mysql from 'mysql2/promise';
-import type { ResultSetHeader } from 'mysql2/promise';
+import type { ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 
 const envLocalPath = path.resolve(process.cwd(), '.env.local');
 if (fs.existsSync(envLocalPath)) {
@@ -127,6 +127,23 @@ function uniqRecruiterCountFromJobs(
   return s.size;
 }
 
+/** 按 job_code 统计 resume_screenings 条数；表不存在时返回空 Map */
+async function screeningCountsByJobCode(pool: mysql.Pool): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  try {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      'SELECT job_code AS jc, COUNT(*) AS cnt FROM resume_screenings GROUP BY job_code'
+    );
+    for (const r of rows) {
+      const k = String(r.jc ?? '').trim();
+      if (k) map.set(k, Number(r.cnt) || 0);
+    }
+  } catch {
+    // 未迁移 resume_screenings 时忽略
+  }
+  return map;
+}
+
 /** 与 server/index.ts 库表登录一致：salt:hex(scrypt) */
 function hashAdminPassword(password: string): string {
   const salt = `adm_${crypto.randomBytes(12).toString('hex')}`;
@@ -180,23 +197,28 @@ async function startServer() {
         `SELECT project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters, updated_at
          FROM jobs ORDER BY updated_at DESC, id DESC`
       );
+      const screeningByJob = await screeningCountsByJobCode(bizPool);
       const mappedProjects = (projects || []).map((p) => {
         const jobMapped = (jobs || [])
           .filter((j) => String(j.project_id || '') === String(p.id || ''))
-          .map((j) => ({
-            id: String(j.job_code || ''),
-            project_id: String(p.id || ''),
-            title: String(j.title || ''),
-            demand: Number(j.demand) > 0 ? Number(j.demand) : 1,
-            department: String(j.department || '-'),
-            location: String(j.location || j.department || '-'),
-            skills: String(j.skills || '见 JD'),
-            level: String(j.level || '待评估'),
-            salary: String(j.salary || '面议'),
-            jdText: String(j.jd_text || '').trim(),
-            recruiters: parseRecruiters(j.recruiters),
-            updatedAt: fmtSqlDateTime(j.updated_at)
-          }));
+          .map((j) => {
+            const jc = String(j.job_code || '');
+            return {
+              id: jc,
+              project_id: String(p.id || ''),
+              title: String(j.title || ''),
+              demand: Number(j.demand) > 0 ? Number(j.demand) : 1,
+              department: String(j.department || '-'),
+              location: String(j.location || j.department || '-'),
+              skills: String(j.skills || '见 JD'),
+              level: String(j.level || '待评估'),
+              salary: String(j.salary || '面议'),
+              jdText: String(j.jd_text || '').trim(),
+              recruiters: parseRecruiters(j.recruiters),
+              updatedAt: fmtSqlDateTime(j.updated_at),
+              screeningCount: screeningByJob.get(jc) ?? 0
+            };
+          });
         const storedMembers = hasUi ? Number(p.member_count) || 0 : 0;
         const fromJobs = uniqRecruiterCountFromJobs(jobMapped);
         const memberCount = storedMembers > 0 ? storedMembers : fromJobs;
@@ -217,20 +239,24 @@ async function startServer() {
       });
       const unassignedJobs = (jobs || [])
         .filter((j) => !j.project_id)
-        .map((j) => ({
-          id: String(j.job_code || ''),
-          project_id: 'UNASSIGNED',
-          title: String(j.title || ''),
-          demand: Number(j.demand) > 0 ? Number(j.demand) : 1,
-          department: String(j.department || '-'),
-          location: String(j.location || j.department || '-'),
-          skills: String(j.skills || '见 JD'),
-          level: String(j.level || '待评估'),
-          salary: String(j.salary || '面议'),
-          jdText: String(j.jd_text || '').trim(),
-          recruiters: parseRecruiters(j.recruiters),
-          updatedAt: fmtSqlDateTime(j.updated_at)
-        }));
+        .map((j) => {
+          const jc = String(j.job_code || '');
+          return {
+            id: jc,
+            project_id: 'UNASSIGNED',
+            title: String(j.title || ''),
+            demand: Number(j.demand) > 0 ? Number(j.demand) : 1,
+            department: String(j.department || '-'),
+            location: String(j.location || j.department || '-'),
+            skills: String(j.skills || '见 JD'),
+            level: String(j.level || '待评估'),
+            salary: String(j.salary || '面议'),
+            jdText: String(j.jd_text || '').trim(),
+            recruiters: parseRecruiters(j.recruiters),
+            updatedAt: fmtSqlDateTime(j.updated_at),
+            screeningCount: screeningByJob.get(jc) ?? 0
+          };
+        });
       const result = [...mappedProjects];
       if (unassignedJobs.length > 0) {
         result.push({
@@ -284,7 +310,7 @@ async function startServer() {
         res.status(400).json({ message: '不能使用保留编号' });
         return;
       }
-      const [exists] = await bizPool.query<Array<{ id: string }>>(
+      const [exists] = await bizPool.query<RowDataPacket[]>(
         'SELECT id FROM projects WHERE id=? LIMIT 1',
         [id]
       );
@@ -309,6 +335,7 @@ async function startServer() {
           ? String(body.description)
           : null;
       const memberCount = Math.max(0, Math.min(9999, Number(body?.memberCount) || 0));
+      const status = String(body?.status ?? '进行中').trim() || '进行中';
       if (hasUi) {
         await bizPool.query(
           `INSERT INTO projects (id, name, client, dept, manager, status, project_code, start_date, end_date, description, member_count)
@@ -319,7 +346,7 @@ async function startServer() {
             client,
             dept,
             manager,
-            '进行中',
+            status,
             projectCode,
             startDate,
             endDate,
@@ -330,7 +357,7 @@ async function startServer() {
       } else {
         await bizPool.query(
           `INSERT INTO projects (id, name, client, dept, manager, status) VALUES (?,?,?,?,?,?)`,
-          [id, name, client, dept, manager, '进行中']
+          [id, name, client, dept, manager, status]
         );
       }
       res.status(201).json({ ok: true, id });
@@ -341,6 +368,105 @@ async function startServer() {
         return;
       }
       console.error('[POST /api/projects]', e);
+      res.status(500).json({ message: 'db error' });
+    }
+  });
+
+  app.patch('/api/projects/:projectId', async (req, res) => {
+    try {
+      const id = String(req.params.projectId || '').trim();
+      if (!id || id === 'EMPTY' || id === 'UNASSIGNED') {
+        res.status(400).json({ message: '无效的项目' });
+        return;
+      }
+      const body = req.body as Record<string, unknown> | null;
+      const name = String(body?.name ?? '').trim();
+      if (!name) {
+        res.status(400).json({ message: '项目名称必填' });
+        return;
+      }
+      const hasUi = await bizProjectsHaveUiFields(bizPool);
+      const patches: string[] = [];
+      const vals: unknown[] = [];
+      patches.push('name=?');
+      vals.push(name);
+      if (body?.dept !== undefined) {
+        patches.push('dept=?');
+        vals.push(String(body.dept ?? '').trim() || null);
+      }
+      if (body?.client !== undefined) {
+        patches.push('client=?');
+        vals.push(String(body.client ?? '').trim() || null);
+      }
+      if (body?.manager !== undefined) {
+        patches.push('manager=?');
+        vals.push(String(body.manager ?? '').trim() || null);
+      }
+      if (body?.status !== undefined) {
+        patches.push('status=?');
+        vals.push(String(body.status ?? '').trim() || '进行中');
+      }
+      if (hasUi) {
+        if (body?.projectCode !== undefined) {
+          patches.push('project_code=?');
+          vals.push(String(body.projectCode ?? '').trim() || null);
+        }
+        if (body?.startDate !== undefined) {
+          const s =
+            body.startDate != null && String(body.startDate).trim()
+              ? String(body.startDate).slice(0, 10)
+              : null;
+          patches.push('start_date=?');
+          vals.push(s);
+        }
+        if (body?.endDate !== undefined) {
+          const s =
+            body.endDate != null && String(body.endDate).trim() ? String(body.endDate).slice(0, 10) : null;
+          patches.push('end_date=?');
+          vals.push(s);
+        }
+        if (body?.description !== undefined) {
+          patches.push('description=?');
+          vals.push(
+            body.description != null && String(body.description).trim() ? String(body.description) : null
+          );
+        }
+        if (body?.memberCount !== undefined) {
+          patches.push('member_count=?');
+          vals.push(Math.max(0, Math.min(9999, Number(body.memberCount) || 0)));
+        }
+      }
+      vals.push(id);
+      const [hdr] = await bizPool.query<ResultSetHeader>(
+        `UPDATE projects SET ${patches.join(', ')} WHERE id=?`,
+        vals
+      );
+      if (!hdr.affectedRows) {
+        res.status(404).json({ message: '项目不存在' });
+        return;
+      }
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('[PATCH /api/projects/:projectId]', e);
+      res.status(500).json({ message: 'db error' });
+    }
+  });
+
+  app.delete('/api/projects/:projectId', async (req, res) => {
+    try {
+      const id = String(req.params.projectId || '').trim();
+      if (!id || id === 'EMPTY' || id === 'UNASSIGNED') {
+        res.status(400).json({ message: '无效的项目' });
+        return;
+      }
+      const [hdr] = await bizPool.query<ResultSetHeader>('DELETE FROM projects WHERE id=?', [id]);
+      if (!hdr.affectedRows) {
+        res.status(404).json({ message: '项目不存在' });
+        return;
+      }
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('[DELETE /api/projects/:projectId]', e);
       res.status(500).json({ message: 'db error' });
     }
   });

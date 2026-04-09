@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS resume_screenings (
   education_score TINYINT UNSIGNED NOT NULL DEFAULT 0,
   stability_score TINYINT UNSIGNED NOT NULL DEFAULT 0,
   status VARCHAR(64) NOT NULL DEFAULT 'AI分析完成',
+  pipeline_stage VARCHAR(32) NOT NULL DEFAULT 'resume_done',
   report_summary TEXT NULL,
   resume_plaintext MEDIUMTEXT NULL,
   file_name VARCHAR(255) NULL,

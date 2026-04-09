@@ -43,7 +43,7 @@ export function startLocalPcmProbe(opts: {
     sampleRate: 16000,
     numberOfChannels: 1,
     encodeBitRate: 96000,
-    format: 'pcm',
+    format: 'PCM',
     frameSize: frameSizeKb
   })
 
