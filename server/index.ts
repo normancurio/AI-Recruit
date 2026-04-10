@@ -158,7 +158,7 @@ async function exchangeWechatJsCode(code: string): Promise<{ openid: string; ses
   return { openid: wechatData.openid, sessionKey: wechatData.session_key, appid: wechatEnv.appId }
 }
 
-/** 岗位码（jobs.job_code）或后台生成的 interview_invitations.invite_code（如 INV…） */
+/** 岗位码（jobs.job_code）或 interview_invitations.invite_code（形如 岗位码-发起人账号-筛查记录id） */
 type ResolvedInviteOrJob = {
   jobCode: string
   title: string
@@ -492,6 +492,8 @@ async function upsertInterviewReport(payload: InterviewReportPayload) {
 
 type ResumeScreeningAiResult = {
   candidateName: string
+  /** 从简历解析的大陆手机号，可能为空 */
+  candidatePhone?: string
   matchScore: number
   status: string
   summary: string
@@ -574,8 +576,11 @@ function parseResumeScreeningAiJson(raw: string): ResumeScreeningAiResult | null
         (parsed.dimensionScores as Record<string, unknown> | undefined)?.stabilityScore
       ) ?? fallbackDims.stabilityScore
     )
+    const phoneRaw = String(parsed?.candidatePhone || parsed?.phone || parsed?.mobile || '').trim()
+    const phoneParsed = normalizeCnMobile(phoneRaw)
     return {
       candidateName,
+      ...(phoneParsed ? { candidatePhone: phoneParsed } : {}),
       matchScore: overall,
       status,
       summary,
@@ -587,6 +592,37 @@ function parseResumeScreeningAiJson(raw: string): ResumeScreeningAiResult | null
   } catch {
     return null
   }
+}
+
+function normalizeCnMobile(raw: string): string | null {
+  const d = String(raw || '').replace(/\D/g, '')
+  if (/^1[3-9]\d{9}$/.test(d)) return d
+  if (d.length === 13 && d.startsWith('86')) {
+    const rest = d.slice(2)
+    if (/^1[3-9]\d{9}$/.test(rest)) return rest
+  }
+  return null
+}
+
+/** 从简历正文中抓取中国大陆手机号（优先带「手机/电话」等标签） */
+function extractPhoneFromResumeText(text: string): string | null {
+  const slice = text.replace(/\r\n/g, '\n').slice(0, 12000)
+  const labeled = slice.match(
+    /(?:手机|移动电话|联系电话|联系方式|电话|Phone|Tel|Mobile)[:：\s]*([+＋0-9\s\-—–]{11,22})/i
+  )
+  if (labeled?.[1]) {
+    const n = normalizeCnMobile(labeled[1])
+    if (n) return n
+  }
+  const compact = slice.replace(/[\s\-—–]/g, '')
+  const m = compact.match(/1[3-9]\d{9}/g)
+  if (m?.length) {
+    for (const x of m) {
+      const n = normalizeCnMobile(x)
+      if (n) return n
+    }
+  }
+  return null
 }
 
 function guessCandidateNameFromResume(text: string): string {
@@ -615,8 +651,10 @@ function fallbackResumeScreening(resumeText: string, jdText: string, jobTitle: s
   const ratio = uniq.length ? hits / uniq.length : 0
   const matchScore = Math.min(100, Math.max(35, Math.round(42 + ratio * 58)))
   const dims = deriveResumeDimensionScores(matchScore)
+  const phoneFound = extractPhoneFromResumeText(resumeText)
   return {
     candidateName,
+    ...(phoneFound ? { candidatePhone: phoneFound } : {}),
     matchScore,
     status: '关键词估算（未调用大模型）',
     summary:
@@ -675,7 +713,7 @@ async function runResumeScreeningWithAi(params: {
       {
         role: 'system',
         content:
-          '你是资深招聘顾问。根据「岗位 JD」与「简历文本」评估匹配度。只输出一个 JSON 对象，不要 markdown 代码块，不要其它文字。字段：candidateName（从简历推断的中文姓名或合理称呼）、matchScore（0～100 整数，综合匹配分）、skillScore、experienceScore、educationScore、stabilityScore（均为 0～100 整数，分别表示技能匹配、岗位经验、学历与资质、职业稳定性）、status（如 AI分析完成 / 不匹配 等简短状态）、summary（3～6 句中文，说明匹配点、风险与是否建议推进）。示例：{"candidateName":"张三","matchScore":82,"skillScore":85,"experienceScore":78,"educationScore":88,"stabilityScore":72,"status":"AI分析完成","summary":"…"}'
+          '你是资深招聘顾问。根据「岗位 JD」与「简历文本」评估匹配度。只输出一个 JSON 对象，不要 markdown 代码块，不要其它文字。字段：candidateName（从简历推断的中文姓名或合理称呼）、candidatePhone（可选，若简历中出现中国大陆 11 位手机号则填纯数字如 13812345678，没有则省略该字段）、matchScore（0～100 整数，综合匹配分）、skillScore、experienceScore、educationScore、stabilityScore（均为 0～100 整数，分别表示技能匹配、岗位经验、学历与资质、职业稳定性）、status（如 AI分析完成 / 不匹配 等简短状态）、summary（3～6 句中文，说明匹配点、风险与是否建议推进）。示例：{"candidateName":"张三","candidatePhone":"13812345678","matchScore":82,"skillScore":85,"experienceScore":78,"educationScore":88,"stabilityScore":72,"status":"AI分析完成","summary":"…"}'
       },
       { role: 'user', content: userPrompt }
     ]
@@ -1291,14 +1329,34 @@ app.get('/api/admin/auth-status', async (_req, res) => {
 })
 
 /** 管理库 users.role（中文）→ 管理端界面 Role */
-function mapAdminDbRoleToUiRole(dbRole: string): 'admin' | 'delivery_manager' | 'recruiter' {
+function mapAdminDbRoleToUiRole(dbRole: string): 'admin' | 'delivery_manager' | 'recruiter' | 'recruiting_manager' {
   const r = String(dbRole || '').trim()
   if (!r) return 'delivery_manager'
   if (/平台管理员|系统管理|超级管理/i.test(r)) return 'admin'
   if (/交付/i.test(r)) return 'delivery_manager'
+  if (/招聘经理|招募经理/i.test(r)) return 'recruiting_manager'
   if (/招聘/i.test(r)) return 'recruiter'
   if (/管理/i.test(r)) return 'admin'
   return 'delivery_manager'
+}
+
+/** 与 users.role 按「角色名称」匹配 roles 行，读取 menu_keys（JSON 菜单 id 数组）；无列或空则 undefined */
+async function loadAllowedMenuKeysForDbRole(roleName: string): Promise<string[] | undefined> {
+  const name = String(roleName || '').trim()
+  if (!name) return undefined
+  try {
+    const [rrows] = await mysqlAdminPool.query<RowDataPacket[]>(
+      'SELECT menu_keys FROM roles WHERE name = ? LIMIT 1',
+      [name]
+    )
+    const raw = rrows[0]?.menu_keys
+    if (raw == null || raw === '') return undefined
+    const parsed = JSON.parse(String(raw)) as unknown
+    if (!Array.isArray(parsed)) return undefined
+    return parsed.map((x) => String(x || '').trim()).filter(Boolean)
+  } catch {
+    return undefined
+  }
 }
 
 /** 管理端登录：换会话令牌，浏览器可不再配置 VITE_ADMIN_API_TOKEN */
@@ -1340,7 +1398,13 @@ app.post('/api/admin/login', async (req, res) => {
       const un = String(row.username || username).trim()
       const displayName = String(row.name || un).trim() || un
       const uiRole = mapAdminDbRoleToUiRole(String(row.role || ''))
-      const userPayload = { name: displayName, username: un, uiRole }
+      const allowedMenuKeys = await loadAllowedMenuKeysForDbRole(String(row.role || ''))
+      const userPayload = {
+        name: displayName,
+        username: un,
+        uiRole,
+        ...(allowedMenuKeys !== undefined ? { allowedMenuKeys } : {})
+      }
       const redisTok = await createAdminRedisSession(uid || un, un)
       if (redisTok) {
         return res.json({ data: { token: redisTok, expiresInSec: ADMIN_SESSION_TTL_SEC, user: userPayload } })
@@ -1714,7 +1778,7 @@ function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: bo
             CONVERT(lr.session_id USING utf8mb4) COLLATE utf8mb4_unicode_ci`
     : ''
   // 标量子查询取最新报告；CONVERT+COLLATE 避免表间 utf8mb4_unicode_ci / utf8mb4_0900_ai_ci 混用报错
-  return `SELECT s.id, s.job_code, s.candidate_name, s.matched_job_title, s.match_score,
+  return `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
               s.status, ${ps}s.report_summary, s.file_name, s.created_at,
               lr.overall_score AS interview_overall_score,
@@ -1740,7 +1804,7 @@ function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: bo
 
 function resumeScreeningsPlainSql(withPipelineStage: boolean): string {
   const ps = withPipelineStage ? 'pipeline_stage, ' : ''
-  return `SELECT id, job_code, candidate_name, matched_job_title, match_score,
+  return `SELECT id, job_code, candidate_name, candidate_phone, matched_job_title, match_score,
               skill_score, experience_score, education_score, stability_score,
               status, ${ps}report_summary, file_name, created_at
        FROM resume_screenings
@@ -2087,33 +2151,77 @@ app.post(
       }
 
       const plainStore = plain.slice(0, RESUME_PLAINTEXT_MAX_SAVE)
-      const [ins] = await mysqlPool.query<ResultSetHeader>(
-        `INSERT INTO resume_screenings (
-           job_code, candidate_name, matched_job_title, match_score,
-           skill_score, experience_score, education_score, stability_score,
-           status, report_summary, resume_plaintext, file_name
-         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [
-          jobCode,
-          result.candidateName,
-          String(job.title || ''),
-          result.matchScore,
-          result.skillScore,
-          result.experienceScore,
-          result.educationScore,
-          result.stabilityScore,
-          result.status,
-          result.summary,
-          plainStore,
-          String(req.file.originalname || '').slice(0, 255)
-        ]
-      )
+      const candidateName = result.candidateName
+      const phoneFromResult = normalizeCnMobile(String(result.candidatePhone || ''))
+      const phoneFromText = extractPhoneFromResumeText(plain)
+      const candidatePhone: string | null = phoneFromResult || phoneFromText || null
+      const insertRow = async (withPhone: boolean): Promise<ResultSetHeader> => {
+        if (withPhone) {
+          const [h] = await mysqlPool.query<ResultSetHeader>(
+            `INSERT INTO resume_screenings (
+               job_code, candidate_name, candidate_phone, matched_job_title, match_score,
+               skill_score, experience_score, education_score, stability_score,
+               status, report_summary, resume_plaintext, file_name
+             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [
+              jobCode,
+              candidateName,
+              candidatePhone,
+              String(job.title || ''),
+              result.matchScore,
+              result.skillScore,
+              result.experienceScore,
+              result.educationScore,
+              result.stabilityScore,
+              result.status,
+              result.summary,
+              plainStore,
+              String(req.file.originalname || '').slice(0, 255)
+            ]
+          )
+          return h
+        }
+        const [h] = await mysqlPool.query<ResultSetHeader>(
+          `INSERT INTO resume_screenings (
+             job_code, candidate_name, matched_job_title, match_score,
+             skill_score, experience_score, education_score, stability_score,
+             status, report_summary, resume_plaintext, file_name
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [
+            jobCode,
+            candidateName,
+            String(job.title || ''),
+            result.matchScore,
+            result.skillScore,
+            result.experienceScore,
+            result.educationScore,
+            result.stabilityScore,
+            result.status,
+            result.summary,
+            plainStore,
+            String(req.file.originalname || '').slice(0, 255)
+          ]
+        )
+        return h
+      }
+      let ins: ResultSetHeader
+      try {
+        ins = await insertRow(true)
+      } catch (insErr: unknown) {
+        const ie = insErr as { errno?: number; code?: string }
+        if (ie.errno === 1054 || ie.code === 'ER_BAD_FIELD_ERROR') {
+          ins = await insertRow(false)
+        } else {
+          throw insErr
+        }
+      }
       flowLog('resume-screen', true, `job=${jobCode} score=${result.matchScore}`)
       res.json({
         data: {
           id: Number(ins.insertId),
           jobCode,
-          candidateName: result.candidateName,
+          candidateName,
+          candidatePhone: candidatePhone ?? '',
           matchedJobTitle: String(job.title || ''),
           matchScore: result.matchScore,
           skillScore: result.skillScore,
@@ -2143,11 +2251,33 @@ function sanitizeInviteSegment(raw: string, fallback: string, maxLen = 12): stri
   return (s || fallback).slice(0, maxLen)
 }
 
-function generateUniqueInviteCode(jobCode: string, recruiterCode?: string): string {
-  const jobSeg = sanitizeInviteSegment(jobCode, 'JOB', 16)
-  const recSeg = sanitizeInviteSegment(String(recruiterCode || ''), 'RCR', 16)
-  const rand = crypto.randomBytes(3).toString('hex').toUpperCase()
-  return `INV-${jobSeg}-${recSeg}-${rand}`
+/** 发起人登录账号段：允许邮箱/手机形态中的常见字符 */
+function sanitizeInviteAccountSegment(raw: string, fallback: string, maxLen = 28): string {
+  const s = String(raw || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_.@-]/g, '')
+  return (s || fallback).slice(0, maxLen)
+}
+
+/**
+ * 面试邀请码：岗位编号-发起人账号-简历（筛查）记录编号
+ * 碰撞时在末尾追加短随机后缀（仍整体 ≤128 字符）
+ */
+function buildStructuredInviteCode(
+  jobCode: string,
+  initiatorAccount: string,
+  screeningId: number,
+  collisionSuffix?: string
+): string {
+  const jobSeg = sanitizeInviteSegment(jobCode, 'JOB', 28)
+  const accSeg = sanitizeInviteAccountSegment(initiatorAccount, 'HR', 28)
+  const sid =
+    Number.isFinite(screeningId) && screeningId > 0
+      ? String(Math.floor(screeningId))
+      : `R${crypto.randomBytes(3).toString('hex').toUpperCase()}`
+  const extra = collisionSuffix ? `-${collisionSuffix}` : ''
+  return `${jobSeg}-${accSeg}-${sid}${extra}`.toUpperCase().slice(0, 128)
 }
 
 /** 业务库 jobs/users 的 BIGINT id：勿用 Number()，避免超过 MAX_SAFE_INTEGER 时外键写入失败 */
@@ -2204,8 +2334,15 @@ app.post('/api/admin/invitations', async (req, res) => {
       }
     }
     let lastErr: unknown
-    for (let attempt = 0; attempt < 8; attempt++) {
-      const inviteCode = generateUniqueInviteCode(jobCode, recruiterCode)
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const collisionSuffix =
+        attempt === 0 ? undefined : crypto.randomBytes(2).toString('hex').toUpperCase()
+      const inviteCode = buildStructuredInviteCode(
+        jobCode,
+        recruiterCode || 'HR',
+        screeningIdForPipeline,
+        collisionSuffix
+      )
       const tryInsert = async (interviewer: string | number | null) => {
         await mysqlPool.query(
           `INSERT INTO interview_invitations (invite_code, job_id, interviewer_user_id, status, expires_at)

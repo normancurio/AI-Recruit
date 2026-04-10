@@ -7,6 +7,7 @@
     "build:weapp": "npm run build:weapp --prefix miniapp-candidate",
     "build:weapp:clean": "npm run build:weapp:clean --prefix miniapp-candidate",
     "dev:api": "tsx server/index.ts",
+    "dev:full": "concurrently -k -n ui,api -c blue,magenta \"npm run dev\" \"npm run dev:api\"",
     "dev": "tsx server.ts",
     "build": "vite build",
     "preview": "vite preview",
@@ -35,6 +36,7 @@
     "vite": "^6.2.0"
   },
   "devDependencies": {
+    "concurrently": "^9.1.2",
     "@types/express": "^4.17.25",
     "@types/multer": "^2.1.0",
     "@types/node": "^22.14.0",

@@ -58,10 +58,12 @@ CREATE TABLE IF NOT EXISTS applications (
 
 CREATE TABLE IF NOT EXISTS depts (
   id VARCHAR(64) PRIMARY KEY,
+  parent_id VARCHAR(64) NULL,
   name VARCHAR(128),
   level INT,
   manager VARCHAR(64),
-  count INT
+  count INT,
+  KEY idx_depts_parent (parent_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS users (
@@ -79,7 +81,8 @@ CREATE TABLE IF NOT EXISTS roles (
   id VARCHAR(64) PRIMARY KEY,
   name VARCHAR(64),
   `desc` VARCHAR(255),
-  users INT
+  users INT,
+  menu_keys TEXT NULL COMMENT 'JSON array of sidebar menu ids for role-based visibility'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS menus (
@@ -88,7 +91,9 @@ CREATE TABLE IF NOT EXISTS menus (
   type VARCHAR(32),
   icon VARCHAR(64),
   path VARCHAR(255),
-  level INT
+  parent_id VARCHAR(64) NULL DEFAULT NULL COMMENT '上级菜单 id，顶级为 NULL',
+  level INT,
+  KEY idx_menus_parent_id (parent_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Seed data aligned with server.ts
@@ -159,8 +164,8 @@ ON DUPLICATE KEY UPDATE
 
 INSERT INTO users (id, name, username, dept, role, status, password_hash) VALUES
   ('U1', '系统管理员', 'admin', '集团总部', '平台管理员', '正常', 'ai_recruit_init_123456:3fc16a3cd232ec694f1ef13bc3d0a0abe0e13c9ff3775fc5ef01ba7a94f3874266a1daff39ffcd9620bdce13f84e85c6379a1be51b34c1aca2b8244cb894fa5c'),
-  ('U2', '李交付', 'li.jiaofu', '华北交付中心', '交付经理', '正常', 'ai_recruit_init_123456:3fc16a3cd232ec694f1ef13bc3d0a0abe0e13c9ff3775fc5ef01ba7a94f3874266a1daff39ffcd9620bdce13f84e85c6379a1be51b34c1aca2b8244cb894fa5c'),
-  ('U3', '赵招聘', 'zhao.zhaopin', '研发一部', '招聘人员', '正常', 'ai_recruit_init_123456:3fc16a3cd232ec694f1ef13bc3d0a0abe0e13c9ff3775fc5ef01ba7a94f3874266a1daff39ffcd9620bdce13f84e85c6379a1be51b34c1aca2b8244cb894fa5c')
+  ('U2', '李交付', '13800138002', '华北交付中心', '交付经理', '正常', 'ai_recruit_init_123456:3fc16a3cd232ec694f1ef13bc3d0a0abe0e13c9ff3775fc5ef01ba7a94f3874266a1daff39ffcd9620bdce13f84e85c6379a1be51b34c1aca2b8244cb894fa5c'),
+  ('U3', '赵招聘', '13800138003', '研发一部', '招聘人员', '正常', 'ai_recruit_init_123456:3fc16a3cd232ec694f1ef13bc3d0a0abe0e13c9ff3775fc5ef01ba7a94f3874266a1daff39ffcd9620bdce13f84e85c6379a1be51b34c1aca2b8244cb894fa5c')
 ON DUPLICATE KEY UPDATE
   name = VALUES(name),
   username = VALUES(username),
@@ -177,18 +182,24 @@ ON DUPLICATE KEY UPDATE
   `desc` = VALUES(`desc`),
   users = VALUES(users);
 
-INSERT INTO menus (id, name, type, icon, path, level) VALUES
-  ('M1', '项目管理', '目录', 'Briefcase', '/projects', 0),
-  ('M1-1', '客户管理', '菜单', 'Building2', '/projects/clients', 1),
-  ('M1-2', '招聘项目', '菜单', 'Briefcase', '/projects/list', 1),
-  ('M2', '招聘管理', '目录', 'Users', '/recruitment', 0),
-  ('M2-1', '岗位查询', '菜单', 'Search', '/recruitment/jobs', 1),
-  ('M2-2', '简历筛查 (AI)', '菜单', 'FileText', '/recruitment/resume', 1),
-  ('M2-3', '应聘管理', '菜单', 'UserCheck', '/recruitment/applications', 1),
-  ('M3', '系统管理', '目录', 'Settings', '/system', 0)
+-- 与 App.tsx NAV_TEMPLATE / 侧边栏 id 一致（非旧版 M1/M2 编码）
+INSERT INTO menus (id, name, type, icon, path, parent_id, level) VALUES
+  ('workbench', '工作台', '菜单', 'LayoutDashboard', '/workbench', NULL, 0),
+  ('projects', '岗位管理', '目录', 'Briefcase', '/projects', NULL, 0),
+  ('project-list', '项目管理', '菜单', 'Briefcase', '/projects/list', 'projects', 1),
+  ('job-query', '岗位分配', '菜单', 'UserCog', '/recruitment/jobs', 'projects', 1),
+  ('recruitment', '招聘管理', '目录', 'Users', '/recruitment', NULL, 0),
+  ('resume-screening', '简历筛查', '菜单', 'FileText', '/recruitment/resume', 'recruitment', 1),
+  ('application-mgmt', '初面管理', '菜单', 'UserCheck', '/recruitment/applications', 'recruitment', 1),
+  ('system', '系统管理', '目录', 'Settings', '/system', NULL, 0),
+  ('sys-dept', '部门管理', '菜单', 'Network', '/system/dept', 'system', 1),
+  ('sys-user', '用户管理', '菜单', 'UserCog', '/system/users', 'system', 1),
+  ('sys-role', '角色管理', '菜单', 'Shield', '/system/roles', 'system', 1),
+  ('sys-menu', '菜单管理', '菜单', 'Menu', '/system/menus', 'system', 1)
 ON DUPLICATE KEY UPDATE
   name = VALUES(name),
   type = VALUES(type),
   icon = VALUES(icon),
   path = VALUES(path),
+  parent_id = VALUES(parent_id),
   level = VALUES(level);

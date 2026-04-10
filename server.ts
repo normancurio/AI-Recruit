@@ -3,6 +3,9 @@ import { createServer as createViteServer } from 'vite';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'node:crypto';
+import http from 'node:http';
+import https from 'node:https';
+import { URL } from 'node:url';
 import dotenv from 'dotenv';
 import mysql from 'mysql2/promise';
 import type { ResultSetHeader, RowDataPacket } from 'mysql2/promise';
@@ -93,6 +96,19 @@ async function bizProjectsHaveUiFields(pool: mysql.Pool): Promise<boolean> {
   return bizProjectsUiFields;
 }
 
+/** 业务库 jobs 是否已执行 migration_add_jobs_claimed_by.sql */
+let jobsClaimedByCol: boolean | null = null;
+async function jobsHaveClaimedBy(pool: mysql.Pool): Promise<boolean> {
+  if (jobsClaimedByCol !== null) return jobsClaimedByCol;
+  try {
+    await pool.query('SELECT claimed_by FROM jobs LIMIT 1');
+    jobsClaimedByCol = true;
+  } catch {
+    jobsClaimedByCol = false;
+  }
+  return jobsClaimedByCol;
+}
+
 function fmtSqlDate(v: unknown): string {
   if (v == null || v === '') return '';
   if (v instanceof Date) return v.toISOString().slice(0, 10);
@@ -157,6 +173,23 @@ function mysqlDupKey(err: unknown): boolean {
   );
 }
 
+const CN_MOBILE_LOGIN_USERNAME_RE = /^1[3-9]\d{9}$/;
+
+/** 与「平台管理员」等：登录名允许字母账号；其余角色建议使用手机号 */
+function roleAllowsNonMobileLoginUsername(role: string): boolean {
+  const r = String(role || '').trim();
+  return /平台管理员|系统管理|超级管理/i.test(r) || r === '管理员';
+}
+
+function assertLoginUsernameMatchesRole(username: string, role: string): string | null {
+  if (roleAllowsNonMobileLoginUsername(role)) return null;
+  const u = String(username || '').trim();
+  if (!CN_MOBILE_LOGIN_USERNAME_RE.test(u)) {
+    return '非管理员角色的登录账号须为 11 位中国大陆手机号（1 开头第二位 3–9）';
+  }
+  return null;
+}
+
 async function startServer() {
   try {
     await adminPool.query('SELECT 1');
@@ -170,8 +203,54 @@ async function startServer() {
   const app = express();
   /** 与 server/index.ts 的 PORT（默认 3001）分离，避免同时跑两套服务时端口冲突 */
   const uiPort = Number(process.env.ADMIN_UI_PORT || 3000);
+  /** 管理端扩展 API（登录、工作台、简历筛查等）由 server/index.ts 提供；本机开发时由下方反向代理转发 */
+  const adminApiUpstream = (process.env.ADMIN_API_UPSTREAM || 'http://127.0.0.1:3001').replace(/\/$/, '');
 
-  app.use(express.json());
+  // /api/admin/* 需原样转发 body，不能先被 express.json() 消费
+  app.use((req, res, next) => {
+    if (req.originalUrl.startsWith('/api/admin')) {
+      return next();
+    }
+    return express.json()(req, res, next);
+  });
+
+  app.all(/^\/api\/admin(\/.*)?$/i, (req, res) => {
+    let target: URL;
+    try {
+      target = new URL(req.originalUrl, adminApiUpstream);
+    } catch {
+      res.status(500).json({ message: 'ADMIN_API_UPSTREAM 配置无效' });
+      return;
+    }
+    const isHttps = target.protocol === 'https:';
+    const lib = isHttps ? https : http;
+    const defaultPort = isHttps ? 443 : 80;
+    const opts: http.RequestOptions = {
+      hostname: target.hostname,
+      port: target.port || defaultPort,
+      path: target.pathname + target.search,
+      method: req.method,
+      headers: { ...req.headers, host: target.host }
+    };
+    const proxyReq = lib.request(opts, (proxyRes) => {
+      res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
+      proxyRes.pipe(res);
+    });
+    proxyReq.on('error', (err) => {
+      console.error('[server.ts] /api/admin 代理失败 →', adminApiUpstream, err.message);
+      if (!res.headersSent) {
+        res.status(502).json({
+          message:
+            '管理扩展 API 未就绪：请在本机另开终端运行 npm run dev:api（默认端口 3001），或执行 npm run dev:full 同时启动前后台。也可设置环境变量 ADMIN_API_UPSTREAM 指向上游地址。'
+        });
+      }
+    });
+    req.pipe(proxyReq);
+  });
+
+  app.get('/favicon.ico', (_req, res) => {
+    res.status(204).end();
+  });
 
   // --- API Routes（与 SQLite 版路径、响应结构一致）---
 
@@ -193,10 +272,13 @@ async function startServer() {
         : `SELECT id, name, client, dept, manager, status, created_at, updated_at
            FROM projects ORDER BY updated_at DESC, id DESC`;
       const [projects] = await bizPool.query<any[]>(projSql);
-      const [jobs] = await bizPool.query<any[]>(
-        `SELECT project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters, updated_at
-         FROM jobs ORDER BY updated_at DESC, id DESC`
-      );
+      const hasClaim = await jobsHaveClaimedBy(bizPool);
+      const jobsSql = hasClaim
+        ? `SELECT project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters, claimed_by, updated_at
+           FROM jobs ORDER BY updated_at DESC, id DESC`
+        : `SELECT project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters, updated_at
+           FROM jobs ORDER BY updated_at DESC, id DESC`;
+      const [jobs] = await bizPool.query<any[]>(jobsSql);
       const screeningByJob = await screeningCountsByJobCode(bizPool);
       const mappedProjects = (projects || []).map((p) => {
         const jobMapped = (jobs || [])
@@ -216,7 +298,8 @@ async function startServer() {
               jdText: String(j.jd_text || '').trim(),
               recruiters: parseRecruiters(j.recruiters),
               updatedAt: fmtSqlDateTime(j.updated_at),
-              screeningCount: screeningByJob.get(jc) ?? 0
+              screeningCount: screeningByJob.get(jc) ?? 0,
+              ...(hasClaim ? { claimedBy: String(j.claimed_by || '').trim() } : {})
             };
           });
         const storedMembers = hasUi ? Number(p.member_count) || 0 : 0;
@@ -254,7 +337,8 @@ async function startServer() {
             jdText: String(j.jd_text || '').trim(),
             recruiters: parseRecruiters(j.recruiters),
             updatedAt: fmtSqlDateTime(j.updated_at),
-            screeningCount: screeningByJob.get(jc) ?? 0
+            screeningCount: screeningByJob.get(jc) ?? 0,
+            ...(hasClaim ? { claimedBy: String(j.claimed_by || '').trim() } : {})
           };
         });
       const result = [...mappedProjects];
@@ -502,23 +586,47 @@ async function startServer() {
       const level = String(body?.level ?? '').trim() || null;
       const salary = String(body?.salary ?? '').trim() || null;
       const recruitersJson = normalizeRecruitersForDb(body?.recruiters);
-      await bizPool.query(
-        `INSERT INTO jobs (project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters)
-         VALUES (?,?,?,?,?,?,?,?,?,?, CAST(? AS JSON))`,
-        [
-          projectId,
-          jobCode,
-          title,
-          department,
-          jdText,
-          demand,
-          location,
-          skills,
-          level,
-          salary,
-          recruitersJson
-        ]
-      );
+      const hasClaim = await jobsHaveClaimedBy(bizPool);
+      const initialClaim =
+        hasClaim ? String(body?.claimedBy ?? body?.claimed_by ?? '').trim() || null : null;
+      if (hasClaim && initialClaim) {
+        await bizPool.query(
+          `INSERT INTO jobs (project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters, claimed_by)
+           VALUES (?,?,?,?,?,?,?,?,?,?, CAST(? AS JSON),?)`,
+          [
+            projectId,
+            jobCode,
+            title,
+            department,
+            jdText,
+            demand,
+            location,
+            skills,
+            level,
+            salary,
+            recruitersJson,
+            initialClaim
+          ]
+        );
+      } else {
+        await bizPool.query(
+          `INSERT INTO jobs (project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters)
+           VALUES (?,?,?,?,?,?,?,?,?,?, CAST(? AS JSON))`,
+          [
+            projectId,
+            jobCode,
+            title,
+            department,
+            jdText,
+            demand,
+            location,
+            skills,
+            level,
+            salary,
+            recruitersJson
+          ]
+        );
+      }
       res.status(201).json({ ok: true, jobCode });
     } catch (e) {
       const code = (e as { code?: string })?.code;
@@ -619,6 +727,52 @@ async function startServer() {
     }
   });
 
+  app.post('/api/jobs/:jobCode/claim', async (req, res) => {
+    try {
+      const jobCode = String(req.params.jobCode || '').trim().toUpperCase();
+      if (!jobCode) {
+        res.status(400).json({ message: '岗位编码无效' });
+        return;
+      }
+      const claimedBy = String(
+        (req.body as Record<string, unknown> | null)?.claimedBy ??
+          (req.body as Record<string, unknown> | null)?.claimed_by ??
+          ''
+      ).trim();
+      if (!claimedBy) {
+        res.status(400).json({ message: '请提供认领人姓名' });
+        return;
+      }
+      const hasClaim = await jobsHaveClaimedBy(bizPool);
+      if (!hasClaim) {
+        res.status(503).json({ message: '认领功能需先执行 jobs claimed_by 数据库迁移' });
+        return;
+      }
+      const [rows] = await bizPool.query<RowDataPacket[]>('SELECT claimed_by FROM jobs WHERE job_code=?', [
+        jobCode
+      ]);
+      const row = rows[0] as { claimed_by?: unknown } | undefined;
+      if (!row) {
+        res.status(404).json({ message: '岗位不存在' });
+        return;
+      }
+      const cur = row.claimed_by != null ? String(row.claimed_by).trim() : '';
+      if (cur) {
+        if (cur === claimedBy) {
+          res.json({ ok: true });
+          return;
+        }
+        res.status(409).json({ message: '该岗位已被其他招聘经理认领' });
+        return;
+      }
+      await bizPool.query('UPDATE jobs SET claimed_by=? WHERE job_code=?', [claimedBy, jobCode]);
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('[POST /api/jobs/:jobCode/claim]', e);
+      res.status(500).json({ message: 'db error' });
+    }
+  });
+
   app.delete('/api/jobs/:jobCode', async (req, res) => {
     try {
       const jobCode = String(req.params.jobCode || '').trim().toUpperCase();
@@ -682,21 +836,46 @@ async function startServer() {
       res.status(400).json({ message: '请填写部门名称' });
       return;
     }
-    const id = String(b.id || '').trim() || `D${Date.now()}`;
-    const level = Number(b.level);
+    const parentId = String(b.parentId || b.parent_id || '').trim() || null;
     const manager = String(b.manager || '').trim() || '-';
     const count = Number(b.count);
-    const lv = Number.isFinite(level) ? level : 0;
     const ct = Number.isFinite(count) ? count : 0;
+    let lv = 0;
     try {
+      if (parentId) {
+        const [prows] = await adminPool.query<RowDataPacket[]>(
+          'SELECT id, level FROM depts WHERE id = ? LIMIT 1',
+          [parentId]
+        );
+        if (!prows.length) {
+          res.status(400).json({ message: '上级部门不存在，请刷新后重试' });
+          return;
+        }
+        const pl = Number((prows[0] as { level?: number }).level) || 0;
+        lv = pl + 1;
+      } else {
+        const level = Number(b.level);
+        lv = Number.isFinite(level) ? Math.max(0, Math.min(99, level)) : 0;
+      }
+      const customId = String(b.id || '').trim();
+      const id =
+        customId ||
+        `dept_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
       await adminPool.query(
-        'INSERT INTO depts (id, name, level, manager, count) VALUES (?, ?, ?, ?, ?)',
-        [id, name, lv, manager, ct]
+        'INSERT INTO depts (id, parent_id, name, level, manager, count) VALUES (?, ?, ?, ?, ?, ?)',
+        [id, parentId, name, lv, manager, ct]
       );
       res.status(201).json({ id });
     } catch (e) {
       if (mysqlDupKey(e)) {
-        res.status(409).json({ message: '部门 id 已存在' });
+        res.status(409).json({ message: '部门 id 已存在，请留空由系统自动生成或更换编号' });
+        return;
+      }
+      const err = e as { code?: string; message?: string };
+      if (err.code === 'ER_BAD_FIELD_ERROR' || String(err.message || '').includes('parent_id')) {
+        res.status(503).json({
+          message: 'depts 表缺少 parent_id 列，请执行 server/migration_depts_parent_id.sql 后重试'
+        });
         return;
       }
       console.error('[POST /api/depts]', e);
@@ -763,6 +942,19 @@ async function startServer() {
       return;
     }
     try {
+      try {
+        const [[cnt]] = await adminPool.query<RowDataPacket[]>(
+          'SELECT COUNT(*) AS n FROM depts WHERE parent_id = ?',
+          [id]
+        );
+        const n = Number((cnt as { n?: number })?.n) || 0;
+        if (n > 0) {
+          res.status(400).json({ message: `该部门下仍有 ${n} 个子部门，请先删除或移走子部门` });
+          return;
+        }
+      } catch {
+        /* 无 parent_id 列时继续删除 */
+      }
       const [hdr] = await adminPool.query<ResultSetHeader>('DELETE FROM depts WHERE id = ?', [id]);
       if (!hdr.affectedRows) {
         res.status(404).json({ message: '部门不存在' });
@@ -805,6 +997,11 @@ async function startServer() {
       res.status(400).json({ message: '状态须为「正常」或「停用」' });
       return;
     }
+    const unameRule = assertLoginUsernameMatchesRole(username, role);
+    if (unameRule) {
+      res.status(400).json({ message: unameRule });
+      return;
+    }
     const id = String(b.id || '').trim() || `U${Date.now()}`;
     const hash = hashAdminPassword(password);
     try {
@@ -829,6 +1026,33 @@ async function startServer() {
     if (!id) {
       res.status(400).json({ message: '缺少用户 id' });
       return;
+    }
+    if (b.username !== undefined || b.role !== undefined) {
+      try {
+        const [curRows] = await adminPool.query<RowDataPacket[]>(
+          'SELECT username, role FROM users WHERE id = ? LIMIT 1',
+          [id]
+        );
+        const cur = curRows[0] as { username?: string; role?: string } | undefined;
+        if (!cur) {
+          res.status(404).json({ message: '用户不存在' });
+          return;
+        }
+        const nextUsername =
+          b.username !== undefined ? String(b.username || '').trim() : String(cur.username || '').trim();
+        const nextRole =
+          b.role !== undefined
+            ? String(b.role || '').trim() || '招聘人员'
+            : String(cur.role || '').trim() || '招聘人员';
+        const unameRule = assertLoginUsernameMatchesRole(nextUsername, nextRole);
+        if (unameRule) {
+          res.status(400).json({ message: unameRule });
+          return;
+        }
+      } catch {
+        res.status(500).json({ message: 'db error' });
+        return;
+      }
     }
     const patches: string[] = [];
     const vals: unknown[] = [];
@@ -934,13 +1158,31 @@ async function startServer() {
     const desc = String(b.desc ?? '').trim();
     const users = Number(b.users);
     const u = Number.isFinite(users) ? users : 0;
+    let menuKeysJson: string | null | undefined;
+    if (b.menuKeys !== undefined) {
+      if (b.menuKeys === null) menuKeysJson = null;
+      else if (Array.isArray(b.menuKeys)) {
+        const arr = (b.menuKeys as unknown[]).map((x) => String(x || '').trim()).filter(Boolean);
+        menuKeysJson = JSON.stringify(arr);
+      } else {
+        res.status(400).json({ message: 'menuKeys 须为字符串数组或 null' });
+        return;
+      }
+    }
     try {
-      await adminPool.query('INSERT INTO roles (id, name, `desc`, users) VALUES (?, ?, ?, ?)', [
-        id,
-        name,
-        desc,
-        u
-      ]);
+      if (menuKeysJson !== undefined) {
+        await adminPool.query(
+          'INSERT INTO roles (id, name, `desc`, users, menu_keys) VALUES (?, ?, ?, ?, ?)',
+          [id, name, desc, u, menuKeysJson]
+        );
+      } else {
+        await adminPool.query('INSERT INTO roles (id, name, `desc`, users) VALUES (?, ?, ?, ?)', [
+          id,
+          name,
+          desc,
+          u
+        ]);
+      }
       res.status(201).json({ id });
     } catch (e) {
       if (mysqlDupKey(e)) {
@@ -978,6 +1220,19 @@ async function startServer() {
       const users = Number(b.users);
       patches.push('users = ?');
       vals.push(Number.isFinite(users) ? users : 0);
+    }
+    if (b.menuKeys !== undefined) {
+      if (b.menuKeys === null) {
+        patches.push('menu_keys = ?');
+        vals.push(null);
+      } else if (Array.isArray(b.menuKeys)) {
+        const arr = (b.menuKeys as unknown[]).map((x) => String(x || '').trim()).filter(Boolean);
+        patches.push('menu_keys = ?');
+        vals.push(JSON.stringify(arr));
+      } else {
+        res.status(400).json({ message: 'menuKeys 须为字符串数组或 null' });
+        return;
+      }
     }
     if (patches.length === 0) {
       res.status(400).json({ message: '无有效更新字段' });
@@ -1037,12 +1292,31 @@ async function startServer() {
     const type = String(b.type || '菜单').trim();
     const icon = String(b.icon || 'Menu').trim();
     const path = String(b.path || '').trim() || '/';
-    const level = Number(b.level);
-    const lv = Number.isFinite(level) ? level : 0;
+    const parentIdRaw = String(b.parentId || b.parent_id || '').trim() || null;
+    let lv = 0;
+    if (parentIdRaw) {
+      try {
+        const [prows] = await adminPool.query<RowDataPacket[]>(
+          'SELECT level FROM menus WHERE id = ? LIMIT 1',
+          [parentIdRaw]
+        );
+        if (!prows.length) {
+          res.status(400).json({ message: '上级菜单不存在' });
+          return;
+        }
+        lv = (Number((prows[0] as { level?: number }).level) || 0) + 1;
+      } catch {
+        res.status(500).json({ message: 'db error' });
+        return;
+      }
+    } else {
+      const level = Number(b.level);
+      lv = Number.isFinite(level) ? level : 0;
+    }
     try {
       await adminPool.query(
-        'INSERT INTO menus (id, name, type, icon, path, level) VALUES (?, ?, ?, ?, ?, ?)',
-        [id, name, type, icon, path, lv]
+        'INSERT INTO menus (id, name, type, icon, path, parent_id, level) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [id, name, type, icon, path, parentIdRaw, lv]
       );
       res.status(201).json({ id });
     } catch (e) {
@@ -1085,7 +1359,41 @@ async function startServer() {
       patches.push('path = ?');
       vals.push(String(b.path || '').trim() || '/');
     }
-    if (b.level !== undefined) {
+    if (b.parentId !== undefined || b.parent_id !== undefined) {
+      const raw = b.parentId !== undefined ? b.parentId : b.parent_id;
+      const pid = raw == null || String(raw).trim() === '' ? null : String(raw).trim();
+      if (pid === id) {
+        res.status(400).json({ message: '上级菜单不能为自身' });
+        return;
+      }
+      if (pid) {
+        try {
+          const [prows] = await adminPool.query<RowDataPacket[]>(
+            'SELECT level FROM menus WHERE id = ? LIMIT 1',
+            [pid]
+          );
+          if (!prows.length) {
+            res.status(400).json({ message: '上级菜单不存在' });
+            return;
+          }
+          const pl = Number((prows[0] as { level?: number }).level) || 0;
+          patches.push('parent_id = ?');
+          vals.push(pid);
+          patches.push('level = ?');
+          vals.push(pl + 1);
+        } catch {
+          res.status(500).json({ message: 'db error' });
+          return;
+        }
+      } else {
+        const level = Number(b.level);
+        const nextLv = Number.isFinite(level) ? level : 0;
+        patches.push('parent_id = ?');
+        vals.push(null);
+        patches.push('level = ?');
+        vals.push(nextLv);
+      }
+    } else if (b.level !== undefined) {
       const level = Number(b.level);
       patches.push('level = ?');
       vals.push(Number.isFinite(level) ? level : 0);
@@ -1176,6 +1484,7 @@ async function startServer() {
     console.log(`Server running on http://localhost:${uiPort}`);
     console.log(`[server.ts] MySQL database (admin): ${adminDb}`);
     console.log(`[server.ts] MySQL database (biz): ${bizDb}`);
+    console.log(`[server.ts] /api/admin → 代理到 ${adminApiUpstream}（需该端口有 server/index.ts 或设 ADMIN_API_UPSTREAM）`);
   });
 }
 

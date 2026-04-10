@@ -1,12 +1,14 @@
 const STORAGE_KEY = 'hr_admin_session_token'
 const PROFILE_KEY = 'hr_admin_profile'
 
-export type AdminUiRole = 'admin' | 'delivery_manager' | 'recruiter'
+export type AdminUiRole = 'admin' | 'delivery_manager' | 'recruiter' | 'recruiting_manager'
 
 export type AdminLoginProfile = {
   name: string
   username: string
   uiRole: AdminUiRole
+  /** 非空时与职级默认菜单求交，仅显示这些侧边栏 id（来自管理库 roles.menu_keys） */
+  allowedMenuKeys?: string[]
 }
 
 export function getAdminLoginProfile(): AdminLoginProfile | null {
@@ -17,12 +19,27 @@ export function getAdminLoginProfile(): AdminLoginProfile | null {
     if (
       p &&
       typeof p.username === 'string' &&
-      (p.uiRole === 'admin' || p.uiRole === 'delivery_manager' || p.uiRole === 'recruiter')
+      (p.uiRole === 'admin' ||
+        p.uiRole === 'delivery_manager' ||
+        p.uiRole === 'recruiter' ||
+        p.uiRole === 'recruiting_manager')
     ) {
+      let allowedMenuKeys: string[] | undefined
+      if (
+        typeof p === 'object' &&
+        p !== null &&
+        'allowedMenuKeys' in p &&
+        Array.isArray((p as { allowedMenuKeys?: unknown }).allowedMenuKeys)
+      ) {
+        allowedMenuKeys = (p as { allowedMenuKeys: unknown[] }).allowedMenuKeys
+          .map((x) => String(x || '').trim())
+          .filter(Boolean)
+      }
       return {
         name: String(p.name || p.username),
         username: p.username,
-        uiRole: p.uiRole
+        uiRole: p.uiRole,
+        ...(allowedMenuKeys !== undefined ? { allowedMenuKeys } : {})
       }
     }
   } catch {
