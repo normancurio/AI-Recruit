@@ -2,6 +2,7 @@ import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
 import { Button, Text, View } from '@tarojs/components'
 
+import type { CandidateProfile } from '../../types/interview'
 import { acceptInvitation, getMyInvitations, getMyProfile } from '../../services/userApi'
 
 import './index.scss'
@@ -52,7 +53,16 @@ export default function InvitePage() {
     try {
       setLoading(true)
       const data = await acceptInvitation({ openid, inviteId: invite.inviteId })
-      Taro.setStorageSync('candidate_profile', { name: '候选人', phone: '', inviteCode: invite.jobId, openid })
+      const profile: CandidateProfile = {
+        name: data.candidateName || '候选人',
+        phone: '',
+        inviteCode: invite.inviteId,
+        openid
+      }
+      if (typeof data.resumeScreeningId === 'number' && data.resumeScreeningId > 0) {
+        profile.resumeScreeningId = data.resumeScreeningId
+      }
+      Taro.setStorageSync('candidate_profile', profile)
       Taro.setStorageSync('candidate_job', {
         id: data.job.id,
         title: data.job.title,

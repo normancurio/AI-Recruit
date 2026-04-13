@@ -39,7 +39,14 @@ export async function getMyInvitations(openid: string) {
 
 export async function acceptInvitation(params: { openid: string; inviteId: string }) {
   const base = assertApiBase()
-  const res = await Taro.request<{ data: { sessionId: string; job: { id: string; title: string; department: string } } }>({
+  const res = await Taro.request<{
+    data: {
+      sessionId: string
+      job: { id: string; title: string; department: string }
+      resumeScreeningId?: number
+      candidateName?: string
+    }
+  }>({
     url: `${base}/api/candidate/invitations/accept`,
     method: 'POST',
     data: params

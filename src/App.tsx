@@ -82,7 +82,7 @@ type NavItem = {
 
 /** 与侧边栏菜单 id 一致；写入管理库 roles.menu_keys（JSON 数组） */
 const ADMIN_ROLE_MENU_OPTIONS: { group: string; items: { id: string; label: string }[] }[] = [
-  { group: '常用', items: [{ id: 'workbench', label: '工作台' }] },
+  /** 二期：可恢复「工作台」workbench 菜单项 */
   {
     group: '岗位管理',
     items: [
@@ -114,17 +114,23 @@ function filterNavByAcl(nav: NavItem[], uiRole: Role, allowedMenuKeys?: string[]
 
   return nav
     .map((item) => {
-      if (!item.roles.includes(uiRole)) return null
       if (item.children?.length) {
-        const children = item.children.filter((c) => {
-          if (c.roles && !c.roles.includes(uiRole)) return false
-          if (useAcl && keySet && !keySet.has(c.id)) return false
-          return true
-        })
+        let children: NavChild[]
+        if (useAcl && keySet) {
+          // 管理库 roles.menu_keys 白名单：显式授权的 id 可突破子项/父级在模板里的默认 roles（如系统管理仅 admin）
+          children = item.children.filter((c) => keySet.has(c.id))
+        } else {
+          if (!item.roles.includes(uiRole)) return null
+          children = item.children.filter((c) => !c.roles || c.roles.includes(uiRole))
+        }
         if (children.length === 0) return null
         return { ...item, children }
       }
-      if (useAcl && keySet && !keySet.has(item.id)) return null
+      if (useAcl && keySet) {
+        if (!keySet.has(item.id)) return null
+        return item
+      }
+      if (!item.roles.includes(uiRole)) return null
       return item
     })
     .filter(Boolean) as NavItem[]
@@ -143,12 +149,7 @@ function collectNavIds(nav: NavItem[]): string[] {
 }
 
 const NAV_TEMPLATE: NavItem[] = [
-  {
-    id: 'workbench',
-    title: '工作台',
-    icon: <LayoutDashboard className="w-5 h-5" />,
-    roles: ['admin', 'delivery_manager', 'recruiter', 'recruiting_manager']
-  },
+  /** 二期：可恢复顶层「工作台」菜单（id: workbench → WorkbenchView） */
   {
     id: 'projects',
     title: '岗位管理',
@@ -173,9 +174,13 @@ const NAV_TEMPLATE: NavItem[] = [
     id: 'recruitment',
     title: '招聘管理',
     icon: <Users className="w-5 h-5" />,
-    roles: ['admin', 'recruiter', 'recruiting_manager'],
+    roles: ['admin', 'recruiter', 'recruiting_manager', 'delivery_manager'],
     children: [
-      { id: 'resume-screening', title: '简历筛查', roles: ['admin', 'recruiter', 'recruiting_manager'] },
+      {
+        id: 'resume-screening',
+        title: '简历筛查',
+        roles: ['admin', 'recruiter', 'recruiting_manager', 'delivery_manager']
+      },
       { id: 'application-mgmt', title: '初面管理', roles: ['admin', 'recruiter', 'recruiting_manager'] }
     ]
   },
@@ -204,7 +209,7 @@ export interface Job {
   level: string;
   salary: string;
   recruiters: string[];
-  /** 招聘经理认领（jobs.claimed_by） */
+  /** 历史字段 jobs.claimed_by，界面已不再使用认领流程 */
   claimedBy?: string;
   jdText?: string;
   department?: string;
@@ -221,6 +226,8 @@ export interface Project {
   manager: string;
   status: string;
   jobs: Job[];
+  /** 项目侧招聘经理名单，由交付经理/管理员维护；招聘经理凭此获得下属岗位「招聘人员」配置权限 */
+  recruitmentLeads?: string[];
   /** 展示用编号，如 PRJ-2024-001 */
   projectCode?: string;
   startDate?: string;
@@ -259,11 +266,43 @@ export interface Dept {
 }
 export interface User { id: string; name: string; username: string; dept: string; role: string; status: string; }
 
+/** 部门名比对：去空白、全角空格、Unicode 兼容规范化，避免「交付八部」与库内不可见字符不一致 */
+function normalizeDeptForMatch(s: string): string {
+  try {
+    return String(s || '')
+      .normalize('NFKC')
+      .replace(/[\s\u3000]+/g, ' ')
+      .trim()
+      .toLowerCase();
+  } catch {
+    return String(s || '')
+      .replace(/[\s\u3000]+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+}
+
 function deptNamesMatch(userDept: string, deptName: string): boolean {
-  const a = userDept.trim().toLowerCase();
-  const b = deptName.trim().toLowerCase();
+  const a = normalizeDeptForMatch(userDept);
+  const b = normalizeDeptForMatch(deptName);
   if (!a || !b || a === '-' || b === '-') return false;
   return a === b;
+}
+
+/** 自定义菜单白名单下是否包含「岗位分配」；无白名单时视为拥有默认菜单（含岗位分配） */
+function deliveryManagerHasJobQueryMenu(auth: AdminLoginProfile | null): boolean {
+  const keys = auth?.allowedMenuKeys;
+  if (!Array.isArray(keys)) return true;
+  return keys.includes('job-query');
+}
+
+/** 交付经理：仅保留与本人 users.dept 一致的真实项目；不含未分配/占位项目桶 */
+function filterProjectsForDeliveryManagerScope(projects: Project[], userDept: string | null | undefined): Project[] {
+  const ud = String(userDept || '').trim();
+  if (!ud || ud === '-') return [];
+  return projects.filter(
+    (p) => p.id !== 'EMPTY' && p.id !== 'UNASSIGNED' && deptNamesMatch(ud, String(p.dept || ''))
+  );
 }
 
 /** 将 /api/users 响应规范为 User[] */
@@ -511,9 +550,34 @@ export default function App() {
   useEffect(() => {
     setAuthProfile(getAdminLoginProfile());
   }, [authTick]);
+
+  /** 交付经理会话缺少「所属部门」时，从用户管理同源接口回填（兼容旧 session、或曾未下发 dept） */
+  useEffect(() => {
+    const p = authProfile;
+    if (!p || p.uiRole !== 'delivery_manager') return;
+    const d = String(p.dept || '').trim();
+    if (d && d !== '-') return;
+    let cancelled = false;
+    void fetch('/api/users')
+      .then((r) => r.json())
+      .then((data: unknown) => {
+        if (cancelled) return;
+        const users = usersFromApiPayload(data);
+        const un = String(p.username || '').trim();
+        const me = users.find((u) => String(u.username || '').trim() === un);
+        const fetched = String(me?.dept || '').trim();
+        if (!fetched || fetched === '-') return;
+        setAdminLoginProfile({ ...p, dept: fetched });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [authProfile?.username, authProfile?.uiRole, authProfile?.dept]);
+
   /** 与登录账号职级一致，不再提供视角切换 */
   const currentRole: Role = authProfile?.uiRole ?? 'delivery_manager';
-  const [activeMenu, setActiveMenu] = useState('workbench');
+  const [activeMenu, setActiveMenu] = useState('project-list');
   const [expandedMenus, setExpandedMenus] = useState<string[]>(['projects', 'recruitment', 'system']);
 
   const submitHrLogin = async (e: React.FormEvent) => {
@@ -542,10 +606,17 @@ export default function App() {
           username: String(u.username),
           uiRole: u.uiRole
         };
+        if (u != null && typeof u === 'object' && 'dept' in u) {
+          profile.dept = String((u as { dept?: unknown }).dept ?? '').trim();
+        }
         if (Array.isArray(u.allowedMenuKeys)) {
           profile.allowedMenuKeys = u.allowedMenuKeys.map((x) => String(x || '').trim()).filter(Boolean);
         }
         setAdminLoginProfile(profile);
+        const firstMenu = collectNavIds(
+          filterNavByAcl(NAV_TEMPLATE, profile.uiRole, profile.allowedMenuKeys)
+        )[0];
+        if (firstMenu) setActiveMenu(firstMenu);
       } else {
         setAdminLoginProfile(null);
       }
@@ -570,7 +641,7 @@ export default function App() {
     const ids = collectNavIds(navConfig)
     if (ids.length === 0) return
     if (!ids.includes(activeMenu)) {
-      setActiveMenu(ids.includes('workbench') ? 'workbench' : ids[0])
+      setActiveMenu(ids[0])
     }
   }, [navConfig, activeMenu])
 
@@ -583,14 +654,13 @@ export default function App() {
       );
     }
     switch (activeMenu) {
-      case 'workbench': return <WorkbenchView onNavigate={setActiveMenu} currentRole={currentRole} />;
       case 'clients': return <ClientManagementView />;
-      case 'project-list': return <ProjectManagementView role={currentRole} onNavigate={setActiveMenu} />;
+      case 'project-list': return <ProjectManagementView role={currentRole} onNavigate={setActiveMenu} authProfile={authProfile} />;
       case 'job-query': return <JobQueryView onNavigate={setActiveMenu} currentRole={currentRole} authProfile={authProfile} />;
       case 'resume-screening': return <ResumeScreeningView currentRole={currentRole} authProfile={authProfile} />;
       case 'application-mgmt': return <ApplicationManagementView currentRole={currentRole} authProfile={authProfile} />;
       case 'sys-dept': return <SystemDeptView />;
-      case 'sys-user': return <SystemUserView />;
+      case 'sys-user': return <SystemUserView currentRole={currentRole} authProfile={authProfile} />;
       case 'sys-role': return <SystemRoleView />;
       case 'sys-menu': return <SystemMenuView />;
       default: return <div className="p-8 text-slate-500">模块开发中...</div>;
@@ -599,83 +669,7 @@ export default function App() {
 
   return (
     <>
-      {showHrApiLogin ? (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/65 p-4">
-          <form
-            onSubmit={submitHrLogin}
-            className="bg-white rounded-xl shadow-xl border border-slate-200 p-8 w-full max-w-md space-y-5"
-          >
-            <div>
-              <h2 className="text-xl font-bold text-slate-900 tracking-tight">管理端登录</h2>
-              <p className="text-sm text-slate-700 mt-1.5 leading-relaxed">
-                登录后即可使用简历筛查、面试邀请等与候选人端联动的功能。
-              </p>
-            </div>
-
-            <div className="rounded-xl border border-indigo-100 bg-gradient-to-br from-indigo-50/90 to-violet-50/80 px-4 py-3 shadow-sm">
-              <div className="flex gap-2.5">
-                <div className="shrink-0 mt-0.5 text-indigo-600">
-                  <Info className="w-4 h-4" aria-hidden />
-                </div>
-                <div className="text-sm text-indigo-950/90 leading-relaxed space-y-2">
-                  <p className="font-medium text-indigo-950">请使用后台已开通的账号登录</p>
-                  <p className="text-indigo-950/85">
-                    登录账号与密码由管理员在<strong className="font-semibold text-indigo-950">用户管理</strong>
-                    中维护；除平台管理员外，账号一般为<strong className="font-semibold">手机号</strong>
-                    。若部署时已配置访问令牌，一般无需在此登录。
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1.5">登录账号</label>
-              <input
-                value={loginUser}
-                onChange={(e) => setLoginUser(e.target.value)}
-                autoComplete="username"
-                className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-300 outline-none transition-shadow"
-                placeholder="手机号，或管理员账号如 admin"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1.5">密码</label>
-              <input
-                type="password"
-                value={loginPass}
-                onChange={(e) => setLoginPass(e.target.value)}
-                autoComplete="current-password"
-                className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-300 outline-none transition-shadow"
-                placeholder="请输入密码"
-              />
-            </div>
-            {loginErr ? (
-              <div
-                role="alert"
-                className="text-sm text-red-800 bg-red-50 border border-red-100 rounded-lg px-3.5 py-2.5 leading-relaxed"
-              >
-                {loginErr}
-              </div>
-            ) : null}
-            {hrApiPasswordLogin === false ? (
-              <div className="text-sm text-amber-900 bg-amber-50 border border-amber-200/80 rounded-lg px-3.5 py-3 leading-relaxed">
-                <p className="font-medium text-amber-950 mb-1">暂时无法在此登录</p>
-                <p className="text-amber-900/90">
-                  招聘相关服务尚未就绪，请联系贵司技术或运维同事检查后台服务与登录配置；您也可向管理员确认账号是否已开通。
-                </p>
-              </div>
-            ) : null}
-            <button
-              type="submit"
-              disabled={loginLoading}
-              className="w-full bg-indigo-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:opacity-60"
-            >
-              {loginLoading ? '登录中…' : '登录'}
-            </button>
-          </form>
-        </div>
-      ) : null}
-      {changePwdOpen
+      {changePwdOpen && !showHrApiLogin
         ? createPortal(
             <div
               className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-900/50 p-4"
@@ -766,6 +760,96 @@ export default function App() {
             document.body
           )
         : null}
+      {showHrApiLogin ? (
+        <div className="min-h-screen flex flex-col bg-gradient-to-b from-slate-100 via-white to-slate-50">
+          <header className="shrink-0 border-b border-slate-200/80 bg-white/90 backdrop-blur-sm">
+            <div className="max-w-5xl mx-auto px-6 py-4 flex items-center gap-3">
+              <BrainCircuit className="w-9 h-9 text-indigo-600 shrink-0" aria-hidden />
+              <div>
+                <p className="text-lg font-bold text-slate-900 tracking-tight">智能招聘系统</p>
+                <p className="text-xs text-slate-500">管理端登录</p>
+              </div>
+            </div>
+          </header>
+          <main className="flex-1 flex flex-col items-center justify-center px-4 py-10 sm:py-14">
+            <div className="w-full max-w-md">
+              <form
+                onSubmit={submitHrLogin}
+                className="bg-white rounded-2xl border border-slate-200 shadow-lg shadow-slate-200/60 p-8 sm:p-10 space-y-5"
+              >
+                <div>
+                  <h1 className="text-2xl font-bold text-slate-900 tracking-tight">登录</h1>
+                  <p className="text-sm text-slate-600 mt-2 leading-relaxed">
+                    登录后即可使用简历筛查、面试邀请等与候选人端联动的功能。
+                  </p>
+                </div>
+
+                <div className="rounded-xl border border-indigo-100 bg-gradient-to-br from-indigo-50/90 to-violet-50/80 px-4 py-3">
+                  <div className="flex gap-2.5">
+                    <div className="shrink-0 mt-0.5 text-indigo-600">
+                      <Info className="w-4 h-4" aria-hidden />
+                    </div>
+                    <div className="text-sm text-indigo-950/90 leading-relaxed space-y-2">
+                      <p className="font-medium text-indigo-950">请使用后台已开通的账号</p>
+                      <p className="text-indigo-950/85">
+                        账号与密码由管理员在<strong className="font-semibold text-indigo-950">用户管理</strong>
+                        中维护；除平台管理员外，账号一般为<strong className="font-semibold">手机号</strong>
+                        。若部署时已配置访问令牌，可能无需在此登录。
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">登录账号</label>
+                  <input
+                    value={loginUser}
+                    onChange={(e) => setLoginUser(e.target.value)}
+                    autoComplete="username"
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-300 outline-none transition-shadow"
+                    placeholder="手机号，或管理员账号如 admin"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">密码</label>
+                  <input
+                    type="password"
+                    value={loginPass}
+                    onChange={(e) => setLoginPass(e.target.value)}
+                    autoComplete="current-password"
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-300 outline-none transition-shadow"
+                    placeholder="请输入密码"
+                  />
+                </div>
+                {loginErr ? (
+                  <div
+                    role="alert"
+                    className="text-sm text-red-800 bg-red-50 border border-red-100 rounded-lg px-3.5 py-2.5 leading-relaxed"
+                  >
+                    {loginErr}
+                  </div>
+                ) : null}
+                {hrApiPasswordLogin === false ? (
+                  <div className="text-sm text-amber-900 bg-amber-50 border border-amber-200/80 rounded-lg px-3.5 py-3 leading-relaxed">
+                    <p className="font-medium text-amber-950 mb-1">暂时无法在此登录</p>
+                    <p className="text-amber-900/90">
+                      招聘相关服务尚未就绪，请联系贵司技术或运维同事检查后台服务与登录配置；您也可向管理员确认账号是否已开通。
+                    </p>
+                  </div>
+                ) : null}
+                <button
+                  type="submit"
+                  disabled={loginLoading}
+                  className="w-full bg-indigo-600 text-white py-3 rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:opacity-60 transition-colors"
+                >
+                  {loginLoading ? '登录中…' : '进入系统'}
+                </button>
+              </form>
+              <p className="text-center text-xs text-slate-400 mt-8">登录成功后将进入您有权限的首个功能页</p>
+            </div>
+          </main>
+        </div>
+      ) : (
       <div className="min-h-screen bg-slate-50 flex">
       {/* Sidebar */}
       <aside className="w-64 bg-slate-900 text-slate-300 flex flex-col shadow-xl z-20">
@@ -775,7 +859,7 @@ export default function App() {
         </div>
         
         <div className="flex-1 overflow-y-auto py-4">
-          {navConfig.filter(nav => nav.roles.includes(currentRole)).map(nav => (
+          {navConfig.map((nav) => (
             <div key={nav.id} className="mb-1">
               {nav.children ? (
                 <>
@@ -797,7 +881,7 @@ export default function App() {
                         exit={{ height: 0, opacity: 0 }}
                         className="overflow-hidden bg-slate-900/50"
                       >
-                        {nav.children.filter(child => !child.roles || child.roles.includes(currentRole)).map(child => (
+                        {nav.children.map((child) => (
                           <button
                             key={child.id}
                             onClick={() => setActiveMenu(child.id)}
@@ -835,7 +919,7 @@ export default function App() {
         <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 shadow-sm z-10">
           <div className="flex items-center gap-4">
             <h2 className="text-xl font-bold text-slate-800">
-              {navConfig.flatMap(n => n.children ? [n, ...n.children] : [n]).find(n => n.id === activeMenu)?.title || '工作台'}
+              {navConfig.flatMap(n => n.children ? [n, ...n.children] : [n]).find(n => n.id === activeMenu)?.title || '招聘管理'}
             </h2>
           </div>
           <div className="flex items-center gap-6">
@@ -904,6 +988,7 @@ export default function App() {
         </div>
       </main>
     </div>
+      )}
     </>
   );
 }
@@ -969,12 +1054,23 @@ function defaultNewProjectCode() {
   return `PRJ-${y}-${String(n).padStart(3, '0')}`;
 }
 
+/** 列表与卡片：优先项目招聘负责人名单，兼容仅填过 manager 的旧数据 */
+function projectRecruitingLeadDisplay(p: { recruitmentLeads?: string[]; manager?: string }): string {
+  const leads = (p.recruitmentLeads ?? []).map((x) => String(x || '').trim()).filter(Boolean);
+  if (leads.length) return leads.join('、');
+  const m = String(p.manager || '').trim();
+  if (m && m !== '-') return m;
+  return '—';
+}
+
 function ProjectManagementView({
   role,
-  onNavigate
+  onNavigate,
+  authProfile
 }: {
   role: Role;
   onNavigate?: (id: string) => void;
+  authProfile: AdminLoginProfile | null;
 }) {
   const [expandedProject, setExpandedProject] = useState<string | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -989,13 +1085,13 @@ function ProjectManagementView({
   const [formEnd, setFormEnd] = useState('');
   const [formDesc, setFormDesc] = useState('');
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
-  const [formManager, setFormManager] = useState('');
   const [formStatus, setFormStatus] = useState('进行中');
   const [formMemberCount, setFormMemberCount] = useState('0');
   const [formProjectCode, setFormProjectCode] = useState('');
   const [hrUsers, setHrUsers] = useState<User[]>([]);
-  const [managerFilterDept, setManagerFilterDept] = useState('');
-  const [managerPickUsername, setManagerPickUsername] = useState('');
+  const [formProjectRecruitmentLeads, setFormProjectRecruitmentLeads] = useState('');
+  const [projectLeadPickDept, setProjectLeadPickDept] = useState('');
+  const [projectLeadPickUsername, setProjectLeadPickUsername] = useState('');
   const [projectJobForm, setProjectJobForm] = useState<JobFormState | null>(null);
   const [pjRecruiterPickDept, setPjRecruiterPickDept] = useState('');
   const [pjRecruiterPickUsername, setPjRecruiterPickUsername] = useState('');
@@ -1030,6 +1126,9 @@ function ProjectManagementView({
     if (createSubmitting) return;
     setCreateOpen(false);
     setEditingProjectId(null);
+    setFormProjectRecruitmentLeads('');
+    setProjectLeadPickDept('');
+    setProjectLeadPickUsername('');
   };
 
   const openCreateModal = () => {
@@ -1041,12 +1140,12 @@ function ProjectManagementView({
     setFormStart('');
     setFormEnd('');
     setFormDesc('');
-    setFormManager('');
     setFormStatus('进行中');
     setFormMemberCount('0');
     setFormProjectCode('');
-    setManagerFilterDept('');
-    setManagerPickUsername('');
+    setFormProjectRecruitmentLeads('');
+    setProjectLeadPickDept('');
+    setProjectLeadPickUsername('');
     setCreateError('');
     setCreateOpen(true);
   };
@@ -1059,12 +1158,12 @@ function ProjectManagementView({
     setFormStart((p.startDate || '').trim());
     setFormEnd((p.endDate || '').trim());
     setFormDesc((p.description || '').trim());
-    setFormManager(p.manager && p.manager !== '-' ? p.manager : '');
     setFormStatus((p.status || '进行中').trim() || '进行中');
     setFormMemberCount(String(p.memberCount ?? 0));
     setFormProjectCode((p.projectCode || p.id || '').trim());
-    setManagerFilterDept('');
-    setManagerPickUsername('');
+    setFormProjectRecruitmentLeads((p.recruitmentLeads && p.recruitmentLeads.length ? p.recruitmentLeads : []).join('、'));
+    setProjectLeadPickDept('');
+    setProjectLeadPickUsername('');
     setCreateError('');
     setCreateOpen(true);
   };
@@ -1100,40 +1199,45 @@ function ProjectManagementView({
     setCreateSubmitting(true);
     try {
       if (isEdit) {
+        const patchBody: Record<string, unknown> = {
+          name,
+          dept: formDept.trim() || null,
+          status: formStatus.trim() || '进行中',
+          startDate: formStart || null,
+          endDate: formEnd || null,
+          description: formDesc.trim() || null,
+          memberCount,
+          projectCode: formProjectCode.trim() || null
+        };
+        if (role === 'admin' || role === 'delivery_manager') {
+          patchBody.recruitmentLeads = parseRecruitersInput(formProjectRecruitmentLeads);
+        }
         const r = await fetch(`/api/projects/${encodeURIComponent(editingProjectId!)}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name,
-            dept: formDept.trim() || null,
-            manager: formManager.trim() || null,
-            status: formStatus.trim() || '进行中',
-            startDate: formStart || null,
-            endDate: formEnd || null,
-            description: formDesc.trim() || null,
-            memberCount,
-            projectCode: formProjectCode.trim() || null
-          })
+          body: JSON.stringify(patchBody)
         });
         const j = (await r.json().catch(() => ({}))) as { message?: string };
         if (!r.ok) throw new Error(j.message || `保存失败 ${r.status}`);
       } else {
-        const skipManagerOnCreate = role === 'delivery_manager' || role === 'admin';
+        const postBody: Record<string, unknown> = {
+          id,
+          name,
+          projectCode: id,
+          dept: formDept.trim() || undefined,
+          status: formStatus.trim() || undefined,
+          startDate: formStart || undefined,
+          endDate: formEnd || undefined,
+          description: formDesc.trim() || undefined,
+          memberCount
+        };
+        if (role === 'admin' || role === 'delivery_manager') {
+          postBody.recruitmentLeads = parseRecruitersInput(formProjectRecruitmentLeads);
+        }
         const r = await fetch('/api/projects', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            id,
-            name,
-            projectCode: id,
-            dept: formDept.trim() || undefined,
-            manager: skipManagerOnCreate ? undefined : formManager.trim() || undefined,
-            status: formStatus.trim() || undefined,
-            startDate: formStart || undefined,
-            endDate: formEnd || undefined,
-            description: formDesc.trim() || undefined,
-            memberCount
-          })
+          body: JSON.stringify(postBody)
         });
         const j = (await r.json().catch(() => ({}))) as { message?: string };
         if (!r.ok) throw new Error(j.message || `创建失败 ${r.status}`);
@@ -1148,7 +1252,26 @@ function ProjectManagementView({
     }
   };
 
-  const listProjects = projects.filter((p) => p.id !== 'EMPTY' && p.id !== 'UNASSIGNED');
+  const dmUserDept = String(authProfile?.dept || '').trim();
+  const dmDeptReady =
+    role !== 'delivery_manager' || (dmUserDept.length > 0 && dmUserDept !== '-');
+
+  const listProjects = useMemo(() => {
+    const base = projects.filter((p) => p.id !== 'EMPTY' && p.id !== 'UNASSIGNED');
+    if (role === 'recruiting_manager') return filterProjectsForRecruitingManagerScope(base, authProfile);
+    if (role !== 'delivery_manager') return base;
+    if (!dmDeptReady) return [];
+    return filterProjectsForDeliveryManagerScope(projects, dmUserDept);
+  }, [projects, role, dmDeptReady, dmUserDept, authProfile]);
+
+  const totalRealProjects = useMemo(
+    () => projects.filter((p) => p.id !== 'EMPTY' && p.id !== 'UNASSIGNED').length,
+    [projects]
+  );
+  const recruitingManagerNoLeadProjects =
+    role === 'recruiting_manager' && listProjects.length === 0 && totalRealProjects > 0;
+
+  const dmJobQueryMenu = role === 'delivery_manager' ? deliveryManagerHasJobQueryMenu(authProfile) : true;
   const selectableProjectsForJob = listProjects;
 
   const openProjectJobCreate = (projectId: string) => {
@@ -1210,13 +1333,10 @@ function ProjectManagementView({
       return;
     }
     setProjectJobForm((f) => (f ? { ...f, submitting: true, error: '' } : f));
-    const recruiters =
-      role === 'delivery_manager' || role === 'admin'
-        ? []
-        : parseRecruitersInput(projectJobForm.recruiters);
     const demand = Math.max(1, Math.min(99999, Number(projectJobForm.demand) || 1));
     const projectId = rawPid;
-    const payload = {
+    /** 项目管理里维护岗位：交付经理/管理员不维护岗位「招聘人员」，由招聘经理在岗位分配中配置 */
+    const payload: Record<string, unknown> = {
       title,
       projectId,
       department: projectJobForm.department.trim() || null,
@@ -1225,13 +1345,12 @@ function ProjectManagementView({
       skills: projectJobForm.skills.trim() || null,
       level: projectJobForm.level.trim() || null,
       salary: projectJobForm.salary.trim() || null,
-      recruiters,
       jdText: projectJobForm.jdText.trim() || null
     };
     try {
       if (projectJobForm.mode === 'create') {
         const jc = projectJobForm.jobCode.trim();
-        const body: Record<string, unknown> = { ...payload };
+        const body: Record<string, unknown> = { ...payload, recruiters: [] };
         if (jc) body.jobCode = jc.toUpperCase();
         const r = await fetch('/api/jobs', {
           method: 'POST',
@@ -1287,9 +1406,6 @@ function ProjectManagementView({
   };
 
   const canManage = role === 'admin' || role === 'delivery_manager';
-  /** 创建项目时管理员与交付经理不填负责人；编辑时仍可维护 */
-  const showProjectManagerInModal =
-    Boolean(editingProjectId) || (role !== 'delivery_manager' && role !== 'admin');
 
   return (
     <div className="space-y-8">
@@ -1298,11 +1414,11 @@ function ProjectManagementView({
           <h1 className="text-2xl font-bold text-slate-900">项目管理</h1>
           <p className="text-slate-500 mt-1">管理所有招聘项目（数据来自业务库 projects / jobs）</p>
           <p className="text-xs text-slate-400 mt-2 max-w-2xl leading-relaxed">
-            管理员与交付经理可在展开后的岗位明细中直接维护岗位；亦可通过「岗位分配」集中管理。列表暂不按角色过滤部门，若需权限隔离请在接口层实现。
+            管理员可查看全部项目。交付经理仅展示与本人「所属部门」一致的项目。招聘经理仅展示在「项目招聘负责人」中包含本人姓名或登录账号的项目。以上均不展示「未分配项目」占位数据；未归入项目的岗位请在「岗位分配」中查看。
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 shrink-0">
-          {canManage ? (
+          {canManage && dmDeptReady ? (
             <button
               type="button"
               onClick={openCreateModal}
@@ -1314,7 +1430,7 @@ function ProjectManagementView({
           {(role === 'admin' ||
             role === 'recruiter' ||
             role === 'recruiting_manager' ||
-            role === 'delivery_manager') &&
+            (role === 'delivery_manager' && dmJobQueryMenu)) &&
           onNavigate ? (
             <button
               type="button"
@@ -1327,10 +1443,21 @@ function ProjectManagementView({
         </div>
       </div>
 
+      {role === 'delivery_manager' && !dmDeptReady ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50/90 text-amber-950 px-5 py-4 text-sm leading-relaxed max-w-2xl">
+          当前账号未设置「所属部门」，无法按部门筛选项目。请管理员在「用户管理」中为您填写部门（须与项目上的部门名称一致），保存后重新登录。
+        </div>
+      ) : null}
+      {recruitingManagerNoLeadProjects ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50/90 text-amber-950 px-5 py-4 text-sm leading-relaxed max-w-2xl">
+          当前账号未被设为任何项目的「项目招聘负责人」，因此不展示项目列表。请交付经理或管理员在「项目管理」中编辑对应项目，将您的姓名或登录账号加入「项目招聘负责人」。
+        </div>
+      ) : null}
+
       {listProjects.length === 0 ? (
         <div className="rounded-xl border border-dashed border-slate-200 bg-white p-12 text-center text-slate-500">
           <p className="text-sm">暂无招聘项目</p>
-          {canManage ? (
+          {canManage && dmDeptReady ? (
             <button
               type="button"
               onClick={openCreateModal}
@@ -1387,9 +1514,9 @@ function ProjectManagementView({
                       <span className="font-medium text-slate-800">{project.dept || '—'}</span>
                     </p>
                     <p>
-                      <span className="text-slate-400">负责人</span>{' '}
+                      <span className="text-slate-400">项目招聘负责人</span>{' '}
                       <span className="font-medium text-slate-800">
-                        {project.manager && project.manager !== '-' ? project.manager : '—'}
+                        {projectRecruitingLeadDisplay(project)}
                       </span>
                     </p>
                     <p className="flex items-center gap-2 text-slate-600">
@@ -1496,11 +1623,9 @@ function ProjectManagementView({
                                       </span>
                                     ))}
                                   </div>
-                                  {job.claimedBy?.trim() ? (
-                                    <p className="text-xs text-slate-500 mt-2">招聘经理：{job.claimedBy}</p>
-                                  ) : (
-                                    <p className="text-xs text-amber-700 mt-2">待招聘经理认领</p>
-                                  )}
+                                  {!job.recruiters?.length ? (
+                                    <p className="text-xs text-slate-400 mt-2">未设置招聘负责人</p>
+                                  ) : null}
                                 </div>
                               </div>
                             </div>
@@ -1509,7 +1634,7 @@ function ProjectManagementView({
                         {(role === 'admin' ||
                           role === 'recruiter' ||
                           role === 'recruiting_manager' ||
-                          role === 'delivery_manager') &&
+                          (role === 'delivery_manager' && dmJobQueryMenu)) &&
                         onNavigate ? (
                           <button
                             type="button"
@@ -1621,22 +1746,47 @@ function ProjectManagementView({
                     </select>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {showProjectManagerInModal ? (
-                      <div className="sm:col-span-2">
-                        <label className="block text-xs font-medium text-slate-500 mb-1.5">负责人</label>
-                        <p className="text-[11px] text-slate-400 mb-2">
-                          可先选部门再选用户管理中的账号（写入姓名），也可直接在下方修改姓名。
+                    {(role === 'admin' || role === 'delivery_manager') && (
+                      <div className="sm:col-span-2 rounded-lg border border-indigo-100 bg-indigo-50/40 px-3 py-3 space-y-2">
+                        <label className="block text-xs font-medium text-slate-600">
+                          项目招聘负责人（招聘经理）
+                        </label>
+                        <p className="text-[11px] text-slate-500 leading-relaxed">
+                          由交付经理或管理员维护；可跨部门添加多名招聘经理。配置完成后，对应招聘经理可在「岗位分配」中为该项目下的每个岗位指定一名招聘人员。
                         </p>
-                        <div className="flex flex-col sm:flex-row gap-2 mb-2">
+                        <div className="flex flex-wrap gap-1.5 min-h-[1.5rem]">
+                          {parseRecruitersInput(formProjectRecruitmentLeads).map((name, i) => (
+                            <span
+                              key={`${i}-${name}`}
+                              className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-md text-xs font-medium bg-white text-indigo-900 border border-indigo-100"
+                            >
+                              {name}
+                              <button
+                                type="button"
+                                disabled={createSubmitting}
+                                onClick={() => {
+                                  const next = parseRecruitersInput(formProjectRecruitmentLeads).filter((x) => x !== name);
+                                  setFormProjectRecruitmentLeads(next.join('、'));
+                                }}
+                                className="p-0.5 rounded hover:bg-indigo-50 text-indigo-600"
+                                aria-label={`移除 ${name}`}
+                              >
+                                ×
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                        <div className="flex flex-col sm:flex-row gap-2">
                           <select
-                            value={managerFilterDept}
+                            value={projectLeadPickDept}
                             onChange={(e) => {
-                              setManagerFilterDept(e.target.value);
-                              setManagerPickUsername('');
+                              setProjectLeadPickDept(e.target.value);
+                              setProjectLeadPickUsername('');
                             }}
-                            className="w-full sm:flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-slate-900/20 outline-none"
+                            disabled={createSubmitting}
+                            className="w-full sm:flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white"
                           >
-                            <option value="">先选部门</option>
+                            <option value="">选择部门</option>
                             {depts.map((d) => (
                               <option key={d.id} value={d.name}>
                                 {d.name}
@@ -1644,32 +1794,46 @@ function ProjectManagementView({
                             ))}
                           </select>
                           <select
-                            value={managerPickUsername}
-                            onChange={(e) => {
-                              const un = e.target.value;
-                              setManagerPickUsername(un);
-                              const u = hrUsers.find((x) => x.username === un);
-                              if (u?.name) setFormManager(u.name);
-                            }}
-                            disabled={!managerFilterDept}
-                            className="w-full sm:flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-slate-900/20 outline-none disabled:bg-slate-50 disabled:text-slate-400"
+                            value={projectLeadPickUsername}
+                            onChange={(e) => setProjectLeadPickUsername(e.target.value)}
+                            disabled={createSubmitting || !projectLeadPickDept}
+                            className="w-full sm:flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white disabled:bg-slate-50"
                           >
-                            <option value="">{managerFilterDept ? '再选人员' : '请先选择部门'}</option>
-                            {activeUsersInDept(hrUsers, managerFilterDept).map((u) => (
-                              <option key={u.username} value={u.username}>
-                                {u.name}（{u.username}）
-                              </option>
-                            ))}
+                            <option value="">{projectLeadPickDept ? '选择招聘经理' : '请先选择部门'}</option>
+                            {activeUsersInDept(hrUsers, projectLeadPickDept)
+                              .filter((u) => isRecruitingManagerUserRole(u.role))
+                              .map((u) => (
+                                <option key={u.username} value={u.username}>
+                                  {u.name}（{u.username}）
+                                </option>
+                              ))}
                           </select>
+                          <button
+                            type="button"
+                            disabled={createSubmitting || !projectLeadPickUsername}
+                            onClick={() => {
+                              const u = hrUsers.find((x) => x.username === projectLeadPickUsername);
+                              const n = u?.name?.trim();
+                              if (!n) return;
+                              const existing = parseRecruitersInput(formProjectRecruitmentLeads);
+                              if (existing.some((x) => x.toLowerCase() === n.toLowerCase())) return;
+                              setFormProjectRecruitmentLeads([...existing, n].join('、'));
+                            }}
+                            className="w-full sm:w-auto shrink-0 px-4 py-2 text-sm font-medium rounded-lg border border-indigo-200 bg-white text-indigo-900 hover:bg-indigo-50 disabled:opacity-50"
+                          >
+                            添加
+                          </button>
                         </div>
-                        <input
-                          value={formManager}
-                          onChange={(e) => setFormManager(e.target.value)}
-                          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-slate-900/20 outline-none"
-                          placeholder="负责人姓名（可选，可手填）"
+                        <textarea
+                          value={formProjectRecruitmentLeads}
+                          onChange={(e) => setFormProjectRecruitmentLeads(e.target.value)}
+                          disabled={createSubmitting}
+                          rows={2}
+                          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm resize-none bg-white"
+                          placeholder="也可手填姓名，顿号或逗号分隔"
                         />
                       </div>
-                    ) : null}
+                    )}
                     <div>
                       <label className="block text-xs font-medium text-slate-500 mb-1.5">项目状态</label>
                       <select
@@ -1774,7 +1938,7 @@ function ProjectManagementView({
           setProjectJobLockId(null);
         }}
         projectIdLocked={projectJobLockId}
-        hideRecruiterSection={role === 'delivery_manager' || role === 'admin'}
+        recruiterFieldMode="none"
       />
     </div>
   );
@@ -2151,25 +2315,28 @@ function WorkbenchView({
             {recentProjects.length === 0 ? (
               <p className="text-sm text-slate-500 px-2 py-6 text-center">暂无项目数据</p>
             ) : (
-              recentProjects.map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => onNavigate('project-list')}
-                  className="w-full flex items-center justify-between gap-3 rounded-lg border border-slate-100 bg-slate-50/50 px-4 py-3 text-left hover:bg-slate-50 transition-colors"
-                >
-                  <div className="min-w-0">
-                    <p className="font-semibold text-slate-900 truncate">{p.name}</p>
-                    <p className="text-xs text-slate-500 mt-0.5 truncate">
-                      {p.dept || '—'}
-                      {p.manager && p.manager !== '-' ? ` · 负责人 ${p.manager}` : ''}
-                    </p>
-                  </div>
-                  <span className="shrink-0 text-xs font-medium px-2.5 py-1 rounded-md bg-slate-900 text-white">
-                    {p.status || '进行中'}
-                  </span>
-                </button>
-              ))
+              recentProjects.map((p) => {
+                const leadLine = projectRecruitingLeadDisplay(p);
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => onNavigate('project-list')}
+                    className="w-full flex items-center justify-between gap-3 rounded-lg border border-slate-100 bg-slate-50/50 px-4 py-3 text-left hover:bg-slate-50 transition-colors"
+                  >
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-900 truncate">{p.name}</p>
+                      <p className="text-xs text-slate-500 mt-0.5 truncate">
+                        {p.dept || '—'}
+                        {leadLine !== '—' ? ` · 项目招聘负责人 ${leadLine}` : ''}
+                      </p>
+                    </div>
+                    <span className="shrink-0 text-xs font-medium px-2.5 py-1 rounded-md bg-slate-900 text-white">
+                      {p.status || '进行中'}
+                    </span>
+                  </button>
+                );
+              })
             )}
           </div>
         </div>
@@ -2259,14 +2426,68 @@ function recruitersContainMe(recruiters: string[] | undefined, meKeys: string[])
   return rs.some((r) => meKeys.includes(r));
 }
 
-function profileMatchesClaimedBy(claimedBy: string | null | undefined, profile: AdminLoginProfile | null): boolean {
-  const c = String(claimedBy || '').trim().toLowerCase();
-  if (!c) return false;
-  return recruiterIdentityKeys(profile).some((k) => k === c);
+/** 用户管理中的角色是否为「招聘经理」（项目级招聘负责人候选人） */
+function isRecruitingManagerUserRole(role: string): boolean {
+  const r = String(role || '').trim();
+  return /招聘经理|招募经理/i.test(r) || r.toLowerCase() === 'recruiting_manager';
 }
 
-function recruitingManagerCanEditJob(job: Job, profile: AdminLoginProfile | null): boolean {
-  return profileMatchesClaimedBy(job.claimedBy, profile);
+/** 一线「招聘人员」（岗位执行人），非经理/交付/管理员 */
+function isFrontlineRecruiterStaffRole(role: string): boolean {
+  const r = String(role || '').trim();
+  if (!r) return false;
+  if (/平台管理|系统管理|超级|管理员|交付经理|交付|招聘经理|招募经理/i.test(r)) return false;
+  if (/招聘人员|recruiter/i.test(r)) return true;
+  return r.includes('招聘') && !r.includes('经理');
+}
+
+function namesListContainsIdentity(names: string[] | undefined, profile: AdminLoginProfile | null): boolean {
+  const keys = recruiterIdentityKeys(profile);
+  if (!keys.length) return false;
+  const ns = (names || []).map((x) => String(x || '').trim().toLowerCase()).filter(Boolean);
+  return ns.some((n) => keys.some((k) => k === n));
+}
+
+/** 招聘经理：仅当本人出现在项目的「项目招聘负责人」名单中时，可编辑该项目下岗位的招聘人员 */
+function recruitingManagerCanEditJob(job: Job, profile: AdminLoginProfile | null, project?: Project | null): boolean {
+  if (!project?.id) return false;
+  const leads = project.recruitmentLeads;
+  if (!leads?.length) return false;
+  return namesListContainsIdentity(leads, profile);
+}
+
+/** 招聘经理：仅保留本人在「项目招聘负责人」名单中的项目 */
+function filterProjectsForRecruitingManagerScope(
+  projects: Project[],
+  profile: AdminLoginProfile | null
+): Project[] {
+  return projects.filter(
+    (p) =>
+      Boolean(p.id) &&
+      p.id !== 'EMPTY' &&
+      p.id !== 'UNASSIGNED' &&
+      namesListContainsIdentity(p.recruitmentLeads, profile)
+  );
+}
+
+/** 招聘专员：岗位「招聘人员」中含本人姓名或登录账号的岗位码（用于初面管理等与 job_code 对齐） */
+function recruiterAssignedJobCodesFromProjects(
+  projects: Project[],
+  profile: AdminLoginProfile | null
+): Set<string> {
+  const meKeys = recruiterIdentityKeys(profile);
+  const out = new Set<string>();
+  if (!meKeys.length) return out;
+  for (const p of projects) {
+    if (!p?.id || p.id === 'EMPTY') continue;
+    for (const job of p.jobs || []) {
+      if (recruitersContainMe(job.recruiters, meKeys)) {
+        const jc = String(job.id || '').trim();
+        if (jc) out.add(jc);
+      }
+    }
+  }
+  return out;
 }
 
 function useRecruiterScopedJobCodes(currentRole: Role, authProfile: AdminLoginProfile | null) {
@@ -2351,7 +2572,8 @@ function JobEditorModal({
   onClose,
   onNavigateResumeScreening,
   projectIdLocked,
-  hideRecruiterSection
+  recruiterFieldMode = 'none',
+  recruiterStaffOptions = []
 }: {
   jobForm: JobFormState | null;
   setJobForm: React.Dispatch<React.SetStateAction<JobFormState | null>>;
@@ -2366,10 +2588,14 @@ function JobEditorModal({
   onClose: () => void;
   onNavigateResumeScreening?: () => void;
   projectIdLocked?: string | null;
-  hideRecruiterSection?: boolean;
+  /** none：交付经理/管理员；single：招聘经理为每岗指定一名招聘人员；multi：保留多选（一般不用） */
+  recruiterFieldMode?: 'none' | 'single' | 'multi';
+  /** single 模式下可选的一线招聘人员列表（可跨部门） */
+  recruiterStaffOptions?: User[];
 }) {
   if (typeof document === 'undefined') return null;
   if (!jobForm) return null;
+  const rfMode = recruiterFieldMode ?? 'none';
   return createPortal(
     <AnimatePresence>
       <motion.div
@@ -2513,11 +2739,42 @@ function JobEditorModal({
                   />
                 </div>
               </div>
-              {!hideRecruiterSection ? (
+              {rfMode === 'single' ? (
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 mb-1.5">招聘人员（每岗仅一人）</label>
+                  <p className="text-[11px] text-slate-400 mb-2">
+                    由招聘经理指定一名一线招聘人员；列表包含各部门账号，与项目「招聘负责人」配置配合使用。
+                  </p>
+                  <select
+                    value={parseRecruitersInput(jobForm.recruiters)[0] || ''}
+                    onChange={(e) =>
+                      setJobForm((f) => (f ? { ...f, recruiters: e.target.value.trim() } : f))
+                    }
+                    disabled={jobForm.submitting}
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white"
+                  >
+                    <option value="">未指定</option>
+                    {(() => {
+                      const sel = parseRecruitersInput(jobForm.recruiters)[0] || '';
+                      const inStaff = recruiterStaffOptions.some((u) => u.name.trim() === sel);
+                      return sel && !inStaff ? (
+                        <option key="__orphan-recruiter" value={sel}>
+                          {sel}（当前）
+                        </option>
+                      ) : null;
+                    })()}
+                    {recruiterStaffOptions.map((u) => (
+                      <option key={u.username} value={u.name.trim()}>
+                        {u.name}（{u.username}）
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : rfMode === 'multi' ? (
                 <div>
                   <label className="block text-xs font-medium text-slate-500 mb-1.5">招聘负责人（可见招聘）</label>
                   <p className="text-[11px] text-slate-400 mb-2">
-                    先选部门，再选人员并添加；下方可继续用顿号或逗号手填补充。
+                    先选部门，再选人员并添加；可切换部门多次添加不同部门的负责人。下方可继续用顿号或逗号手填补充。
                   </p>
                   <div className="flex flex-wrap gap-1.5 mb-2 min-h-[1.75rem]">
                     {parseRecruitersInput(jobForm.recruiters).map((name, i) => (
@@ -2679,13 +2936,30 @@ function JobQueryView({
           setRows([]);
           return;
         }
-        setProjectOptions(data);
+        let scoped: Project[] = data;
+        if (currentRole === 'delivery_manager') {
+          const ud = String(authProfile?.dept || '').trim();
+          if (!ud || ud === '-') {
+            setProjectOptions([]);
+            setRows([]);
+            return;
+          }
+          if (!deliveryManagerHasJobQueryMenu(authProfile)) {
+            setProjectOptions([]);
+            setRows([]);
+            return;
+          }
+          scoped = filterProjectsForDeliveryManagerScope(data, ud);
+        } else if (currentRole === 'recruiting_manager') {
+          scoped = filterProjectsForRecruitingManagerScope(data, authProfile);
+        }
+        setProjectOptions(scoped);
         const out: JobAssignmentRow[] = [];
         const meKeys = recruiterIdentityKeys(authProfile);
-        for (const p of data) {
+        for (const p of scoped) {
           if (p.id === 'EMPTY') continue;
           const pname = p.id === 'UNASSIGNED' ? '未分配项目岗位' : p.name;
-          const pm = p.manager || '—';
+          const pm = projectRecruitingLeadDisplay(p);
           for (const job of p.jobs || []) {
             if (currentRole === 'recruiter') {
               if (!recruitersContainMe(job.recruiters, meKeys)) continue;
@@ -2709,7 +2983,13 @@ function JobQueryView({
         setProjectOptions([]);
         setRows([]);
       });
-  }, [authProfile?.name, authProfile?.username, currentRole]);
+  }, [
+    authProfile?.name,
+    authProfile?.username,
+    authProfile?.dept,
+    authProfile?.allowedMenuKeys,
+    currentRole
+  ]);
 
   useEffect(() => {
     loadData();
@@ -2729,13 +3009,25 @@ function JobQueryView({
       .catch(() => setJobFormUsers([]));
   }, []);
 
+  const recruiterStaffOptions = useMemo(
+    () => jobFormUsers.filter((u) => isFrontlineRecruiterStaffRole(u.role)),
+    [jobFormUsers]
+  );
+
   const selectableProjects = projectOptions.filter((p) => !['EMPTY', 'UNASSIGNED'].includes(p.id));
 
   const canDeleteInJobQuery = currentRole === 'admin' || currentRole === 'delivery_manager';
 
+  const projectForJobRow = (job: Job): Project | null => {
+    const pid = job.project_id;
+    if (!pid || pid === 'UNASSIGNED') return null;
+    return projectOptions.find((p) => p.id === pid) ?? null;
+  };
+
   const jobQueryCanEditRow = (job: Job) => {
     if (currentRole === 'recruiter') return false;
-    if (currentRole === 'recruiting_manager') return recruitingManagerCanEditJob(job, authProfile);
+    if (currentRole === 'recruiting_manager')
+      return recruitingManagerCanEditJob(job, authProfile, projectForJobRow(job));
     return true;
   };
 
@@ -2764,8 +3056,13 @@ function JobQueryView({
 
   const openEdit = (job: Job) => {
     if (currentRole === 'recruiter') return;
-    if (currentRole === 'recruiting_manager' && !recruitingManagerCanEditJob(job, authProfile)) {
-      window.alert('请先点击「认领」该岗位，再编辑并分配招聘负责人（招聘人员）。');
+    if (
+      currentRole === 'recruiting_manager' &&
+      !recruitingManagerCanEditJob(job, authProfile, projectForJobRow(job))
+    ) {
+      window.alert(
+        '仅可编辑「项目招聘负责人」中包含您本人姓名或登录账号的项目下的岗位；请在「项目管理」中由交付经理/管理员将您设为该项目的招聘负责人。'
+      );
       return;
     }
     const firstPid = selectableProjects[0]?.id ?? '';
@@ -2809,13 +3106,12 @@ function JobQueryView({
       return;
     }
     setJobForm((f) => (f ? { ...f, submitting: true, error: '' } : f));
-    const recruiters =
-      currentRole === 'delivery_manager' || currentRole === 'admin'
-        ? []
-        : parseRecruitersInput(jobForm.recruiters);
+    const recruitersParsed = parseRecruitersInput(jobForm.recruiters);
+    const recruitersRm = recruitersParsed.slice(0, 1);
     const demand = Math.max(1, Math.min(99999, Number(jobForm.demand) || 1));
     const projectId = pidTrim;
-    const payload = {
+    const isRm = currentRole === 'recruiting_manager';
+    const basePayload: Record<string, unknown> = {
       title,
       projectId,
       department: jobForm.department.trim() || null,
@@ -2824,18 +3120,16 @@ function JobQueryView({
       skills: jobForm.skills.trim() || null,
       level: jobForm.level.trim() || null,
       salary: jobForm.salary.trim() || null,
-      recruiters,
       jdText: jobForm.jdText.trim() || null
     };
     try {
       if (jobForm.mode === 'create') {
         const jc = jobForm.jobCode.trim();
-        const body: Record<string, unknown> = { ...payload };
+        const body: Record<string, unknown> = {
+          ...basePayload,
+          recruiters: isRm ? recruitersRm : []
+        };
         if (jc) body.jobCode = jc.toUpperCase();
-        if (currentRole === 'recruiting_manager' && authProfile) {
-          const n = String(authProfile.name || authProfile.username || '').trim();
-          if (n) body.claimedBy = n;
-        }
         const r = await fetch('/api/jobs', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2844,10 +3138,12 @@ function JobQueryView({
         const j = (await r.json().catch(() => ({}))) as { message?: string };
         if (!r.ok) throw new Error(j.message || `创建失败 ${r.status}`);
       } else {
+        const patchBody: Record<string, unknown> = { ...basePayload };
+        if (isRm) patchBody.recruiters = recruitersRm;
         const r = await fetch(`/api/jobs/${encodeURIComponent(jobForm.jobCode)}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+          body: JSON.stringify(patchBody)
         });
         const j = (await r.json().catch(() => ({}))) as { message?: string };
         if (!r.ok) throw new Error(j.message || `保存失败 ${r.status}`);
@@ -2879,26 +3175,6 @@ function JobQueryView({
     }
   };
 
-  const handleClaimJob = async (job: Job) => {
-    const label = String(authProfile?.name || authProfile?.username || '').trim();
-    if (!label) {
-      window.alert('无法识别当前用户姓名，请重新登录后再认领。');
-      return;
-    }
-    try {
-      const r = await fetch(`/api/jobs/${encodeURIComponent(job.id)}/claim`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ claimedBy: label })
-      });
-      const j = (await r.json().catch(() => ({}))) as { message?: string };
-      if (!r.ok) throw new Error(j.message || `认领失败 ${r.status}`);
-      loadData();
-    } catch (err) {
-      window.alert(err instanceof Error ? err.message : '认领失败');
-    }
-  };
-
   return (
     <div className="space-y-6">
       <div>
@@ -2911,11 +3187,28 @@ function JobQueryView({
           状态（非岗位独立状态）。
           {currentRole === 'recruiting_manager' ? (
             <span className="block mt-1.5 text-slate-500">
-              招聘经理请先「认领」岗位，再通过编辑将「招聘负责人」指定为具体招聘人员；交付经理创建的岗位不含负责人，由您在此认领并分配。
+              招聘经理仅展示与编辑：本人在「项目招聘负责人」名单中的项目下的岗位；每个岗位可指定一名一线「招聘人员」（单选）。未包含您的项目不会出现在此列表。
+            </span>
+          ) : null}
+          {currentRole === 'delivery_manager' ? (
+            <span className="block mt-1.5 text-slate-500">
+              交付经理仅展示与本人「所属部门」一致的项目下的岗位；项目招聘负责人在「项目管理」中维护。岗位上的招聘人员由招聘经理在此页为每岗指定一人。未归入项目的岗位不在此列表。
             </span>
           ) : null}
         </p>
       </div>
+
+      {currentRole === 'delivery_manager' &&
+      (!String(authProfile?.dept || '').trim() || String(authProfile?.dept || '').trim() === '-') ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50/90 text-amber-950 px-5 py-4 text-sm leading-relaxed max-w-3xl">
+          无法列出岗位：账号未设置「所属部门」。请管理员在「用户管理」中填写部门（须与项目部门一致），保存后重新登录。
+        </div>
+      ) : null}
+      {currentRole === 'delivery_manager' && !deliveryManagerHasJobQueryMenu(authProfile) ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50/90 text-amber-950 px-5 py-4 text-sm leading-relaxed max-w-3xl">
+          当前角色未勾选「岗位分配」菜单，无法在此查看本部门岗位；如需仅维护项目请使用「项目管理」，或在「角色管理」中勾选「岗位分配」。
+        </div>
+      ) : null}
 
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between gap-4">
@@ -2950,14 +3243,13 @@ function JobQueryView({
                 <th className="px-5 py-3 font-medium whitespace-nowrap">地点</th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">列表时间</th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">项目状态</th>
-                <th className="px-5 py-3 font-medium whitespace-nowrap min-w-[120px]">招聘经理认领</th>
                 <th className="px-5 py-3 font-medium text-right whitespace-nowrap">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {rows.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="px-5 py-12 text-center text-slate-500">
+                  <td colSpan={10} className="px-5 py-12 text-center text-slate-500">
                     暂无岗位数据，请点击右上角「+」添加
                   </td>
                 </tr>
@@ -3013,36 +3305,6 @@ function JobQueryView({
                           {ps}
                         </span>
                       </td>
-                      <td className="px-5 py-4 align-top">
-                        {currentRole === 'recruiting_manager' ? (
-                          job.claimedBy?.trim() ? (
-                            <div className="space-y-1">
-                              <p
-                                className={`text-sm font-medium ${
-                                  profileMatchesClaimedBy(job.claimedBy, authProfile)
-                                    ? 'text-emerald-800'
-                                    : 'text-slate-700'
-                                }`}
-                              >
-                                {job.claimedBy}
-                                {profileMatchesClaimedBy(job.claimedBy, authProfile) ? (
-                                  <span className="text-xs font-normal text-emerald-600 ml-1">（我）</span>
-                                ) : null}
-                              </p>
-                            </div>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => void handleClaimJob(job)}
-                              className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors"
-                            >
-                              认领
-                            </button>
-                          )
-                        ) : (
-                          <span className="text-slate-600 text-sm">{job.claimedBy?.trim() || '—'}</span>
-                        )}
-                      </td>
                       <td className="px-5 py-4 align-top text-right">
                         {currentRole !== 'recruiter' ? (
                           <div className="inline-flex items-center gap-1">
@@ -3091,7 +3353,8 @@ function JobQueryView({
         onSubmit={submitJobForm}
         onClose={() => setJobForm(null)}
         onNavigateResumeScreening={() => onNavigate('resume-screening')}
-        hideRecruiterSection={currentRole === 'delivery_manager' || currentRole === 'admin'}
+        recruiterFieldMode={currentRole === 'recruiting_manager' ? 'single' : 'none'}
+        recruiterStaffOptions={recruiterStaffOptions}
       />
     </div>
   );
@@ -3267,8 +3530,15 @@ function ResumeScreeningView({
   const apiBase = resolveMiniappApiBase();
   const hasToken = hasAdminApiCredentials();
   void sessRev;
-  const [inviteJobs, setInviteJobs] = useState<{ job_code: string; title: string; department: string }[]>([]);
+  const [inviteJobs, setInviteJobs] = useState<
+    { job_code: string; title: string; department: string; project_id?: string | null }[]
+  >([]);
   const [inviteJobsLoading, setInviteJobsLoading] = useState(false);
+  const [screeningProjects, setScreeningProjects] = useState<
+    { id: string; name: string; dept?: string; recruitmentLeads?: string[] }[]
+  >([]);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [resumeProjectFilter, setResumeProjectFilter] = useState('');
   const [creatingInvite, setCreatingInvite] = useState<string | null>(null);
   const [inviteBanner, setInviteBanner] = useState('');
   const [inviteModal, setInviteModal] = useState<
@@ -3285,7 +3555,53 @@ function ResumeScreeningView({
     authProfile
   );
   const isRecruiter = currentRole === 'recruiter';
+  const isDeliveryManager = currentRole === 'delivery_manager';
+  const isRecruitingManager = currentRole === 'recruiting_manager';
   const recruiterCodeSet = useMemo(() => new Set(recruiterJobCodes), [recruiterJobCodes]);
+
+  const projectFilterOptions = useMemo(() => {
+    let base = screeningProjects;
+    if (isRecruitingManager) {
+      base = base.filter((p) => p.id && namesListContainsIdentity(p.recruitmentLeads, authProfile));
+    }
+    if (isDeliveryManager) {
+      const ud = String(authProfile?.dept || '').trim();
+      if (!ud || ud === '-') return [];
+      base = base.filter((p) => p.id && deptNamesMatch(ud, String(p.dept || '')));
+    }
+    if (!isRecruiter) return base;
+    const pidSet = new Set(
+      inviteJobs.map((j) => String(j.project_id || '').trim()).filter(Boolean)
+    );
+    if (pidSet.size === 0) return base;
+    return base.filter((p) => pidSet.has(p.id));
+  }, [
+    authProfile,
+    isDeliveryManager,
+    isRecruiter,
+    isRecruitingManager,
+    inviteJobs,
+    screeningProjects
+  ]);
+
+  useEffect(() => {
+    setResumeProjectFilter((prev) => {
+      if (prev === '_null') return '';
+      if (!prev) return prev;
+      if (projectFilterOptions.some((p) => p.id === prev)) return prev;
+      return '';
+    });
+  }, [projectFilterOptions]);
+
+  /** 上传区「目标匹配岗位」：随上方项目筛选只展示该项目下的岗位 */
+  const jobsForUploadSelect = useMemo(() => {
+    const pid = resumeProjectFilter.trim();
+    if (!pid) return inviteJobs;
+    if (pid === '_null') {
+      return inviteJobs.filter((j) => !String(j.project_id ?? '').trim());
+    }
+    return inviteJobs.filter((j) => String(j.project_id ?? '').trim() === pid);
+  }, [inviteJobs, resumeProjectFilter]);
 
   const loadScreenings = useCallback(() => {
     if (!apiBase || !hasToken) {
@@ -3294,7 +3610,11 @@ function ResumeScreeningView({
       return;
     }
     setScreenListError('');
-    void miniappApiFetch('/api/admin/resume-screenings')
+    const screeningUrl =
+      resumeProjectFilter.trim().length > 0
+        ? `/api/admin/resume-screenings?projectId=${encodeURIComponent(resumeProjectFilter.trim())}`
+        : '/api/admin/resume-screenings';
+    void miniappApiFetch(screeningUrl)
       .then(async (r) => {
         const j = (await r.json()) as { data?: unknown[]; message?: string }
         if (!r.ok) throw new Error(j.message || 'load failed');
@@ -3318,19 +3638,74 @@ function ResumeScreeningView({
           created_at: string | Date
         }>
         const mapped = rows.map((row) => mapScreeningRow(row));
-        setResumes(
-          isRecruiter ? mapped.filter((x) => x.jobCode && recruiterCodeSet.has(String(x.jobCode))) : mapped
+        const allowDmJobs = new Set(
+          inviteJobs.map((j) => String(j.job_code || '').trim()).filter(Boolean)
         );
+        let list = mapped;
+        if (isRecruiter) {
+          list = mapped.filter((x) => x.jobCode && recruiterCodeSet.has(String(x.jobCode)));
+        } else if (isDeliveryManager) {
+          if (allowDmJobs.size === 0) list = [];
+          else list = mapped.filter((x) => x.jobCode && allowDmJobs.has(String(x.jobCode)));
+        } else if (isRecruitingManager) {
+          if (allowDmJobs.size === 0) list = [];
+          else list = mapped.filter((x) => x.jobCode && allowDmJobs.has(String(x.jobCode)));
+        }
+        setResumes(list);
       })
       .catch(() => {
         setResumes([]);
         setScreenListError('筛查记录暂时无法加载，请稍后重试或联系管理员检查系统是否已升级、网络是否正常。');
       });
-  }, [apiBase, hasToken, isRecruiter, recruiterCodeSet, sessRev]);
+  }, [
+    apiBase,
+    hasToken,
+    isRecruiter,
+    isDeliveryManager,
+    isRecruitingManager,
+    inviteJobs,
+    recruiterCodeSet,
+    sessRev,
+    resumeProjectFilter
+  ]);
 
   useEffect(() => {
     loadScreenings();
   }, [loadScreenings]);
+
+  useEffect(() => {
+    if (!apiBase || !hasToken) {
+      setScreeningProjects([]);
+      return;
+    }
+    setProjectsLoading(true);
+    void miniappApiFetch('/api/admin/projects')
+      .then(async (r) => {
+        const j = (await r.json()) as { data?: { id: string; name?: string }[]; message?: string };
+        if (!r.ok) throw new Error(j.message || 'load projects failed');
+        const list = (j.data || []).map((p) => {
+          const row = p as {
+            id?: unknown;
+            name?: unknown;
+            dept?: unknown;
+            recruitmentLeads?: unknown;
+          };
+          const lr = row.recruitmentLeads;
+          const recruitmentLeads = Array.isArray(lr)
+            ? lr.map((x) => String(x || '').trim()).filter(Boolean)
+            : [];
+          return {
+            id: String(row.id || ''),
+            name: String(row.name || row.id || '').trim() || String(row.id || ''),
+            dept: row.dept != null ? String(row.dept) : '',
+            recruitmentLeads
+          };
+        });
+        setScreeningProjects(list.filter((x) => x.id));
+      })
+      .catch(() => setScreeningProjects([]))
+      .finally(() => setProjectsLoading(false));
+  }, [apiBase, hasToken, sessRev]);
 
   useEffect(() => {
     if (!apiBase || !hasToken) {
@@ -3342,7 +3717,7 @@ function ResumeScreeningView({
     miniappApiFetch('/api/admin/jobs')
       .then(async (r) => {
         const j = (await r.json().catch(() => ({}))) as {
-          data?: { job_code: string; title: string; department: string }[];
+          data?: { job_code: string; title: string; department: string; project_id?: string | null }[];
           message?: string;
         };
         if (!r.ok) {
@@ -3356,7 +3731,52 @@ function ResumeScreeningView({
           throw new Error(hint);
         }
         const all = j.data || [];
-        const scoped = isRecruiter ? all.filter((x) => recruiterCodeSet.has(String(x.job_code))) : all;
+        let scoped = all;
+        if (isRecruiter) {
+          scoped = all.filter((x) => recruiterCodeSet.has(String(x.job_code)));
+        } else if (isRecruitingManager) {
+          const allowed = new Set(
+            screeningProjects
+              .filter((p) => p.id && namesListContainsIdentity(p.recruitmentLeads, authProfile))
+              .map((p) => p.id)
+          );
+          scoped =
+            allowed.size === 0
+              ? []
+              : all.filter((x) => allowed.has(String(x.project_id ?? '').trim()));
+        } else if (isDeliveryManager) {
+          const ud = String(authProfile?.dept || '').trim();
+          if (!ud || ud === '-') {
+            scoped = [];
+          } else {
+            let plist = screeningProjects;
+            if (plist.length === 0) {
+              try {
+                const pr = await miniappApiFetch('/api/admin/projects');
+                const pj = (await pr.json()) as {
+                  data?: { id?: unknown; name?: unknown; dept?: unknown }[];
+                  message?: string;
+                };
+                if (pr.ok && Array.isArray(pj.data)) {
+                  plist = pj.data.map((p) => ({
+                    id: String(p.id || ''),
+                    name: String(p.name || p.id || '').trim() || String(p.id || ''),
+                    dept: p.dept != null ? String(p.dept) : ''
+                  }));
+                  setScreeningProjects(plist.filter((x) => x.id));
+                } else {
+                  plist = [];
+                }
+              } catch {
+                plist = [];
+              }
+            }
+            const allowed = new Set(
+              plist.filter((p) => p.id && deptNamesMatch(ud, String(p.dept || ''))).map((p) => p.id)
+            );
+            scoped = all.filter((x) => allowed.has(String(x.project_id ?? '').trim()));
+          }
+        }
         setInviteJobs(scoped);
       })
       .catch((e) => {
@@ -3371,15 +3791,29 @@ function ResumeScreeningView({
         setInviteJobs([]);
       })
       .finally(() => setInviteJobsLoading(false));
-  }, [apiBase, hasToken, isRecruiter, recruiterCodeSet, sessRev]);
+  }, [
+    apiBase,
+    hasToken,
+    isRecruiter,
+    isDeliveryManager,
+    isRecruitingManager,
+    authProfile,
+    authProfile?.dept,
+    screeningProjects,
+    recruiterCodeSet,
+    sessRev
+  ]);
 
   useEffect(() => {
-    if (inviteJobs.length === 0) return;
+    if (jobsForUploadSelect.length === 0) {
+      setSelectedJobCode('');
+      return;
+    }
     setSelectedJobCode((prev) => {
-      if (prev && inviteJobs.some((j) => j.job_code === prev)) return prev;
-      return inviteJobs[0].job_code;
+      if (prev && jobsForUploadSelect.some((j) => j.job_code === prev)) return prev;
+      return jobsForUploadSelect[0].job_code;
     });
-  }, [inviteJobs]);
+  }, [jobsForUploadSelect]);
 
   const handleMiniappInvite = async (jobCode: string, screeningId?: string) => {
     setInviteModal(null);
@@ -3452,7 +3886,11 @@ function ResumeScreeningView({
   const runUpload = (file: File | null) => {
     if (!file || !apiBase || !hasToken) return;
     if (!selectedJobCode) {
-      setUploadHint('请先选择目标岗位。');
+      setUploadHint(
+        jobsForUploadSelect.length === 0 && resumeProjectFilter.trim()
+          ? '当前项目下没有可选岗位，请更换项目或为岗位绑定项目后再试。'
+          : '请先选择目标岗位。'
+      );
       return;
     }
     setUploadHint('');
@@ -3483,6 +3921,11 @@ function ResumeScreeningView({
           当前账号未分配可操作岗位，请联系管理员在岗位分配中添加您的岗位负责人配置。
         </div>
       ) : null}
+      {isRecruitingManager && !inviteJobsLoading && inviteJobs.length === 0 && hasToken ? (
+        <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">
+          当前账号未被设为任何项目的「项目招聘负责人」，因此没有可选项目与岗位。请交付经理或管理员在「项目管理」中将您加入对应项目的「项目招聘负责人」。
+        </div>
+      ) : null}
       <div className="space-y-6">
         {/* Upload Area */}
         <div>
@@ -3492,17 +3935,60 @@ function ResumeScreeningView({
               系统会从简历正文中自动识别候选人姓名与手机号（大模型 + 文本规则）；识别成功则写入筛查记录，识别不到则仅保存姓名推断结果，不强制填写。
             </p>
             <div className="mb-4">
+              <label className="block text-sm font-medium text-slate-700 mb-1">项目筛选</label>
+              <select
+                value={resumeProjectFilter}
+                onChange={(e) => setResumeProjectFilter(e.target.value)}
+                disabled={
+                  !apiBase ||
+                  !hasToken ||
+                  projectsLoading ||
+                  recruiterScopeLoading ||
+                  (isDeliveryManager &&
+                    (!String(authProfile?.dept || '').trim() || String(authProfile?.dept || '').trim() === '-'))
+                }
+                className="w-full border border-slate-200 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 outline-none text-sm text-slate-900 disabled:bg-slate-100"
+              >
+                <option value="">
+                  {isDeliveryManager ? '本部门全部项目' : isRecruitingManager ? '我的负责项目（全部）' : '全部项目'}
+                </option>
+                {projectFilterOptions.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
+                {isDeliveryManager ? (
+                  <>
+                    交付经理仅可选择与本人「所属部门」一致的项目；未选具体项目时，岗位与筛查记录也仅限本部门项目范围。
+                  </>
+                ) : isRecruitingManager ? (
+                  <>
+                    招聘经理仅可选择本人为「项目招聘负责人」的项目；未选具体项目时，岗位与下方 AI
+                    筛查结果也仅限这些项目下的岗位。
+                  </>
+                ) : (
+                  <>选择项目后，下方「目标匹配岗位」仅展示该项目下的岗位；下方筛查结果列表也会按同一项目过滤。</>
+                )}
+              </p>
+            </div>
+            <div className="mb-4">
               <label className="block text-sm font-medium text-slate-700 mb-1">目标匹配岗位</label>
               <select
                 value={selectedJobCode}
                 onChange={(e) => setSelectedJobCode(e.target.value)}
-                disabled={!inviteJobs.length || inviteJobsLoading || recruiterScopeLoading}
+                disabled={
+                  !jobsForUploadSelect.length || inviteJobsLoading || recruiterScopeLoading || !inviteJobs.length
+                }
                 className="w-full border border-slate-200 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 outline-none text-sm disabled:bg-slate-100"
               >
-                {inviteJobs.length === 0 ? (
+                {!inviteJobs.length ? (
                   <option value="">暂无可用岗位，请联系管理员在系统中维护岗位信息</option>
+                ) : jobsForUploadSelect.length === 0 ? (
+                  <option value="">当前项目下暂无岗位，请更换项目或绑定岗位到项目</option>
                 ) : (
-                  inviteJobs.map((j) => (
+                  jobsForUploadSelect.map((j) => (
                     <option key={j.job_code} value={j.job_code}>
                       {j.title} ({j.job_code})
                     </option>
@@ -3564,9 +4050,9 @@ function ResumeScreeningView({
         {/* Results Area */}
         <div>
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden h-full flex flex-col">
-            <div className="p-6 border-b border-slate-100 flex justify-between items-center">
+            <div className="p-6 border-b border-slate-100 flex flex-row items-center justify-between gap-3">
               <h3 className="font-bold text-slate-900">AI 筛查结果</h3>
-              <span className="text-sm text-slate-500">共解析 {resumes.length} 份简历</span>
+              <span className="text-sm text-slate-500 shrink-0">当前列表 {resumes.length} 条</span>
             </div>
             <div className="flex-1 overflow-auto p-6 space-y-4">
               {screenListError ? (
@@ -3579,7 +4065,9 @@ function ResumeScreeningView({
               ) : null}
               {apiBase && hasToken && resumes.length === 0 ? (
                 <p className="text-sm text-slate-500">
-                  暂无筛查记录。请从左侧上传简历；若长期无数据，请联系管理员确认系统是否正常。
+                  {resumeProjectFilter.trim()
+                    ? '当前项目筛选下暂无记录，可切换项目或从左侧上传简历；若确认应有数据，请检查岗位是否已绑定到该项目。'
+                    : '暂无筛查记录。请从左侧上传简历；若长期无数据，请联系管理员确认系统是否正常。'}
                 </p>
               ) : null}
               {resumes.map(resume => (
@@ -3807,11 +4295,8 @@ function ApplicationManagementView({
     stability: number
     /** 流程阶段：简历筛查完成 / 已发邀请 / 初面通过 … */
     status: string
-    /** AI 对简历的结论文案，与流程阶段分列展示 */
-    aiConclusion: string
     /** 面试进度说明（邀请/报告/会话等） */
     interviewSituation: string
-    summary: string
   }>>([])
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
@@ -3832,20 +4317,17 @@ function ApplicationManagementView({
     qa: Array<{ questionId?: string; question?: string; answer?: string }>
     updatedAt: string
   }>(null)
-  const { codes: recruiterJobCodes, loading: recruiterScopeLoading } = useRecruiterScopedJobCodes(
-    currentRole,
-    authProfile
-  )
-  const isRecruiter = currentRole === 'recruiter'
-  const recruiterCodeSet = useMemo(() => new Set(recruiterJobCodes), [recruiterJobCodes])
+  const isAdminRole = currentRole === 'admin'
+  const userDept = String(authProfile?.dept || '').trim()
+  const deptScoped = Boolean(userDept && userDept !== '-')
 
   const loadRows = useCallback(() => {
     setLoading(true)
     setErr('')
-    void miniappApiFetch('/api/admin/resume-screenings')
-      .then(async (r) => {
-        const j = (await r.json()) as { data?: unknown[]; message?: string }
-        if (!r.ok) throw new Error(j.message || `加载失败 ${r.status}`)
+    void Promise.all([miniappApiFetch('/api/admin/resume-screenings'), fetch('/api/projects')])
+      .then(async ([screeningRes, projectsRes]) => {
+        const j = (await screeningRes.json()) as { data?: unknown[]; message?: string }
+        if (!screeningRes.ok) throw new Error(j.message || `加载失败 ${screeningRes.status}`)
         const data = Array.isArray(j.data) ? j.data : []
         const mapped = data.map((x) => {
             const row = x as Record<string, unknown>
@@ -3868,7 +4350,7 @@ function ApplicationManagementView({
                 ? Math.max(0, Math.min(100, Number(ivRaw) || 0))
                 : null
             const hasInterviewReport = hasUpdated || ivParsed !== null
-            const { flowStage, aiConclusion } = deriveScreeningFlowLabels(row as Record<string, unknown>)
+            const { flowStage } = deriveScreeningFlowLabels(row as Record<string, unknown>)
             return {
               id: String(row.id ?? ''),
               candidateName: String(row.candidate_name ?? '候选人'),
@@ -3882,21 +4364,71 @@ function ApplicationManagementView({
               education: d.education,
               stability: d.stability,
               status: flowStage,
-              aiConclusion,
-              interviewSituation: deriveInterviewSituation(row as Record<string, unknown>, hasInterviewReport),
-              summary: String(row.report_summary ?? '')
+              interviewSituation: deriveInterviewSituation(row as Record<string, unknown>, hasInterviewReport)
             }
           })
-        setRows(
-          isRecruiter ? mapped.filter((x) => x.jobCode && recruiterCodeSet.has(String(x.jobCode))) : mapped
-        )
+        if (isAdminRole) {
+          setRows(mapped)
+          return
+        }
+        const projectsPayload = projectsRes.ok
+          ? ((await projectsRes.json().catch(() => [])) as unknown)
+          : []
+        const allProjects: Project[] = Array.isArray(projectsPayload) ? projectsPayload : []
+        if (currentRole === 'recruiting_manager') {
+          const leadProjects = filterProjectsForRecruitingManagerScope(allProjects, authProfile)
+          const leadJobCodes = new Set<string>()
+          for (const p of leadProjects) {
+            for (const job of p.jobs || []) {
+              const jc = String(job.id || '').trim()
+              if (jc) leadJobCodes.add(jc)
+            }
+          }
+          setRows(
+            mapped.filter((x) => {
+              const jc = String(x.jobCode || '').trim()
+              return Boolean(jc && leadJobCodes.has(jc))
+            })
+          )
+          return
+        }
+        if (currentRole === 'recruiter') {
+          const myJobCodes = recruiterAssignedJobCodesFromProjects(allProjects, authProfile)
+          setRows(
+            mapped.filter((x) => {
+              const jc = String(x.jobCode || '').trim()
+              return Boolean(jc && myJobCodes.has(jc))
+            })
+          )
+          return
+        }
+        if (currentRole !== 'delivery_manager') {
+          setRows([])
+          return
+        }
+        const scopedProjects =
+          deptScoped ? filterProjectsForDeliveryManagerScope(allProjects, userDept) : []
+        const deptJobCodes = new Set<string>()
+        for (const p of scopedProjects) {
+          for (const job of p.jobs || []) {
+            const jc = String(job.id || '').trim()
+            if (jc) deptJobCodes.add(jc)
+          }
+        }
+        const list = !deptScoped
+          ? []
+          : mapped.filter((x) => {
+              const jc = String(x.jobCode || '').trim()
+              return Boolean(jc && deptJobCodes.has(jc))
+            })
+        setRows(list)
       })
       .catch((e: unknown) => {
         setRows([])
         setErr(e instanceof Error ? e.message : '加载失败')
       })
       .finally(() => setLoading(false))
-  }, [isRecruiter, recruiterCodeSet])
+  }, [authProfile, currentRole, deptScoped, isAdminRole, userDept])
 
   useEffect(() => {
     loadRows()
@@ -3952,9 +4484,9 @@ function ApplicationManagementView({
 
   return (
     <div className="space-y-6">
-      {isRecruiter && !recruiterScopeLoading && recruiterJobCodes.length === 0 ? (
+      {!isAdminRole && !deptScoped ? (
         <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">
-          当前账号未分配可查看岗位，请联系管理员在岗位分配中添加您的岗位负责人配置。
+          无法按部门筛选初面数据：账号未设置「所属部门」。请管理员在「用户管理」中填写部门（须与项目上的部门名称一致），保存后重新登录。
         </div>
       ) : null}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
@@ -3963,8 +4495,9 @@ function ApplicationManagementView({
             <div>
               <h3 className="font-bold text-slate-900">初面管理</h3>
               <p className="text-xs text-slate-500 mt-1 max-w-3xl leading-relaxed">
-                一条记录对应一次简历筛查。<span className="font-medium text-slate-600">流程阶段</span>随漏斗推进：筛查完成 → 从筛查页「发起面试」后为已发邀请 → 候选人完成面试并生成报告后为初面结果。
-                面试报告按岗位码 + 姓名关联；综合分有报告时显示面试分，否则为简历匹配分。「AI 简历结论」列始终为筛查模型对简历的文案，与初面结果分列展示。
+                一条记录对应一次简历筛查。<span className="font-medium text-slate-600">平台管理员</span>始终查看全部筛查记录；<span className="font-medium text-slate-600">招聘经理</span>仅展示本人在「项目招聘负责人」中的项目下的岗位所对应的记录；<span className="font-medium text-slate-600">招聘专员</span>仅展示「岗位分配」中将自己设为该岗位「招聘人员」的岗位所对应的记录（姓名或登录账号须与本人一致）；<span className="font-medium text-slate-600">交付经理</span>按本人「所属部门」在项目中的岗位（岗位码）筛选。
+                <span className="font-medium text-slate-600">流程阶段</span>随漏斗推进：筛查完成 → 从筛查页「发起面试」后为已发邀请 → 候选人完成面试并生成报告后为初面结果。
+                面试报告按岗位码 + 姓名关联；综合分有报告时显示面试分，否则为简历匹配分。
                 「面试情况」根据邀请标记、报告与会话表汇总为可读说明（姓名不一致时可能无法关联报告）。
               </p>
             </div>
@@ -4033,7 +4566,6 @@ function ApplicationManagementView({
               <th className="px-6 py-4 font-medium">岗位</th>
               <th className="px-6 py-4 font-medium">综合分</th>
               <th className="px-6 py-4 font-medium">简历维度</th>
-              <th className="px-6 py-4 font-medium w-1/3">AI 简历结论</th>
               <th className="px-6 py-4 font-medium">流程阶段</th>
               <th className="px-6 py-4 font-medium min-w-[200px]">面试情况</th>
               <th className="px-6 py-4 font-medium text-right">操作</th>
@@ -4041,9 +4573,9 @@ function ApplicationManagementView({
           </thead>
           <tbody className="divide-y divide-slate-100">
             {loading ? (
-              <tr><td className="px-6 py-8 text-slate-500" colSpan={8}>加载中...</td></tr>
+              <tr><td className="px-6 py-8 text-slate-500" colSpan={7}>加载中...</td></tr>
             ) : filteredRows.length === 0 ? (
-              <tr><td className="px-6 py-8 text-slate-500" colSpan={8}>暂无数据，请先在简历筛查上传简历</td></tr>
+              <tr><td className="px-6 py-8 text-slate-500" colSpan={7}>暂无数据，请先在简历筛查上传简历</td></tr>
             ) : (
               filteredRows.map((row) => (
                   <tr key={row.id} className="hover:bg-slate-50 transition-colors">
@@ -4065,26 +4597,22 @@ function ApplicationManagementView({
                     <td className="px-6 py-4 text-xs text-slate-600 leading-relaxed">
                       技能 {row.skill} / 经验 {row.experience} / 学历 {row.education} / 稳定 {row.stability}
                     </td>
-                    <td className="px-6 py-4 text-slate-500 text-xs leading-relaxed">{row.summary || '—'}</td>
                     <td className="px-6 py-4">
-                      <div className="space-y-1">
-                        <span
-                          className={`inline-block px-2 py-1 rounded text-xs font-medium ${
-                            row.status === '初面通过'
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : row.status === '初面待提升'
-                                ? 'bg-rose-100 text-rose-800'
-                                : row.status === '初面已完成' || row.status === '面试报告已出具'
-                                  ? 'bg-violet-100 text-violet-800'
-                                  : row.status === '已发面试邀请'
-                                    ? 'bg-amber-100 text-amber-900'
-                                    : 'bg-sky-100 text-sky-800'
-                          }`}
-                        >
-                          {row.status}
-                        </span>
-                        <p className="text-[11px] text-slate-400 leading-snug">简历 AI：{row.aiConclusion}</p>
-                      </div>
+                      <span
+                        className={`inline-block px-2 py-1 rounded text-xs font-medium ${
+                          row.status === '初面通过'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : row.status === '初面待提升'
+                              ? 'bg-rose-100 text-rose-800'
+                              : row.status === '初面已完成' || row.status === '面试报告已出具'
+                                ? 'bg-violet-100 text-violet-800'
+                                : row.status === '已发面试邀请'
+                                  ? 'bg-amber-100 text-amber-900'
+                                  : 'bg-sky-100 text-sky-800'
+                        }`}
+                      >
+                        {row.status}
+                      </span>
                     </td>
                     <td className="px-6 py-4 text-xs text-slate-600 leading-relaxed max-w-xs">
                       {row.interviewSituation}
@@ -4702,7 +5230,13 @@ function SystemDeptView() {
   );
 }
 
-function SystemUserView() {
+function SystemUserView({
+  currentRole,
+  authProfile
+}: {
+  currentRole: Role;
+  authProfile: AdminLoginProfile | null;
+}) {
   const [users, setUsers] = useState<User[]>([]);
   const [deptNames, setDeptNames] = useState<string[]>([]);
   const [roleOptions, setRoleOptions] = useState<SysRole[]>([]);
@@ -4720,6 +5254,11 @@ function SystemUserView() {
   const [ufStatus, setUfStatus] = useState<'正常' | '停用'>('正常');
   const [ufPassword, setUfPassword] = useState('');
 
+  const myDept = String(authProfile?.dept || '').trim();
+  const myDeptOk = Boolean(myDept && myDept !== '-');
+  /** 平台管理员始终可查看与维护全部用户；其他角色仅本部门 */
+  const listAllUsers = currentRole === 'admin';
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -4729,11 +5268,20 @@ function SystemUserView() {
         adminFetchJson<Dept[]>('/api/depts'),
         adminFetchJson<Array<Record<string, unknown>>>('/api/roles')
       ]);
-      setUsers(userRows);
+      const ud = String(authProfile?.dept || '').trim();
+      const udOk = Boolean(ud && ud !== '-');
+      const showAll = currentRole === 'admin';
+      const scopedUsers = showAll
+        ? userRows
+        : udOk
+          ? userRows.filter((u) => deptNamesMatch(ud, String(u.dept || '')))
+          : [];
+      setUsers(scopedUsers);
       const names = [...new Set(deptRows.map((d) => String(d.name || '')).filter(Boolean))].sort((a, b) =>
         a.localeCompare(b, 'zh-CN')
       );
-      setDeptNames(names);
+      const formDeptNames = showAll ? names : udOk ? names.filter((n) => deptNamesMatch(ud, n)) : names;
+      setDeptNames(udOk && !showAll && formDeptNames.length === 0 && ud ? [ud] : formDeptNames);
       setRoleOptions(
         roleRows.map((r) => ({
           id: String(r.id ?? ''),
@@ -4750,17 +5298,21 @@ function SystemUserView() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [authProfile?.dept, currentRole]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (!listAllUsers) setDeptFilter('');
+  }, [listAllUsers]);
+
   const openUserCreate = () => {
     setUserDialog({ mode: 'create' });
     setUfName('');
     setUfUsername('');
-    setUfDept('');
+    setUfDept(listAllUsers ? '' : myDeptOk && deptNames.includes(myDept) ? myDept : deptNames[0] || '');
     setUfRole(roleOptions[0]?.name || '招聘人员');
     setUfStatus('正常');
     setUfPassword('');
@@ -4789,6 +5341,10 @@ function SystemUserView() {
     const role = ufRole.trim() || '招聘人员';
     if (!name || !username) {
       setError('请填写姓名与登录账号');
+      return;
+    }
+    if (!listAllUsers && myDeptOk && !deptNamesMatch(myDept, dept)) {
+      setError('仅能维护与本人「所属部门」一致的用户');
       return;
     }
     if (!ufDept.trim()) {
@@ -4892,6 +5448,19 @@ function SystemUserView() {
 
   return (
     <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold text-slate-900">用户管理</h1>
+        <p className="text-xs text-slate-500 mt-2 max-w-3xl leading-relaxed">
+          {listAllUsers
+            ? '平台管理员可查看与维护全部用户（与本人是否配置「所属部门」无关）。'
+            : '仅展示与当前登录账号「所属部门」一致的用户；其他部门人员不在此列表。新建用户时部门限定在本部门范围内。'}
+        </p>
+      </div>
+      {!listAllUsers && !myDeptOk ? (
+        <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">
+          无法按部门列出用户：账号未设置「所属部门」。请超级管理员在「用户管理」中为您填写部门（须与「部门管理」中名称一致），保存后重新登录。
+        </div>
+      ) : null}
       <div className="flex justify-between items-center flex-wrap gap-3">
         <div className="flex gap-4 flex-wrap">
           <div className="relative">
@@ -4904,23 +5473,26 @@ function SystemUserView() {
               className="pl-10 pr-4 py-2 border border-slate-200 rounded-lg w-64 max-w-full focus:ring-2 focus:ring-indigo-500 outline-none"
             />
           </div>
-          <select
-            value={deptFilter}
-            onChange={(e) => setDeptFilter(e.target.value)}
-            className="border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none text-slate-600 min-w-[10rem]"
-          >
-            <option value="">全部部门</option>
-            {deptNames.map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </select>
+          {listAllUsers ? (
+            <select
+              value={deptFilter}
+              onChange={(e) => setDeptFilter(e.target.value)}
+              className="border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none text-slate-600 min-w-[10rem]"
+            >
+              <option value="">全部部门</option>
+              {deptNames.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          ) : null}
         </div>
         <button
           type="button"
           onClick={openUserCreate}
-          className="bg-indigo-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-indigo-700 transition-colors shadow-sm"
+          disabled={!listAllUsers && !myDeptOk}
+          className="bg-indigo-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-indigo-700 transition-colors shadow-sm disabled:opacity-50 disabled:pointer-events-none"
         >
           <Plus className="w-4 h-4" /> 新增用户
         </button>
@@ -4939,7 +5511,15 @@ function SystemUserView() {
             <Loader2 className="w-5 h-5 animate-spin" /> 加载中…
           </div>
         ) : filtered.length === 0 ? (
-          <div className="py-16 text-center text-slate-500 text-sm">{q.trim() || deptFilter ? '无匹配用户' : '暂无用户数据'}</div>
+          <div className="py-16 text-center text-slate-500 text-sm">
+            {q.trim() || (listAllUsers && deptFilter)
+              ? '无匹配用户'
+              : listAllUsers
+                ? '暂无用户数据'
+                : myDeptOk
+                  ? '本部门暂无用户'
+                  : '暂无用户数据'}
+          </div>
         ) : (
           <table className="w-full text-left text-sm">
             <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
@@ -5079,7 +5659,7 @@ function SystemUserView() {
               if (v.startsWith('__other:')) setUfDept(v.slice('__other:'.length));
               else setUfDept(v);
             }}
-            disabled={saving}
+            disabled={saving || (!listAllUsers && myDeptOk && deptNames.length <= 1)}
           >
             <option value="">请选择部门</option>
             {deptNames.map((n) => (
@@ -5152,7 +5732,14 @@ function mapRoleMenuKeysFromRow(raw: unknown): string[] | null | undefined {
   if (raw === undefined) return undefined;
   if (raw == null || raw === '') return null;
   try {
-    const p = JSON.parse(String(raw)) as unknown;
+    let p: unknown;
+    if (Array.isArray(raw)) {
+      p = raw;
+    } else if (typeof raw === 'string') {
+      p = JSON.parse(raw) as unknown;
+    } else {
+      return null;
+    }
     if (!Array.isArray(p)) return null;
     return p.map((x) => String(x || '').trim()).filter(Boolean);
   } catch {

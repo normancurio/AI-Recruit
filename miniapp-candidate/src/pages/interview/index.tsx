@@ -635,7 +635,11 @@ export default function InterviewPage() {
         setInitError('')
         closeAnswerTranscriptDisplay()
         try {
-          const list = await fetchInterviewQuestions(j.id, p.name)
+          const list = await fetchInterviewQuestions(
+            j.id,
+            p.name,
+            typeof p.resumeScreeningId === 'number' ? p.resumeScreeningId : undefined
+          )
           const cleaned = list.filter((q) => q && String(q.text || '').trim())
           if (!cleaned.length) throw new Error('empty questions')
           flowLog('AI 题目生成', true, `${cleaned.length} 题`)

@@ -3,6 +3,7 @@ import Taro, { useDidShow } from '@tarojs/taro'
 import { Button, Input, Text, View } from '@tarojs/components'
 import { loginWithInviteCode } from '../../services/interviewApi'
 import { loginAndGetOpenId } from '../../services/authApi'
+import type { CandidateProfile } from '../../types/interview'
 import { flowLog, flowLogInfo } from '../../utils/flowLog'
 
 import './index.scss'
@@ -67,12 +68,16 @@ export default function LoginPage() {
           /* ignore */
         }
       }
-      Taro.setStorageSync('candidate_profile', {
+      const profile: CandidateProfile = {
         name: data.name,
         phone: phone.trim(),
         inviteCode: code,
         openid: data.openid
-      })
+      }
+      if (typeof data.resumeScreeningId === 'number' && data.resumeScreeningId > 0) {
+        profile.resumeScreeningId = data.resumeScreeningId
+      }
+      Taro.setStorageSync('candidate_profile', profile)
       Taro.setStorageSync('candidate_job', data.job)
       flowLog('登录 login-invite', true, `session=${data.sessionId} trtc=${data.trtc ? 'yes' : 'no'}`)
       Taro.navigateTo({ url: '/pages/lobby/index' })

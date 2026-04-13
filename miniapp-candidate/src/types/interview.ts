@@ -4,6 +4,8 @@ export interface CandidateProfile {
   phone?: string
   inviteCode: string
   openid?: string
+  /** HR 邀请绑定的 resume_screenings.id；有则服务端按该条取简历出题 */
+  resumeScreeningId?: number
 }
 
 export interface JobInfo {

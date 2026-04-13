@@ -96,6 +96,19 @@ async function bizProjectsHaveUiFields(pool: mysql.Pool): Promise<boolean> {
   return bizProjectsUiFields;
 }
 
+/** 业务库 projects.recruitment_leads（见 migration_projects_recruitment_leads.sql） */
+let bizProjectsRecruitmentLeads: boolean | null = null;
+async function bizProjectsHaveRecruitmentLeads(pool: mysql.Pool): Promise<boolean> {
+  if (bizProjectsRecruitmentLeads !== null) return bizProjectsRecruitmentLeads;
+  try {
+    await pool.query('SELECT recruitment_leads FROM projects LIMIT 1');
+    bizProjectsRecruitmentLeads = true;
+  } catch {
+    bizProjectsRecruitmentLeads = false;
+  }
+  return bizProjectsRecruitmentLeads;
+}
+
 /** 业务库 jobs 是否已执行 migration_add_jobs_claimed_by.sql */
 let jobsClaimedByCol: boolean | null = null;
 async function jobsHaveClaimedBy(pool: mysql.Pool): Promise<boolean> {
@@ -266,11 +279,18 @@ async function startServer() {
   app.get('/api/projects', async (_req, res) => {
     try {
       const hasUi = await bizProjectsHaveUiFields(bizPool);
+      const hasRl = await bizProjectsHaveRecruitmentLeads(bizPool);
       const projSql = hasUi
-        ? `SELECT id, name, client, dept, manager, status, project_code, start_date, end_date, description, member_count, created_at, updated_at
-           FROM projects ORDER BY updated_at DESC, id DESC`
-        : `SELECT id, name, client, dept, manager, status, created_at, updated_at
-           FROM projects ORDER BY updated_at DESC, id DESC`;
+        ? hasRl
+          ? `SELECT id, name, client, dept, manager, recruitment_leads, status, project_code, start_date, end_date, description, member_count, created_at, updated_at
+             FROM projects ORDER BY updated_at DESC, id DESC`
+          : `SELECT id, name, client, dept, manager, status, project_code, start_date, end_date, description, member_count, created_at, updated_at
+             FROM projects ORDER BY updated_at DESC, id DESC`
+        : hasRl
+          ? `SELECT id, name, client, dept, manager, recruitment_leads, status, created_at, updated_at
+             FROM projects ORDER BY updated_at DESC, id DESC`
+          : `SELECT id, name, client, dept, manager, status, created_at, updated_at
+             FROM projects ORDER BY updated_at DESC, id DESC`;
       const [projects] = await bizPool.query<any[]>(projSql);
       const hasClaim = await jobsHaveClaimedBy(bizPool);
       const jobsSql = hasClaim
@@ -317,6 +337,7 @@ async function startServer() {
           endDate: hasUi ? fmtSqlDate(p.end_date) : '',
           description: hasUi && p.description != null ? String(p.description) : '',
           memberCount,
+          ...(hasRl ? { recruitmentLeads: parseRecruiters(p.recruitment_leads) } : {}),
           jobs: jobMapped
         };
       });
@@ -420,24 +441,50 @@ async function startServer() {
           : null;
       const memberCount = Math.max(0, Math.min(9999, Number(body?.memberCount) || 0));
       const status = String(body?.status ?? '进行中').trim() || '进行中';
+      const hasRl = await bizProjectsHaveRecruitmentLeads(bizPool);
+      const leadsJson =
+        hasRl && body?.recruitmentLeads !== undefined
+          ? normalizeRecruitersForDb(body.recruitmentLeads)
+          : null;
       if (hasUi) {
-        await bizPool.query(
-          `INSERT INTO projects (id, name, client, dept, manager, status, project_code, start_date, end_date, description, member_count)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-          [
-            id,
-            name,
-            client,
-            dept,
-            manager,
-            status,
-            projectCode,
-            startDate,
-            endDate,
-            description,
-            memberCount
-          ]
-        );
+        if (hasRl && leadsJson !== null) {
+          await bizPool.query(
+            `INSERT INTO projects (id, name, client, dept, manager, recruitment_leads, status, project_code, start_date, end_date, description, member_count)
+             VALUES (?,?,?,?,?,CAST(? AS JSON),?,?,?,?,?,?)`,
+            [
+              id,
+              name,
+              client,
+              dept,
+              manager,
+              leadsJson,
+              status,
+              projectCode,
+              startDate,
+              endDate,
+              description,
+              memberCount
+            ]
+          );
+        } else {
+          await bizPool.query(
+            `INSERT INTO projects (id, name, client, dept, manager, status, project_code, start_date, end_date, description, member_count)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+            [
+              id,
+              name,
+              client,
+              dept,
+              manager,
+              status,
+              projectCode,
+              startDate,
+              endDate,
+              description,
+              memberCount
+            ]
+          );
+        }
       } else {
         await bizPool.query(
           `INSERT INTO projects (id, name, client, dept, manager, status) VALUES (?,?,?,?,?,?)`,
@@ -470,6 +517,7 @@ async function startServer() {
         return;
       }
       const hasUi = await bizProjectsHaveUiFields(bizPool);
+      const hasRl = await bizProjectsHaveRecruitmentLeads(bizPool);
       const patches: string[] = [];
       const vals: unknown[] = [];
       patches.push('name=?');
@@ -519,6 +567,10 @@ async function startServer() {
           patches.push('member_count=?');
           vals.push(Math.max(0, Math.min(9999, Number(body.memberCount) || 0)));
         }
+      }
+      if (hasRl && body?.recruitmentLeads !== undefined) {
+        patches.push('recruitment_leads=CAST(? AS JSON)');
+        vals.push(normalizeRecruitersForDb(body.recruitmentLeads));
       }
       vals.push(id);
       const [hdr] = await bizPool.query<ResultSetHeader>(
@@ -587,8 +639,7 @@ async function startServer() {
       const salary = String(body?.salary ?? '').trim() || null;
       const recruitersJson = normalizeRecruitersForDb(body?.recruiters);
       const hasClaim = await jobsHaveClaimedBy(bizPool);
-      const initialClaim =
-        hasClaim ? String(body?.claimedBy ?? body?.claimed_by ?? '').trim() || null : null;
+      const initialClaim = null;
       if (hasClaim && initialClaim) {
         await bizPool.query(
           `INSERT INTO jobs (project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters, claimed_by)
@@ -679,7 +730,8 @@ async function startServer() {
       const skills = String(body?.skills ?? '').trim();
       const level = String(body?.level ?? '').trim();
       const salary = String(body?.salary ?? '').trim();
-      const recruitersJson = normalizeRecruitersForDb(body?.recruiters);
+      const recruitersJson =
+        body?.recruiters !== undefined ? normalizeRecruitersForDb(body.recruiters) : undefined;
 
       const fields: string[] = [];
       const vals: unknown[] = [];
@@ -703,8 +755,10 @@ async function startServer() {
       vals.push(level || null);
       fields.push('salary=?');
       vals.push(salary || null);
-      fields.push('recruiters=CAST(? AS JSON)');
-      vals.push(recruitersJson);
+      if (recruitersJson !== undefined) {
+        fields.push('recruiters=CAST(? AS JSON)');
+        vals.push(recruitersJson);
+      }
       vals.push(jobCode);
 
       const [hdr] = await bizPool.query<ResultSetHeader>(

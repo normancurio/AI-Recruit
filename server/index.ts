@@ -166,6 +166,8 @@ type ResolvedInviteOrJob = {
   jobDbId: number
   /** 来自 interview_invitations 时存在，login-invite 需落库接受邀请 */
   invitationId?: number
+  /** HR 发邀时写入，与邀请码第三段筛查 id 一致 */
+  resumeScreeningId?: number | null
   interviewerUserId?: number | null
   interviewerOpenid?: string | null
 }
@@ -188,6 +190,7 @@ async function resolveInviteCode(inviteCode: string): Promise<ResolvedInviteOrJo
   }
   const [invRows] = await mysqlPool.query<any[]>(
     `SELECT inv.id AS invitationId,
+            inv.resume_screening_id AS resumeScreeningId,
             inv.interviewer_user_id AS interviewerUserId,
             inv.interviewer_openid AS interviewerOpenid,
             j.id AS jobDbId, j.job_code AS jobCode, j.title, j.department
@@ -201,12 +204,14 @@ async function resolveInviteCode(inviteCode: string): Promise<ResolvedInviteOrJo
   )
   if (invRows.length) {
     const r = invRows[0]
+    const rsid = r.resumeScreeningId
     return {
       jobCode: r.jobCode,
       title: r.title,
       department: r.department,
       jobDbId: Number(r.jobDbId),
       invitationId: Number(r.invitationId),
+      resumeScreeningId: rsid != null && Number(rsid) > 0 ? Number(rsid) : null,
       interviewerUserId: r.interviewerUserId ?? null,
       interviewerOpenid: r.interviewerOpenid ?? null
     }
@@ -288,17 +293,41 @@ const RESUME_PLAINTEXT_MAX_SAVE = 60000
 
 const PERSONALIZED_INTERVIEW_TOTAL = 6
 
+function packResumeScreeningRow(row: { resume_plaintext?: string | null; report_summary?: string | null }): string {
+  const full = String(row.resume_plaintext || '').trim()
+  if (full.length >= 120) return full.slice(0, 56000)
+  const sum = String(row.report_summary || '').trim()
+  const merged = [full, sum ? `【AI 简历摘要】${sum}` : ''].filter(Boolean).join('\n\n')
+  return merged.trim().slice(0, 56000)
+}
+
+/** 按筛查主键取简历，且校验 job_code 与当前岗位一致（防止跨岗篡改 id） */
+async function fetchResumeTextByScreeningId(
+  jobCodeUpper: string,
+  screeningId: number
+): Promise<{ text: string; candidateName: string } | null> {
+  if (!Number.isFinite(screeningId) || screeningId <= 0) return null
+  const jc = String(jobCodeUpper || '').trim().toUpperCase()
+  try {
+    const [rows] = await mysqlPool.query<any[]>(
+      `SELECT resume_plaintext, report_summary, job_code, TRIM(candidate_name) AS candidate_name
+       FROM resume_screenings WHERE id=? LIMIT 1`,
+      [Math.floor(screeningId)]
+    )
+    if (!rows.length) return null
+    const r = rows[0]
+    if (String(r.job_code || '').trim().toUpperCase() !== jc) return null
+    const text = packResumeScreeningRow(r)
+    return { text, candidateName: String(r.candidate_name || '').trim() }
+  } catch {
+    return null
+  }
+}
+
 async function fetchResumeTextForCandidate(jobCode: string, candidateNameRaw: string): Promise<string> {
   const name = String(candidateNameRaw || '').trim()
   if (!name) return ''
   const code = String(jobCode || '').trim().toUpperCase()
-  const pack = (row: { resume_plaintext?: string | null; report_summary?: string | null }) => {
-    const full = String(row.resume_plaintext || '').trim()
-    if (full.length >= 120) return full.slice(0, 56000)
-    const sum = String(row.report_summary || '').trim()
-    const merged = [full, sum ? `【AI 简历摘要】${sum}` : ''].filter(Boolean).join('\n\n')
-    return merged.trim().slice(0, 56000)
-  }
   try {
     const [rows] = await mysqlPool.query<any[]>(
       `SELECT resume_plaintext, report_summary FROM resume_screenings
@@ -306,7 +335,7 @@ async function fetchResumeTextForCandidate(jobCode: string, candidateNameRaw: st
        ORDER BY id DESC LIMIT 1`,
       [code, name, `%${name}%`]
     )
-    if (rows.length) return pack(rows[0])
+    if (rows.length) return packResumeScreeningRow(rows[0])
   } catch {
     /* 表无 resume_plaintext 列等 */
   }
@@ -1342,12 +1371,58 @@ app.get('/api/admin/auth-status', async (_req, res) => {
 function mapAdminDbRoleToUiRole(dbRole: string): 'admin' | 'delivery_manager' | 'recruiter' | 'recruiting_manager' {
   const r = String(dbRole || '').trim()
   if (!r) return 'delivery_manager'
+  const rl = r.toLowerCase()
+  if (rl === 'admin' || rl === 'superadmin' || rl === 'super_admin') return 'admin'
+  if (rl === 'delivery_manager') return 'delivery_manager'
+  if (rl === 'recruiting_manager') return 'recruiting_manager'
+  if (rl === 'recruiter') return 'recruiter'
   if (/平台管理员|系统管理|超级管理/i.test(r)) return 'admin'
   if (/交付/i.test(r)) return 'delivery_manager'
   if (/招聘经理|招募经理/i.test(r)) return 'recruiting_manager'
   if (/招聘/i.test(r)) return 'recruiter'
   if (/管理/i.test(r)) return 'admin'
   return 'delivery_manager'
+}
+
+/** roles.menu_keys：mysql2 可能返回 string / Buffer / 已解析的数组（JSON 列时） */
+function parseRoleMenuKeysColumn(raw: unknown): string[] | undefined {
+  if (raw == null || raw === '') return undefined
+  let parsed: unknown
+  if (Array.isArray(raw)) {
+    parsed = raw
+  } else if (Buffer.isBuffer(raw)) {
+    const s = raw.toString('utf8').trim()
+    if (!s) return undefined
+    try {
+      parsed = JSON.parse(s)
+    } catch {
+      return undefined
+    }
+  } else if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      return undefined
+    }
+  } else {
+    return undefined
+  }
+  if (!Array.isArray(parsed)) return undefined
+  return parsed.map((x) => String(x || '').trim()).filter(Boolean)
+}
+
+function parseRecruitmentLeadsColumn(raw: unknown): string[] {
+  if (raw == null || raw === '') return []
+  if (Array.isArray(raw)) return raw.map((x) => String(x || '').trim()).filter(Boolean)
+  if (typeof raw === 'string') {
+    try {
+      const p = JSON.parse(raw) as unknown
+      return Array.isArray(p) ? p.map((x) => String(x || '').trim()).filter(Boolean) : []
+    } catch {
+      return []
+    }
+  }
+  return []
 }
 
 /** 与 users.role 按「角色名称」匹配 roles 行，读取 menu_keys（JSON 菜单 id 数组）；无列或空则 undefined */
@@ -1360,10 +1435,8 @@ async function loadAllowedMenuKeysForDbRole(roleName: string): Promise<string[] 
       [name]
     )
     const raw = rrows[0]?.menu_keys
-    if (raw == null || raw === '') return undefined
-    const parsed = JSON.parse(String(raw)) as unknown
-    if (!Array.isArray(parsed)) return undefined
-    return parsed.map((x) => String(x || '').trim()).filter(Boolean)
+    const keys = parseRoleMenuKeysColumn(raw)
+    return keys
   } catch {
     return undefined
   }
@@ -1385,13 +1458,14 @@ app.post('/api/admin/login', async (req, res) => {
 
   try {
     const [rows] = await mysqlAdminPool.query<RowDataPacket[]>(
-      'SELECT id, username, name, role, password_hash, status FROM users WHERE username = ? LIMIT 1',
+      'SELECT id, username, name, dept, role, password_hash, status FROM users WHERE username = ? LIMIT 1',
       [username]
     )
     const row = rows[0] as {
       id?: string
       username?: string | null
       name?: string | null
+      dept?: string | null
       role?: string | null
       password_hash?: string | null
       status?: string | null
@@ -1409,10 +1483,13 @@ app.post('/api/admin/login', async (req, res) => {
       const displayName = String(row.name || un).trim() || un
       const uiRole = mapAdminDbRoleToUiRole(String(row.role || ''))
       const allowedMenuKeys = await loadAllowedMenuKeysForDbRole(String(row.role || ''))
+      const dept = String(row.dept ?? '').trim()
       const userPayload = {
         name: displayName,
         username: un,
         uiRole,
+        /** 始终下发，便于前端判断「未设置」与旧缓存；空串表示库中无部门 */
+        dept,
         ...(allowedMenuKeys !== undefined ? { allowedMenuKeys } : {})
       }
       const redisTok = await createAdminRedisSession(uid || un, un)
@@ -1638,6 +1715,34 @@ app.get('/api/admin/jobs', async (req, res) => {
   }
 })
 
+/** HR 后台：项目列表（简历筛查按项目筛选、岗位归属展示用） */
+app.get('/api/admin/projects', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  try {
+    const [rows] = await mysqlPool.query<any[]>(
+      `SELECT id, name, project_code, client, dept, status, recruitment_leads FROM projects ORDER BY updated_at DESC, id DESC LIMIT 500`
+    )
+    res.json({
+      data: (rows || []).map((r) => ({
+        id: String(r.id ?? ''),
+        name: String(r.name ?? ''),
+        projectCode: r.project_code != null ? String(r.project_code) : null,
+        client: r.client != null ? String(r.client) : null,
+        dept: r.dept != null ? String(r.dept) : null,
+        status: r.status != null ? String(r.status) : '',
+        recruitmentLeads: parseRecruitmentLeadsColumn(r.recruitment_leads)
+      }))
+    })
+  } catch (e: unknown) {
+    const code = (e as { code?: string })?.code
+    if (code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({ message: 'projects 表未创建' })
+    }
+    console.error('[GET /api/admin/projects]', e)
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
 app.post('/api/admin/jobs', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const title = String(req.body?.title || '').trim()
@@ -1773,7 +1878,25 @@ app.patch('/api/admin/jobs/:jobCode', async (req, res) => {
   }
 })
 
-function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: boolean): string {
+/** 按项目筛筛查记录：与 jobs.job_code + jobs.project_id 关联；`_null` 表示仅岗位未绑定项目 */
+function resumeScreeningsJobFilterJoinSql(projectId: string | null): { fragment: string; params: unknown[] } {
+  if (!projectId) return { fragment: '', params: [] }
+  if (projectId === '_null') {
+    return {
+      fragment: ` INNER JOIN jobs j ON j.job_code = s.job_code AND (j.project_id IS NULL OR TRIM(j.project_id) = '') `,
+      params: []
+    }
+  }
+  return {
+    fragment: ` INNER JOIN jobs j ON j.job_code = s.job_code AND j.project_id = ? `,
+    params: [projectId]
+  }
+}
+
+function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: boolean, projectId: string | null): {
+  sql: string
+  params: unknown[]
+} {
   const ps = withPipelineStage ? 's.pipeline_stage, ' : ''
   const sessCols = withSessionJoin
     ? `sess.status AS interview_session_status,
@@ -1787,8 +1910,9 @@ function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: bo
          ON CONVERT(sess.session_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
             CONVERT(lr.session_id USING utf8mb4) COLLATE utf8mb4_unicode_ci`
     : ''
+  const { fragment: jobJoin, params: jobParams } = resumeScreeningsJobFilterJoinSql(projectId)
   // 标量子查询取最新报告；CONVERT+COLLATE 避免表间 utf8mb4_unicode_ci / utf8mb4_0900_ai_ci 混用报错
-  return `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
+  const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
               s.status, ${ps}s.report_summary, s.file_name, s.created_at,
               lr.overall_score AS interview_overall_score,
@@ -1797,6 +1921,7 @@ function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: bo
               lr.session_id AS interview_report_session_id,
               ${sessCols}
        FROM resume_screenings s
+       ${jobJoin}
        LEFT JOIN interview_reports lr ON lr.id = (
          SELECT ir.id
          FROM interview_reports ir
@@ -1810,16 +1935,20 @@ function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: bo
        ${sessJoin}
        ORDER BY s.id DESC
        LIMIT 200`
+  return { sql, params: jobParams }
 }
 
-function resumeScreeningsPlainSql(withPipelineStage: boolean): string {
+function resumeScreeningsPlainSql(withPipelineStage: boolean, projectId: string | null): { sql: string; params: unknown[] } {
   const ps = withPipelineStage ? 'pipeline_stage, ' : ''
-  return `SELECT id, job_code, candidate_name, candidate_phone, matched_job_title, match_score,
-              skill_score, experience_score, education_score, stability_score,
-              status, ${ps}report_summary, file_name, created_at
-       FROM resume_screenings
-       ORDER BY id DESC
+  const { fragment: jobJoin, params: jobParams } = resumeScreeningsJobFilterJoinSql(projectId)
+  const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
+              s.skill_score, s.experience_score, s.education_score, s.stability_score,
+              s.status, ${ps}s.report_summary, s.file_name, s.created_at
+       FROM resume_screenings s
+       ${jobJoin}
+       ORDER BY s.id DESC
        LIMIT 200`
+  return { sql, params: jobParams }
 }
 
 function isMissingPipelineStageColumn(e: unknown): boolean {
@@ -1839,13 +1968,14 @@ function isCollationMismatch(e: unknown): boolean {
   return err.code === 'ER_CANT_AGGREGATE_2COLLATIONS' || err.errno === 1267
 }
 
-async function queryResumeScreeningsJoinedRows(): Promise<any[]> {
+async function queryResumeScreeningsJoinedRows(projectId: string | null): Promise<any[]> {
   let usePipeline = true
   let useSession = true
   let lastErr: unknown
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
-      const [rows] = await mysqlPool.query<any[]>(resumeScreeningsJoinSql(usePipeline, useSession))
+      const { sql, params } = resumeScreeningsJoinSql(usePipeline, useSession, projectId)
+      const [rows] = await mysqlPool.query<any[]>(sql, params)
       let out = rows || []
       if (!usePipeline) out = out.map((r) => ({ ...r, pipeline_stage: r.pipeline_stage ?? 'resume_done' }))
       return out
@@ -1871,8 +2001,10 @@ async function queryResumeScreeningsJoinedRows(): Promise<any[]> {
 
 app.get('/api/admin/resume-screenings', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
+  const rawPid = String(req.query.projectId ?? req.query.project_id ?? '').trim()
+  const projectId = rawPid.length ? rawPid : null
   try {
-    const rows = await queryResumeScreeningsJoinedRows()
+    const rows = await queryResumeScreeningsJoinedRows(projectId)
     res.json({ data: rows })
   } catch (e: unknown) {
     const code = (e as { code?: string })?.code
@@ -1880,10 +2012,12 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
       try {
         let rows: any[]
         try {
-          ;[rows] = await mysqlPool.query<any[]>(resumeScreeningsPlainSql(true))
+          const q1 = resumeScreeningsPlainSql(true, projectId)
+          ;[rows] = await mysqlPool.query<any[]>(q1.sql, q1.params)
         } catch (e2: unknown) {
           if (isMissingPipelineStageColumn(e2)) {
-            ;[rows] = await mysqlPool.query<any[]>(resumeScreeningsPlainSql(false))
+            const q0 = resumeScreeningsPlainSql(false, projectId)
+            ;[rows] = await mysqlPool.query<any[]>(q0.sql, q0.params)
             rows = (rows || []).map((r) => ({ ...r, pipeline_stage: 'resume_done' }))
           } else {
             throw e2
@@ -2353,11 +2487,12 @@ app.post('/api/admin/invitations', async (req, res) => {
         screeningIdForPipeline,
         collisionSuffix
       )
+      const screeningDbVal = screeningIdForPipeline > 0 ? screeningIdForPipeline : null
       const tryInsert = async (interviewer: string | number | null) => {
         await mysqlPool.query(
-          `INSERT INTO interview_invitations (invite_code, job_id, interviewer_user_id, status, expires_at)
-           VALUES (?, ?, ?, 'pending', DATE_ADD(NOW(), INTERVAL ? DAY))`,
-          [inviteCode, jobId, interviewer, days]
+          `INSERT INTO interview_invitations (invite_code, job_id, interviewer_user_id, resume_screening_id, status, expires_at)
+           VALUES (?, ?, ?, ?, 'pending', DATE_ADD(NOW(), INTERVAL ? DAY))`,
+          [inviteCode, jobId, interviewer, screeningDbVal, days]
         )
       }
       try {
@@ -2559,14 +2694,17 @@ app.post('/api/candidate/invitations/accept', async (req, res) => {
     await conn.beginTransaction()
     const [invRows] = await conn.query<any[]>(
       `SELECT inv.id AS id,
+              inv.resume_screening_id AS resumeScreeningId,
               inv.interviewer_user_id AS interviewerUserId,
               inv.interviewer_openid AS interviewerOpenId,
               j.id AS jobDbId,
               j.job_code AS jobCode,
               j.title AS title,
-              j.department AS department
+              j.department AS department,
+              TRIM(rs.candidate_name) AS screeningCandidateName
        FROM interview_invitations inv
        JOIN jobs j ON j.id = inv.job_id
+       LEFT JOIN resume_screenings rs ON rs.id = inv.resume_screening_id
        WHERE inv.invite_code = ?
          AND inv.status='pending'
          AND (inv.expires_at IS NULL OR inv.expires_at > NOW())
@@ -2621,10 +2759,16 @@ app.post('/api/candidate/invitations/accept', async (req, res) => {
     }
 
     await conn.commit()
+    const rsid = inv.resumeScreeningId
+    const resumeScreeningId =
+      rsid != null && Number(rsid) > 0 ? Math.floor(Number(rsid)) : undefined
+    const screeningName = String(inv.screeningCandidateName || '').trim()
     res.json({
       data: {
         sessionId,
-        job: { id: inv.jobCode, title: inv.title, department: inv.department }
+        job: { id: inv.jobCode, title: inv.title, department: inv.department },
+        ...(resumeScreeningId != null ? { resumeScreeningId } : {}),
+        ...(screeningName ? { candidateName: screeningName } : {})
       }
     })
   } catch {
@@ -2677,6 +2821,7 @@ app.post('/api/candidate/login-invite', async (req, res) => {
 
     let sessionId = `${resolved.jobCode}-${openid}`
     const job = { id: resolved.jobCode, title: resolved.title, department: resolved.department }
+    let resumeScreeningId: number | null = null
 
     if (resolved.invitationId) {
       const inviteIdUpper = inviteCodeRaw.trim().toUpperCase()
@@ -2685,6 +2830,7 @@ app.post('/api/candidate/login-invite', async (req, res) => {
         await conn.beginTransaction()
         const [invRows] = await conn.query<any[]>(
           `SELECT inv.id AS id,
+                  inv.resume_screening_id AS resumeScreeningId,
                   inv.interviewer_user_id AS interviewerUserId,
                   inv.interviewer_openid AS interviewerOpenId,
                   j.id AS jobDbId,
@@ -2711,6 +2857,9 @@ app.post('/api/candidate/login-invite', async (req, res) => {
         }
 
         const inv = invRows[0]
+        const rsidRow = inv.resumeScreeningId
+        resumeScreeningId =
+          rsidRow != null && Number(rsidRow) > 0 ? Math.floor(Number(rsidRow)) : null
         const [updHeader] = await conn.query<ResultSetHeader>(
           `UPDATE interview_invitations
            SET status='accepted',
@@ -2767,8 +2916,8 @@ app.post('/api/candidate/login-invite', async (req, res) => {
       trtc = { sdkAppId, userId, userSig, roomId }
     }
     flowLog('login-invite TRTC', Boolean(trtc), trtc ? `room=${trtc.roomId}` : '未配置或密钥为空')
-    flowLog('login-invite 完成', true, `sessionId=${sessionId}`)
-    res.json({ data: { openid, sessionId, name, job, trtc } })
+    flowLog('login-invite 完成', true, `sessionId=${sessionId} resumeScreeningId=${resumeScreeningId ?? '—'}`)
+    res.json({ data: { openid, sessionId, name, job, trtc, resumeScreeningId } })
   } catch (e) {
     const err = e as Error & { wechat?: unknown }
     flowLog('login-invite 异常', false, err.message)
@@ -2785,12 +2934,13 @@ app.post('/api/candidate/login-invite', async (req, res) => {
 app.get('/api/candidate/interview-questions', async (req, res) => {
   const jobId = String(req.query.jobId || '').trim().toUpperCase()
   const candidateName = String(req.query.candidateName || req.query.name || '').trim()
+  const resumeScreeningIdRaw = String(req.query.resumeScreeningId || req.query.screeningId || '').trim()
   if (!jobId) return res.status(400).json({ message: 'jobId required' })
   try {
     flowLog(
       'interview-questions 开始',
       true,
-      `jobId=${jobId} candidate=${candidateName ? candidateName.slice(0, 8) : '(none)'}`
+      `jobId=${jobId} candidate=${candidateName ? candidateName.slice(0, 8) : '(none)'} screening=${resumeScreeningIdRaw || '—'}`
     )
     const [rows] = await mysqlPool.query<any[]>(
       'SELECT title, department, jd_text FROM jobs WHERE job_code=? LIMIT 1',
@@ -2802,15 +2952,34 @@ app.get('/api/candidate/interview-questions', async (req, res) => {
     const title = String(row?.title || fallbackJob?.title || jobId)
     const department = String(row?.department || fallbackJob?.department || '')
     const jdText = String(row?.jd_text || '')
-    const resumeText = candidateName ? await fetchResumeTextForCandidate(jobId, candidateName) : ''
+
+    let resumeText = ''
+    let effectiveCandidateName = candidateName || '候选人'
+    let resumeBoundByScreeningId = false
+    if (resumeScreeningIdRaw && /^\d+$/.test(resumeScreeningIdRaw)) {
+      const bound = await fetchResumeTextByScreeningId(jobId, Number(resumeScreeningIdRaw))
+      if (bound) {
+        resumeText = bound.text
+        if (bound.candidateName) effectiveCandidateName = bound.candidateName
+        resumeBoundByScreeningId = true
+      }
+    }
+    if (!resumeText && candidateName) {
+      resumeText = await fetchResumeTextForCandidate(jobId, candidateName)
+    }
+
     const aiQuestions = await generatePersonalizedInterviewSix({
       title,
       department,
       jdText,
       resumeText,
-      candidateName: candidateName || '候选人'
+      candidateName: effectiveCandidateName || '候选人'
     })
-    flowLog('interview-questions 成功', true, `count=${aiQuestions.length} resume=${resumeText ? 'yes' : 'no'}`)
+    flowLog(
+      'interview-questions 成功',
+      true,
+      `count=${aiQuestions.length} resume=${resumeText ? 'yes' : 'no'} resumeBind=${resumeBoundByScreeningId}`
+    )
     res.json({ data: aiQuestions })
   } catch (e) {
     const http = (e as InterviewQuestionsHttpError).httpStatus

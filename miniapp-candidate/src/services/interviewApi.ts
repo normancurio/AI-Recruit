@@ -31,6 +31,8 @@ export type LoginInviteResult = {
   name: string
   job: JobInfo
   trtc: TrtcCredential | null
+  /** 结构化面试邀请关联的筛查记录，用于出题精确匹配简历 */
+  resumeScreeningId?: number | null
 }
 
 /** wx.login 的 code + 邀请码 + 姓名：换 openid、校验邀请码，并返回 TRTC 凭证（服务端已配 TRTC 时） */
@@ -90,7 +92,8 @@ export async function validateInviteCode(code: string): Promise<JobInfo> {
 
 export async function fetchInterviewQuestions(
   jobId: string,
-  candidateName?: string
+  candidateName?: string,
+  resumeScreeningId?: number
 ): Promise<InterviewQuestion[]> {
   if (useMock()) {
     throw new Error(
@@ -101,7 +104,11 @@ export async function fetchInterviewQuestions(
   const res = await Taro.request<{ data: InterviewQuestion[]; message?: string }>({
     url: `${getApiBase()}/api/candidate/interview-questions`,
     method: 'GET',
-    data: { jobId, candidateName: candidateName?.trim() || '' }
+    data: {
+      jobId,
+      candidateName: candidateName?.trim() || '',
+      ...(typeof resumeScreeningId === 'number' && resumeScreeningId > 0 ? { resumeScreeningId } : {})
+    }
   })
 
   if (res.statusCode >= 400 || !Array.isArray(res.data?.data)) {
