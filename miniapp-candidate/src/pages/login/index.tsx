@@ -33,11 +33,14 @@ export default function LoginPage() {
 
   const handleNext = async () => {
     const code = inviteCode.trim().toUpperCase()
-    const isJobCode = /^J\d{3,}$/.test(code)
-    const isInviteCode = /^INV[\w-]{8,}$/.test(code)
-    const codeOk = isJobCode || isInviteCode
-    if (!codeOk) {
-      Taro.showToast({ title: '邀请码格式不正确（岗位码 J001 或后台 INV-…）', icon: 'none' })
+    // 后台结构化邀请码为「岗位码-发起人账号-筛查记录 id」（见 server buildStructuredInviteCode），
+    // 另支持仅岗位码、历史 INV 前缀等；具体有效性由 /api/candidate/login-invite 校验。
+    if (code.length < 4 || code.length > 128) {
+      Taro.showToast({ title: '邀请码长度应在 4～128 个字符', icon: 'none' })
+      return
+    }
+    if (!/^[A-Z0-9_.@-]+$/.test(code)) {
+      Taro.showToast({ title: '邀请码仅支持字母、数字与 - _ . @', icon: 'none' })
       return
     }
     try {
@@ -117,7 +120,7 @@ export default function LoginPage() {
           <Input
             className='input'
             value={inviteCode}
-            placeholder='例如 J001'
+            placeholder='例如 J001 或 J001-账号-编号'
             onInput={(e) => setInviteCode(e.detail.value)}
           />
         </View>

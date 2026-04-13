@@ -3107,6 +3107,23 @@ function deriveResumeDimsFromOverall(score: number) {
   }
 }
 
+/** 面试报告 dimensionScores 中英文字段 → 初面管理弹窗展示用中文 */
+function interviewReportDimensionLabelCn(key: string): string {
+  const k = String(key || '').trim()
+  const map: Record<string, string> = {
+    communication: '沟通表达',
+    technicalDepth: '技术深度',
+    technical: '技术深度',
+    logic: '逻辑思维',
+    jobFit: '岗位匹配',
+    stability: '稳定性与抗压',
+    skill: '技能匹配',
+    experience: '岗位经验',
+    education: '学历与资质'
+  }
+  return map[k] || k
+}
+
 /** 流程：AI 筛查 → 发面试邀请 → 候选人答题/面试 → 面试报告；与 pipeline_stage、interview_reports 关联展示 */
 function deriveScreeningFlowLabels(row: Record<string, unknown>): { flowStage: string; aiConclusion: string } {
   const aiConclusion = String(row.status ?? '').trim() || '—'
@@ -4148,7 +4165,7 @@ function ApplicationManagementView({
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                   {Object.entries(reportModal.dimensionScores || {}).map(([k, v]) => (
                     <div key={k} className="rounded-lg border border-slate-200 px-3 py-2 text-sm bg-white">
-                      <div className="text-slate-500">{k}</div>
+                      <div className="text-slate-500">{interviewReportDimensionLabelCn(k)}</div>
                       <div className="font-semibold text-slate-900">{Number(v) || 0}</div>
                     </div>
                   ))}

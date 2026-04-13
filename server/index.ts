@@ -427,6 +427,15 @@ type InterviewReportPayload = {
   qa: Array<{ questionId: string; question: string; answer: string }>
 }
 
+/** 无会话 id 时仍写入 interview_reports 并推进 screening.pipeline_stage（占位 session_id ≤128） */
+function ensureInterviewReportSessionId(jobId: string, sessionId: string): string {
+  const trimmed = String(sessionId || '').trim()
+  if (trimmed) return trimmed.slice(0, 128)
+  const jc = String(jobId || '').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '') || 'JOB'
+  const rand = crypto.randomBytes(6).toString('hex').toUpperCase()
+  return `SUBMIT-${jc}-${rand}`.slice(0, 128)
+}
+
 async function markResumeScreeningPipelineReportDone(jobCode: string, candidateName: string) {
   const jc = String(jobCode || '').trim()
   const cn = String(candidateName || '').trim()
@@ -737,8 +746,9 @@ function fallbackInterviewScore(profile: { name?: string }, answers: Array<{ ans
         : `${profile?.name || '候选人'}基础表达与技术细节仍需加强，建议补充项目深度和底层理解。`,
     dimensionScores: {
       communication: Math.max(0, Math.min(100, score - 3)),
-      technical: Math.max(0, Math.min(100, score - 1)),
+      technicalDepth: Math.max(0, Math.min(100, score - 1)),
       logic: Math.max(0, Math.min(100, score + 1)),
+      jobFit: Math.max(0, Math.min(100, score)),
       stability: Math.max(0, Math.min(100, score - 2))
     },
     suggestions: ['补充关键技术细节与可量化结果', '回答先给结论，再展开过程与权衡'],
@@ -3251,29 +3261,28 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
   const answers = Array.isArray(req.body?.answers) ? (req.body.answers as Array<{ questionId?: string; question?: string; answer?: string }>) : []
 
   const fallback = fallbackInterviewScore(profile, answers)
+  const reportSessionId = ensureInterviewReportSessionId(jobId, sessionId)
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
   if (!apiKey) {
     flowLog('submit-interview', true, '未配置 DASHSCOPE，使用回退评分')
-    if (sessionId) {
-      await upsertInterviewReport({
-        sessionId,
-        jobCode: jobId,
-        candidateName: String(profile.name || '候选人'),
-        candidateOpenId: String(profile.openid || ''),
-        score: fallback.score,
-        passed: fallback.passed,
-        overallFeedback: fallback.overallFeedback,
-        dimensionScores: fallback.dimensionScores || {},
-        suggestions: fallback.suggestions || [],
-        riskPoints: fallback.riskPoints || [],
-        behaviorSignals: {},
-        qa: answers.map((x) => ({
-          questionId: String(x.questionId || ''),
-          question: String(x.question || ''),
-          answer: String(x.answer || '')
-        }))
-      })
-    }
+    await upsertInterviewReport({
+      sessionId: reportSessionId,
+      jobCode: jobId,
+      candidateName: String(profile.name || '候选人'),
+      candidateOpenId: String(profile.openid || ''),
+      score: fallback.score,
+      passed: fallback.passed,
+      overallFeedback: fallback.overallFeedback,
+      dimensionScores: fallback.dimensionScores || {},
+      suggestions: fallback.suggestions || [],
+      riskPoints: fallback.riskPoints || [],
+      behaviorSignals: {},
+      qa: answers.map((x) => ({
+        questionId: String(x.questionId || ''),
+        question: String(x.question || ''),
+        answer: String(x.answer || '')
+      }))
+    })
     return res.json({ data: fallback })
   }
 
@@ -3374,22 +3383,20 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
     if (!parsed) {
       flowLog('submit-interview AI解析', false, '模型返回非预期 JSON，使用回退评分')
       const out = { ...fallback, meta: { behaviorSignals, aiParsed: false } }
-      if (sessionId) {
-        await upsertInterviewReport({
-          sessionId,
-          jobCode: jobId,
-          candidateName: String(profile.name || '候选人'),
-          candidateOpenId: String(profile.openid || ''),
-          score: out.score,
-          passed: out.passed,
-          overallFeedback: out.overallFeedback,
-          dimensionScores: out.dimensionScores || {},
-          suggestions: out.suggestions || [],
-          riskPoints: out.riskPoints || [],
-          behaviorSignals,
-          qa: mergedQa
-        })
-      }
+      await upsertInterviewReport({
+        sessionId: reportSessionId,
+        jobCode: jobId,
+        candidateName: String(profile.name || '候选人'),
+        candidateOpenId: String(profile.openid || ''),
+        score: out.score,
+        passed: out.passed,
+        overallFeedback: out.overallFeedback,
+        dimensionScores: out.dimensionScores || {},
+        suggestions: out.suggestions || [],
+        riskPoints: out.riskPoints || [],
+        behaviorSignals,
+        qa: mergedQa
+      })
       return res.json({ data: out })
     }
     flowLog('submit-interview AI评分', true, `score=${parsed.score} passed=${parsed.passed}`)
@@ -3402,25 +3409,45 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
         }
       }
     }
-    if (sessionId) {
-      await upsertInterviewReport({
-        sessionId,
-        jobCode: jobId,
-        candidateName: String(profile.name || '候选人'),
-        candidateOpenId: String(profile.openid || ''),
-        score: parsed.score,
-        passed: parsed.passed,
-        overallFeedback: parsed.overallFeedback,
-        dimensionScores: parsed.dimensionScores || {},
-        suggestions: parsed.suggestions || [],
-        riskPoints: parsed.riskPoints || [],
-        behaviorSignals,
-        qa: mergedQa
-      })
-    }
+    await upsertInterviewReport({
+      sessionId: reportSessionId,
+      jobCode: jobId,
+      candidateName: String(profile.name || '候选人'),
+      candidateOpenId: String(profile.openid || ''),
+      score: parsed.score,
+      passed: parsed.passed,
+      overallFeedback: parsed.overallFeedback,
+      dimensionScores: parsed.dimensionScores || {},
+      suggestions: parsed.suggestions || [],
+      riskPoints: parsed.riskPoints || [],
+      behaviorSignals,
+      qa: mergedQa
+    })
     return res.json(out)
   } catch (e) {
     flowLog('submit-interview 异常', false, e instanceof Error ? e.message : 'unknown')
+    try {
+      await upsertInterviewReport({
+        sessionId: reportSessionId,
+        jobCode: jobId,
+        candidateName: String(profile.name || '候选人'),
+        candidateOpenId: String(profile.openid || ''),
+        score: fallback.score,
+        passed: fallback.passed,
+        overallFeedback: fallback.overallFeedback,
+        dimensionScores: fallback.dimensionScores || {},
+        suggestions: fallback.suggestions || [],
+        riskPoints: fallback.riskPoints || [],
+        behaviorSignals: {},
+        qa: answers.map((x) => ({
+          questionId: String(x.questionId || ''),
+          question: String(x.question || ''),
+          answer: String(x.answer || '')
+        }))
+      })
+    } catch (persistErr) {
+      flowLog('submit-interview 异常后落库失败', false, persistErr instanceof Error ? persistErr.message : 'unknown')
+    }
     return res.json({ data: fallback })
   }
 })
