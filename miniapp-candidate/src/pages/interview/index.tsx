@@ -9,7 +9,7 @@ import { getApiBase } from '../../config/apiBase'
 import { AI_INTERVIEWER_IMG_URL } from '../../config/aiInterviewerImgUrl'
 import {
   bindSessionMember,
-  fetchInterviewQuestions,
+  fetchInterviewQuestionsOrPrefetched,
   fetchTrtcCredential,
   startLiveSession,
   submitInterview,
@@ -328,7 +328,12 @@ export default function InterviewPage() {
       }
     }
 
-    const openRecognition = (sidInner: string) => {
+    /**
+     * WechatSI 单次 start 最长 duration（默认 60s）到点会 onStop。
+     * 同题续录时必须 preserveAccumulated，否则门控里清空 finalized 会导致「答到一分钟字全没了」。
+     */
+    const openRecognition = (sidInner: string, opts?: { preserveAccumulated?: boolean }) => {
+      const preserveAccumulated = Boolean(opts?.preserveAccumulated)
       const normalizeText = (v: string) => String(v || '').replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').toLowerCase()
       const shouldDropQuestionEcho = (raw: string) => {
         const t = normalizeText(raw)
@@ -349,6 +354,7 @@ export default function InterviewPage() {
         cancelTranscriptRemoteDebounce()
         setTranscriptFinalized((prev) => {
           const next = [...prev, t]
+          transcriptFinalizedRef.current = next
           const full = next.join('')
           latestLiveTranscriptSyncRef.current = full
           pushTranscriptRemoteNow(sidInner, full)
@@ -362,10 +368,14 @@ export default function InterviewPage() {
         const plugin = requirePluginFn('WechatSI')
         const manager = plugin.getRecordRecognitionManager()
         recordManagerRef.current = manager
-        closeAnswerTranscriptDisplay()
-        if (answerPhaseGateTimerRef.current) {
-          clearTimeout(answerPhaseGateTimerRef.current)
-          answerPhaseGateTimerRef.current = null
+        if (preserveAccumulated) {
+          if (answerPhaseGateTimerRef.current) {
+            clearTimeout(answerPhaseGateTimerRef.current)
+            answerPhaseGateTimerRef.current = null
+          }
+          answerTranscriptOpenRef.current = false
+        } else {
+          closeAnswerTranscriptDisplay()
         }
         flowLogInfo('WechatSI', 'recordRecognitionManager 已创建，开始录音')
         manager.onRecognize = (res: { result?: string }) => {
@@ -445,23 +455,22 @@ export default function InterviewPage() {
             setTranscriptStreaming('')
           }
           setTranscribing(false)
+          /** 含最后一题：单次录音最长 60s，到点必须续开一段，否则长答会断且无法继续转写 */
           const canAutoRestart =
             visibleRef.current &&
             !loadingRef.current &&
             !suppressAutoRestartRef.current &&
-            questionCountRef.current > 0 &&
-            questionIndexRef.current < questionCountRef.current - 1
+            questionCountRef.current > 0
           if (canAutoRestart) {
             setTimeout(() => {
               if (
                 visibleRef.current &&
                 !loadingRef.current &&
                 !transcribingRef.current &&
-                questionCountRef.current > 0 &&
-                questionIndexRef.current < questionCountRef.current - 1
+                questionCountRef.current > 0
               ) {
-                flowLogInfo('WechatSI', 'onStop 后自动重启')
-                openRecognition(sidInner)
+                flowLogInfo('WechatSI', 'onStop 后同题续录（保留已转写）')
+                openRecognition(sidInner, { preserveAccumulated: true })
               }
             }, 220)
           }
@@ -497,9 +506,13 @@ export default function InterviewPage() {
         answerPhaseGateTimerRef.current = setTimeout(() => {
           answerPhaseGateTimerRef.current = null
           cancelTranscriptRemoteDebounce()
-          setTranscriptFinalized([])
+          if (!preserveAccumulated) {
+            setTranscriptFinalized([])
+            latestLiveTranscriptSyncRef.current = ''
+          } else {
+            latestLiveTranscriptSyncRef.current = transcriptFinalizedRef.current.join('')
+          }
           setTranscriptStreaming('')
-          latestLiveTranscriptSyncRef.current = ''
           answerTranscriptOpenRef.current = true
           setShowAnswerTranscript(true)
         }, gateDelayMs)
@@ -635,7 +648,8 @@ export default function InterviewPage() {
         setInitError('')
         closeAnswerTranscriptDisplay()
         try {
-          const list = await fetchInterviewQuestions(
+          setCallStatusLine('正在准备题目…')
+          const list = await fetchInterviewQuestionsOrPrefetched(
             j.id,
             p.name,
             typeof p.resumeScreeningId === 'number' ? p.resumeScreeningId : undefined
@@ -645,6 +659,7 @@ export default function InterviewPage() {
           flowLog('AI 题目生成', true, `${cleaned.length} 题`)
           flowLogInfo('AI 首题', cleaned[0]?.text?.slice(0, 40) || '')
           setQuestions(cleaned)
+          transcriptFinalizedRef.current = []
           setTranscriptFinalized([])
           setTranscriptStreaming('')
           setSessionId(sid)
@@ -683,9 +698,6 @@ export default function InterviewPage() {
           void startWechatSiTranscribe(sid, true)
         }
       }
-
-      flowLogInfo('面试页', '尝试 TRTC 进房')
-      void tryEnterTrtc(sid, userKey)
     })()
   })
 
@@ -708,6 +720,7 @@ export default function InterviewPage() {
     const nextAnswers = [...answers, currentQa]
     setAnswers(nextAnswers)
     await syncLiveQa({ sessionId, ...currentQa })
+    transcriptFinalizedRef.current = []
     setTranscriptFinalized([])
     setTranscriptStreaming('')
 

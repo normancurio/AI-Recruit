@@ -117,6 +117,105 @@ export async function fetchInterviewQuestions(
   return res.data.data
 }
 
+const QUESTIONS_PREFETCH_STORAGE_KEY = 'interview_questions_prefetch_v1'
+
+function cacheKeyForInterviewQuestions(jobId: string, candidateName: string, resumeScreeningId?: number) {
+  const jid = String(jobId || '').trim().toUpperCase()
+  const name = String(candidateName || '').trim()
+  const rs =
+    typeof resumeScreeningId === 'number' && Number.isFinite(resumeScreeningId) && resumeScreeningId > 0
+      ? String(resumeScreeningId)
+      : ''
+  return `${jid}\t${name}\t${rs}`
+}
+
+const inflightQuestionsByKey = new Map<string, Promise<InterviewQuestion[]>>()
+/** 预取成功但 Storage 写入失败时仍可供面试页消费，避免再次打大模型 */
+const resolvedQuestionsMemory = new Map<string, InterviewQuestion[]>()
+
+/**
+ * 等候页可调用：在候选人阅读说明时后台请求大模型出题，缩短进入答题页的等待。
+ * 与 fetchInterviewQuestionsOrPrefetched 共享同一 in-flight Promise，避免重复请求。
+ */
+export function prefetchInterviewQuestions(
+  jobId: string,
+  candidateName?: string,
+  resumeScreeningId?: number
+): void {
+  if (useMock()) return
+  const key = cacheKeyForInterviewQuestions(jobId, String(candidateName || ''), resumeScreeningId)
+  if (inflightQuestionsByKey.has(key)) return
+
+  const p = fetchInterviewQuestions(jobId, candidateName, resumeScreeningId).then((questions) => {
+    resolvedQuestionsMemory.set(key, questions)
+    try {
+      Taro.setStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY, {
+        cacheKey: key,
+        questions,
+        at: Date.now()
+      })
+    } catch {
+      /* 存储配额等；仍保留内存供面试页读取 */
+    }
+    return questions
+  })
+
+  inflightQuestionsByKey.set(key, p)
+  p.catch(() => {
+    /* 预取失败时用户仍可在面试页重新拉题 */
+  }).finally(() => {
+    inflightQuestionsByKey.delete(key)
+  })
+}
+
+/** 优先使用等候页预取 / 进行中的预取，再回落到实时请求 */
+export async function fetchInterviewQuestionsOrPrefetched(
+  jobId: string,
+  candidateName?: string,
+  resumeScreeningId?: number
+): Promise<InterviewQuestion[]> {
+  if (useMock()) {
+    return fetchInterviewQuestions(jobId, candidateName, resumeScreeningId)
+  }
+  const key = cacheKeyForInterviewQuestions(jobId, String(candidateName || ''), resumeScreeningId)
+
+  try {
+    const raw = Taro.getStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY) as
+      | { cacheKey?: string; questions?: InterviewQuestion[] }
+      | undefined
+    if (raw?.cacheKey === key && Array.isArray(raw.questions) && raw.questions.length) {
+      Taro.removeStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY)
+      resolvedQuestionsMemory.delete(key)
+      return raw.questions
+    }
+  } catch {
+    /* ignore */
+  }
+
+  const memHit = resolvedQuestionsMemory.get(key)
+  if (memHit?.length) {
+    resolvedQuestionsMemory.delete(key)
+    try {
+      Taro.removeStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY)
+    } catch {
+      /* ignore */
+    }
+    return memHit
+  }
+
+  const inflight = inflightQuestionsByKey.get(key)
+  if (inflight) {
+    try {
+      const got = await inflight
+      if (Array.isArray(got) && got.length) return got
+    } catch {
+      /* 预取请求失败，回落到下方实时请求 */
+    }
+  }
+
+  return fetchInterviewQuestions(jobId, candidateName, resumeScreeningId)
+}
+
 export async function submitInterview(
   profile: CandidateProfile,
   jobId: string,

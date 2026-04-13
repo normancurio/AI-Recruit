@@ -2,6 +2,7 @@ import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
 import { Button, Text, View } from '@tarojs/components'
 import { CandidateProfile, JobInfo } from '../../types/interview'
+import { prefetchInterviewQuestions } from '../../services/interviewApi'
 import { flowLogInfo } from '../../utils/flowLog'
 
 import './index.scss'
@@ -43,7 +44,7 @@ export default function LobbyPage() {
           <Text>2. 请在安静环境、网络稳定下进行，并允许相机与麦克风权限</Text>
           <Text>3. 面试为 AI 对话：需开启摄像头（本机预览），语音将转写为文字用于作答与评估</Text>
           <Text>
-            4. 题目在进入答题页时由服务端大模型根据 JD 与简历实时生成
+            4. 题目由服务端大模型根据 JD 与简历生成；在本页停留时已后台准备，进入答题页后通常更快出现
           </Text>
         </View>
 
