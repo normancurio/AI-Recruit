@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS depts (
   id VARCHAR(64) PRIMARY KEY,
   parent_id VARCHAR(64) NULL,
   name VARCHAR(128),
+  dept_type VARCHAR(32) NOT NULL DEFAULT '' COMMENT '交付/招聘/其他等，招聘类可选入项目招聘负责人部门',
   level INT,
   manager VARCHAR(64),
   count INT,
@@ -151,13 +152,15 @@ ON DUPLICATE KEY UPDATE
   aiEval = VALUES(aiEval),
   status = VALUES(status);
 
-INSERT INTO depts (id, name, level, manager, count) VALUES
-  ('D1', '集团总部', 0, '张总', 120),
-  ('D2', '华北交付中心', 1, '李总', 45),
-  ('D3', '研发一部', 2, '王经理', 20),
-  ('D4', '华南交付中心', 1, '赵总', 38)
+INSERT INTO depts (id, parent_id, name, dept_type, level, manager, count) VALUES
+  ('D1', NULL, '集团总部', '其他', 0, '张总', 120),
+  ('D2', 'D1', '华北交付中心', '交付', 1, '李总', 45),
+  ('D3', 'D2', '研发一部', '招聘', 2, '王经理', 20),
+  ('D4', 'D1', '华南交付中心', '交付', 1, '赵总', 38)
 ON DUPLICATE KEY UPDATE
+  parent_id = VALUES(parent_id),
   name = VALUES(name),
+  dept_type = VALUES(dept_type),
   level = VALUES(level),
   manager = VALUES(manager),
   count = VALUES(count);

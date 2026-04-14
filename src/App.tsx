@@ -15,9 +15,9 @@ import {
   Building2, Briefcase, Users, FileText, UserCheck, 
   Settings, Network, UserCog, Shield, Menu as MenuIcon,
   Search, Plus, UploadCloud, BrainCircuit, ChevronDown,
-  ChevronRight, MoreHorizontal, CheckCircle2, XCircle,
+  ChevronRight, ChevronLeft, MoreHorizontal, CheckCircle2, XCircle,
   LogOut, Bell, LayoutDashboard, FolderOpen, Bot,
-  Clock, Info, Calendar, Pencil, Trash2, Loader2, KeyRound
+  Clock, Calendar, Pencil, Trash2, Loader2, KeyRound, Sparkles, UserRound, Lock
 } from 'lucide-react';
 
 /**
@@ -148,6 +148,20 @@ function collectNavIds(nav: NavItem[]): string[] {
   return out
 }
 
+/** 登录后统一：主按钮靛蓝实心，次要按钮白底描边深字 */
+const btnPrimaryLg =
+  'inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:pointer-events-none disabled:opacity-55'
+const btnPrimaryMd =
+  'rounded-lg bg-indigo-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:opacity-60'
+const btnPrimaryIcon =
+  'inline-flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-600 text-white shadow-sm transition hover:bg-indigo-500 disabled:opacity-50'
+const btnSecondarySm =
+  'rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 shadow-sm transition hover:bg-slate-50 hover:border-slate-400 disabled:opacity-50'
+const btnSaveSm =
+  'rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:opacity-50'
+const btnPrimarySmFlex =
+  'inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:pointer-events-none disabled:opacity-50'
+
 const NAV_TEMPLATE: NavItem[] = [
   /** 二期：可恢复顶层「工作台」菜单（id: workbench → WorkbenchView） */
   {
@@ -258,6 +272,8 @@ export interface Application { id: string; name: string; job: string; resumeScor
 export interface Dept {
   id: string;
   name: string;
+  /** 业务类型：交付 / 招聘 / 其他；「招聘」可出现在项目招聘负责人选部门中 */
+  deptType?: string;
   level: number;
   manager: string;
   count: number;
@@ -287,6 +303,42 @@ function deptNamesMatch(userDept: string, deptName: string): boolean {
   const b = normalizeDeptForMatch(deptName);
   if (!a || !b || a === '-' || b === '-') return false;
   return a === b;
+}
+
+/** 从若干根部门 id 向下收集自身及所有子部门 id（依据 parentId） */
+function collectDescendantDeptIds(depts: Dept[], rootIds: string[]): Set<string> {
+  const byParent = new Map<string, Dept[]>();
+  for (const d of depts) {
+    const pid = d.parentId || '';
+    if (!byParent.has(pid)) byParent.set(pid, []);
+    byParent.get(pid)!.push(d);
+  }
+  const out = new Set<string>();
+  const stack = [...rootIds];
+  while (stack.length) {
+    const id = stack.pop()!;
+    if (!id || out.has(id)) continue;
+    out.add(id);
+    for (const c of byParent.get(id) || []) stack.push(c.id);
+  }
+  return out;
+}
+
+/**
+ * 创建/编辑项目等场景：非管理员仅展示账号所属部门及其下级部门（与 depts 树一致）。
+ * 若组织树中无与账号部门名匹配的记录，则退化为单条账号部门名，避免无法提交。
+ */
+function deliveryManagerDeptSubtree(depts: Dept[], userDept: string): Dept[] {
+  const ud = String(userDept || '').trim();
+  if (!ud || ud === '-') return [];
+  const roots = depts.filter((d) => deptNamesMatch(ud, d.name));
+  if (!roots.length) {
+    return [{ id: '__account_dept__', name: ud, deptType: '', level: 0, manager: '-', count: 0, parentId: null }];
+  }
+  const allowed = collectDescendantDeptIds(depts, roots.map((r) => r.id));
+  return flattenDeptTree(depts)
+    .map(({ dept }) => dept)
+    .filter((d) => allowed.has(d.id));
 }
 
 /** 自定义菜单白名单下是否包含「岗位分配」；无白名单时视为拥有默认菜单（含岗位分配） */
@@ -356,6 +408,21 @@ export interface SysRole {
   /** null/undefined：不单独限制，侧边栏按职级默认；[] 或非空数组：与职级求交 */
   menuKeys?: string[] | null;
 }
+
+/** 非管理员在「用户管理」弹窗中可选的角色名（与 roles.name 一致） */
+function roleNameAllowedInUserDialogForCreator(creatorRole: Role, roleName: string): boolean {
+  if (creatorRole === 'admin') return true;
+  const n = String(roleName || '').trim();
+  if (creatorRole === 'delivery_manager') return n === '交付经理';
+  if (creatorRole === 'recruiting_manager') {
+    return n === '招聘经理' || n === '招聘人员' || n === '招聘专员';
+  }
+  if (creatorRole === 'recruiter') {
+    return n === '招聘人员' || n === '招聘专员';
+  }
+  return true;
+}
+
 export interface Menu {
   id: string;
   name: string;
@@ -459,22 +526,63 @@ export default function App() {
   useEffect(() => {
     if (!miniappApiBase) {
       setHrApiPasswordLogin(null);
+      setHrCaptchaEnabled(false);
       return;
     }
     const base = miniappApiBase.replace(/\/$/, '');
     void fetch(`${base}/api/admin/auth-status`)
       .then(async (r) => {
         if (!r.ok) throw new Error(String(r.status))
-        return r.json() as Promise<{ passwordLogin?: boolean }>
+        return r.json() as Promise<{ passwordLogin?: boolean; captchaEnabled?: boolean }>
       })
-      .then((j) => setHrApiPasswordLogin(Boolean(j.passwordLogin)))
-      .catch(() => setHrApiPasswordLogin(null));
+      .then((j) => {
+        setHrApiPasswordLogin(Boolean(j.passwordLogin));
+        setHrCaptchaEnabled(Boolean(j.captchaEnabled));
+      })
+      .catch(() => {
+        setHrApiPasswordLogin(null);
+        setHrCaptchaEnabled(false);
+      });
   }, [miniappApiBase]);
   const showHrApiLogin = Boolean(miniappApiBase) && !hasAdminApiCredentials();
   const [loginUser, setLoginUser] = useState('');
   const [loginPass, setLoginPass] = useState('');
   const [loginErr, setLoginErr] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
+  /** 与 auth-status.captchaEnabled 一致：已配 Redis 时须图形验证码 */
+  const [hrCaptchaEnabled, setHrCaptchaEnabled] = useState(false);
+  const [loginCaptchaId, setLoginCaptchaId] = useState('');
+  const [loginCaptchaSvg, setLoginCaptchaSvg] = useState('');
+  const [loginCaptchaInput, setLoginCaptchaInput] = useState('');
+
+  const refreshLoginCaptcha = useCallback(async () => {
+    if (!miniappApiBase || !hrCaptchaEnabled) return;
+    const base = miniappApiBase.replace(/\/$/, '');
+    try {
+      const r = await fetch(`${base}/api/admin/captcha`);
+      const j = (await r.json().catch(() => ({}))) as {
+        message?: string
+        data?: { captchaId?: string; svg?: string }
+      };
+      if (!r.ok) {
+        setLoginCaptchaId('');
+        setLoginCaptchaSvg('');
+        setLoginCaptchaInput('');
+        return;
+      }
+      setLoginCaptchaId(String(j.data?.captchaId || ''));
+      setLoginCaptchaSvg(String(j.data?.svg || ''));
+      setLoginCaptchaInput('');
+    } catch {
+      setLoginCaptchaId('');
+      setLoginCaptchaSvg('');
+    }
+  }, [miniappApiBase, hrCaptchaEnabled]);
+
+  useEffect(() => {
+    if (!showHrApiLogin || !hrCaptchaEnabled) return;
+    void refreshLoginCaptcha();
+  }, [showHrApiLogin, hrCaptchaEnabled, refreshLoginCaptcha]);
 
   const [changePwdOpen, setChangePwdOpen] = useState(false);
   const [changePwdCurrent, setChangePwdCurrent] = useState('');
@@ -583,13 +691,23 @@ export default function App() {
   const submitHrLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginErr('');
+    if (hrCaptchaEnabled && (!loginCaptchaId.trim() || !loginCaptchaInput.trim())) {
+      setLoginErr('请填写图形验证码');
+      return;
+    }
     setLoginLoading(true);
     try {
       const base = miniappApiBase.replace(/\/$/, '');
       const r = await fetch(`${base}/api/admin/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: loginUser.trim(), password: loginPass })
+        body: JSON.stringify({
+          username: loginUser.trim(),
+          password: loginPass,
+          ...(hrCaptchaEnabled
+            ? { captchaId: loginCaptchaId.trim(), captchaCode: loginCaptchaInput.trim() }
+            : {})
+        })
       });
       const j = (await r.json().catch(() => ({}))) as {
         message?: string
@@ -621,8 +739,11 @@ export default function App() {
         setAdminLoginProfile(null);
       }
       setLoginPass('');
+      setLoginCaptchaInput('');
+      if (hrCaptchaEnabled) void refreshLoginCaptcha();
     } catch (err) {
       setLoginErr(err instanceof Error ? err.message : '登录失败');
+      if (hrCaptchaEnabled) void refreshLoginCaptcha();
     } finally {
       setLoginLoading(false);
     }
@@ -743,14 +864,14 @@ export default function App() {
                     type="button"
                     disabled={changePwdLoading}
                     onClick={() => setChangePwdOpen(false)}
-                    className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg"
+                    className={btnSecondarySm}
                   >
                     关闭
                   </button>
                   <button
                     type="submit"
                     disabled={changePwdLoading}
-                    className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-60"
+                    className={btnSaveSm}
                   >
                     {changePwdLoading ? '保存中…' : '保存新密码'}
                   </button>
@@ -761,97 +882,150 @@ export default function App() {
           )
         : null}
       {showHrApiLogin ? (
-        <div className="min-h-screen flex flex-col bg-gradient-to-b from-slate-100 via-white to-slate-50">
-          <header className="shrink-0 border-b border-slate-200/80 bg-white/90 backdrop-blur-sm">
-            <div className="max-w-5xl mx-auto px-6 py-4 flex items-center gap-3">
-              <BrainCircuit className="w-9 h-9 text-indigo-600 shrink-0" aria-hidden />
-              <div>
-                <p className="text-lg font-bold text-slate-900 tracking-tight">智能招聘系统</p>
-                <p className="text-xs text-slate-500">管理端登录</p>
+        <div className="min-h-screen relative flex flex-col overflow-hidden bg-slate-950 text-slate-50">
+          <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
+            <div className="absolute -top-40 right-[-10%] h-[28rem] w-[28rem] rounded-full bg-indigo-600/25 blur-3xl" />
+            <div className="absolute bottom-[-20%] left-[-10%] h-[22rem] w-[22rem] rounded-full bg-violet-600/20 blur-3xl" />
+            <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(15,23,42,0)_0%,rgba(15,23,42,0.65)_100%)]" />
+          </div>
+          <main className="relative z-10 flex flex-1 flex-col items-center justify-center px-4 py-12 sm:py-16">
+            <div className="w-full max-w-[400px] space-y-8">
+              <div className="text-center space-y-3">
+                <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-xl shadow-indigo-900/40 ring-1 ring-white/20">
+                  <BrainCircuit className="h-9 w-9" aria-hidden />
+                </div>
+                <div>
+                  <h1 className="text-2xl font-bold tracking-tight text-white sm:text-[1.65rem]">智能招聘系统</h1>
+                </div>
               </div>
-            </div>
-          </header>
-          <main className="flex-1 flex flex-col items-center justify-center px-4 py-10 sm:py-14">
-            <div className="w-full max-w-md">
               <form
                 onSubmit={submitHrLogin}
-                className="bg-white rounded-2xl border border-slate-200 shadow-lg shadow-slate-200/60 p-8 sm:p-10 space-y-5"
+                className="rounded-2xl border border-white/10 bg-white/[0.97] p-7 shadow-2xl shadow-black/25 backdrop-blur-md sm:p-8 space-y-5 ring-1 ring-black/5"
               >
-                <div>
-                  <h1 className="text-2xl font-bold text-slate-900 tracking-tight">登录</h1>
-                  <p className="text-sm text-slate-600 mt-2 leading-relaxed">
-                    登录后即可使用简历筛查、面试邀请等与候选人端联动的功能。
-                  </p>
+                <div className="border-b border-slate-100 pb-4">
+                  <h2 className="text-lg font-semibold text-slate-900">账号登录</h2>
                 </div>
-
-                <div className="rounded-xl border border-indigo-100 bg-gradient-to-br from-indigo-50/90 to-violet-50/80 px-4 py-3">
-                  <div className="flex gap-2.5">
-                    <div className="shrink-0 mt-0.5 text-indigo-600">
-                      <Info className="w-4 h-4" aria-hidden />
-                    </div>
-                    <div className="text-sm text-indigo-950/90 leading-relaxed space-y-2">
-                      <p className="font-medium text-indigo-950">请使用后台已开通的账号</p>
-                      <p className="text-indigo-950/85">
-                        账号与密码由管理员在<strong className="font-semibold text-indigo-950">用户管理</strong>
-                        中维护；除平台管理员外，账号一般为<strong className="font-semibold">手机号</strong>
-                        。若部署时已配置访问令牌，可能无需在此登录。
-                      </p>
-                    </div>
+                <div className="space-y-1.5">
+                  <label htmlFor="hr-login-username" className="block text-xs font-medium uppercase tracking-wide text-slate-500">
+                    登录账号
+                  </label>
+                  <div className="relative">
+                    <UserRound
+                      className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                      aria-hidden
+                    />
+                    <input
+                      id="hr-login-username"
+                      value={loginUser}
+                      onChange={(e) => setLoginUser(e.target.value)}
+                      autoComplete="username"
+                      inputMode="text"
+                      required
+                      className="w-full rounded-xl border border-slate-200 bg-white py-3 pl-10 pr-3 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/20"
+                      placeholder="请输入手机号"
+                    />
                   </div>
                 </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">登录账号</label>
-                  <input
-                    value={loginUser}
-                    onChange={(e) => setLoginUser(e.target.value)}
-                    autoComplete="username"
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-300 outline-none transition-shadow"
-                    placeholder="手机号，或管理员账号如 admin"
-                  />
+                <div className="space-y-1.5">
+                  <label htmlFor="hr-login-password" className="block text-xs font-medium uppercase tracking-wide text-slate-500">
+                    密码
+                  </label>
+                  <div className="relative">
+                    <Lock
+                      className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                      aria-hidden
+                    />
+                    <input
+                      id="hr-login-password"
+                      type="password"
+                      value={loginPass}
+                      onChange={(e) => setLoginPass(e.target.value)}
+                      autoComplete="current-password"
+                      required
+                      className="w-full rounded-xl border border-slate-200 bg-white py-3 pl-10 pr-3 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/20"
+                      placeholder="请输入密码"
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">密码</label>
-                  <input
-                    type="password"
-                    value={loginPass}
-                    onChange={(e) => setLoginPass(e.target.value)}
-                    autoComplete="current-password"
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-300 outline-none transition-shadow"
-                    placeholder="请输入密码"
-                  />
-                </div>
+                {hrCaptchaEnabled ? (
+                  <div className="space-y-2 rounded-xl border border-slate-100 bg-slate-50/80 p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <label htmlFor="hr-login-captcha" className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                        图形验证码
+                      </label>
+                      <button
+                        type="button"
+                        disabled={loginLoading}
+                        onClick={() => void refreshLoginCaptcha()}
+                        className="text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50"
+                      >
+                        换一张
+                      </button>
+                    </div>
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                      {loginCaptchaSvg ? (
+                        <div className="shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                          <img
+                            src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(loginCaptchaSvg)}`}
+                            alt="验证码"
+                            className="block h-11 w-[132px]"
+                          />
+                        </div>
+                      ) : (
+                        <div className="flex h-11 w-[132px] items-center justify-center rounded-lg border border-dashed border-slate-200 bg-white text-xs text-slate-400">
+                          加载中…
+                        </div>
+                      )}
+                      <input
+                        id="hr-login-captcha"
+                        value={loginCaptchaInput}
+                        onChange={(e) => setLoginCaptchaInput(e.target.value)}
+                        autoComplete="off"
+                        autoCapitalize="characters"
+                        className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm uppercase text-slate-900 placeholder:text-slate-400 shadow-sm outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/20"
+                        placeholder="右侧字符，不区分大小写"
+                        maxLength={8}
+                      />
+                    </div>
+                  </div>
+                ) : null}
                 {loginErr ? (
                   <div
                     role="alert"
-                    className="text-sm text-red-800 bg-red-50 border border-red-100 rounded-lg px-3.5 py-2.5 leading-relaxed"
+                    className="rounded-xl border border-red-100 bg-red-50/95 px-3.5 py-2.5 text-sm leading-relaxed text-red-900"
                   >
                     {loginErr}
                   </div>
                 ) : null}
                 {hrApiPasswordLogin === false ? (
-                  <div className="text-sm text-amber-900 bg-amber-50 border border-amber-200/80 rounded-lg px-3.5 py-3 leading-relaxed">
-                    <p className="font-medium text-amber-950 mb-1">暂时无法在此登录</p>
-                    <p className="text-amber-900/90">
-                      招聘相关服务尚未就绪，请联系贵司技术或运维同事检查后台服务与登录配置；您也可向管理员确认账号是否已开通。
+                  <div className="rounded-xl border border-amber-200/90 bg-amber-50 px-3.5 py-3 text-sm leading-relaxed text-amber-950">
+                    <p className="mb-1 font-medium">暂时无法在此登录</p>
+                    <p className="text-amber-900/95">
+                      招聘相关服务尚未就绪，请联系技术或运维检查后台与登录配置；也可向管理员确认账号是否已开通。
                     </p>
                   </div>
                 ) : null}
                 <button
                   type="submit"
-                  disabled={loginLoading}
-                  className="w-full bg-indigo-600 text-white py-3 rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:opacity-60 transition-colors"
+                  disabled={
+                    loginLoading ||
+                    !loginUser.trim() ||
+                    !loginPass ||
+                    (hrCaptchaEnabled && (!loginCaptchaId.trim() || !loginCaptchaInput.trim()))
+                  }
+                  className="w-full rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 py-3.5 text-sm font-semibold text-white shadow-lg shadow-indigo-600/25 transition hover:from-indigo-500 hover:to-violet-500 disabled:pointer-events-none disabled:opacity-50"
                 >
                   {loginLoading ? '登录中…' : '进入系统'}
                 </button>
               </form>
-              <p className="text-center text-xs text-slate-400 mt-8">登录成功后将进入您有权限的首个功能页</p>
+              <p className="text-center text-xs leading-relaxed text-slate-500">
+                登录成功后进入您有权限的首个功能页
+              </p>
             </div>
           </main>
         </div>
       ) : (
       <div className="min-h-screen bg-slate-50 flex">
-      {/* Sidebar */}
       <aside className="w-64 bg-slate-900 text-slate-300 flex flex-col shadow-xl z-20">
         <div className="h-16 flex items-center px-6 border-b border-slate-800 bg-slate-950">
           <BrainCircuit className="w-6 h-6 text-indigo-400 mr-3" />
@@ -913,9 +1087,7 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* Header */}
         <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 shadow-sm z-10">
           <div className="flex items-center gap-4">
             <h2 className="text-xl font-bold text-slate-800">
@@ -974,7 +1146,6 @@ export default function App() {
           </div>
         </header>
 
-        {/* Content Area */}
         <div className="flex-1 overflow-auto p-8 bg-slate-50/50">
           <motion.div
             key={activeMenu}
@@ -1011,7 +1182,7 @@ function ClientManagementView() {
             <input type="text" placeholder="搜索客户名称或信用代码..." className="pl-10 pr-4 py-2 border border-slate-200 rounded-lg w-80 focus:ring-2 focus:ring-indigo-500 outline-none" />
           </div>
         </div>
-        <button className="bg-indigo-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-indigo-700 transition-colors shadow-sm">
+        <button type="button" className={btnPrimarySmFlex}>
           <Plus className="w-4 h-4" /> 新增客户
         </button>
       </div>
@@ -1111,7 +1282,9 @@ function ProjectManagementView({
   useEffect(() => {
     void fetch('/api/depts')
       .then((res) => res.json())
-      .then((rows: Dept[]) => setDepts(Array.isArray(rows) ? rows : []))
+      .then((rows: unknown) =>
+        setDepts(Array.isArray(rows) ? (rows as Record<string, unknown>[]).map(mapDeptRow) : [])
+      )
       .catch(() => setDepts([]));
   }, []);
 
@@ -1200,14 +1373,14 @@ function ProjectManagementView({
     try {
       if (isEdit) {
         const patchBody: Record<string, unknown> = {
-          name,
-          dept: formDept.trim() || null,
-          status: formStatus.trim() || '进行中',
-          startDate: formStart || null,
-          endDate: formEnd || null,
-          description: formDesc.trim() || null,
-          memberCount,
-          projectCode: formProjectCode.trim() || null
+            name,
+            dept: formDept.trim() || null,
+            status: formStatus.trim() || '进行中',
+            startDate: formStart || null,
+            endDate: formEnd || null,
+            description: formDesc.trim() || null,
+            memberCount,
+            projectCode: formProjectCode.trim() || null
         };
         if (role === 'admin' || role === 'delivery_manager') {
           patchBody.recruitmentLeads = parseRecruitersInput(formProjectRecruitmentLeads);
@@ -1221,15 +1394,15 @@ function ProjectManagementView({
         if (!r.ok) throw new Error(j.message || `保存失败 ${r.status}`);
       } else {
         const postBody: Record<string, unknown> = {
-          id,
-          name,
-          projectCode: id,
-          dept: formDept.trim() || undefined,
-          status: formStatus.trim() || undefined,
-          startDate: formStart || undefined,
-          endDate: formEnd || undefined,
-          description: formDesc.trim() || undefined,
-          memberCount
+            id,
+            name,
+            projectCode: id,
+            dept: formDept.trim() || undefined,
+            status: formStatus.trim() || undefined,
+            startDate: formStart || undefined,
+            endDate: formEnd || undefined,
+            description: formDesc.trim() || undefined,
+            memberCount
         };
         if (role === 'admin' || role === 'delivery_manager') {
           postBody.recruitmentLeads = parseRecruitersInput(formProjectRecruitmentLeads);
@@ -1255,6 +1428,41 @@ function ProjectManagementView({
   const dmUserDept = String(authProfile?.dept || '').trim();
   const dmDeptReady =
     role !== 'delivery_manager' || (dmUserDept.length > 0 && dmUserDept !== '-');
+
+  const scopedDeptsForProjectForm = useMemo(
+    () => deliveryManagerDeptSubtree(depts, dmUserDept),
+    [depts, dmUserDept]
+  );
+
+  const projectFormDeptOptions = useMemo(() => {
+    if (role === 'admin') return depts;
+    const base = scopedDeptsForProjectForm;
+    const cur = formDept.trim();
+    if (!cur) return base;
+    if (base.some((d) => deptNamesMatch(cur, d.name))) return base;
+    const hit = depts.find((d) => deptNamesMatch(cur, d.name));
+    if (hit) return [hit, ...base.filter((d) => d.id !== hit.id)];
+    return [{ id: '__edit_dept__', name: cur, deptType: '', level: 0, manager: '-', count: 0, parentId: null }, ...base];
+  }, [role, depts, scopedDeptsForProjectForm, formDept]);
+
+  const jobFormDeptOptions = useMemo(
+    () => (role === 'admin' ? depts : scopedDeptsForProjectForm),
+    [role, depts, scopedDeptsForProjectForm]
+  );
+
+  const projectRecruitmentLeadDeptOptions = useMemo(
+    () => recruitmentDeptOptionsForProjectLeads(depts, dmUserDept, role),
+    [depts, dmUserDept, role]
+  );
+
+  useEffect(() => {
+    if (!createOpen || !projectLeadPickDept) return;
+    const ok = projectRecruitmentLeadDeptOptions.some((d) => d.name === projectLeadPickDept);
+    if (!ok) {
+      setProjectLeadPickDept('');
+      setProjectLeadPickUsername('');
+    }
+  }, [createOpen, projectLeadPickDept, projectRecruitmentLeadDeptOptions]);
 
   const listProjects = useMemo(() => {
     const base = projects.filter((p) => p.id !== 'EMPTY' && p.id !== 'UNASSIGNED');
@@ -1325,6 +1533,18 @@ function ProjectManagementView({
     const title = projectJobForm.title.trim();
     if (!title) {
       setProjectJobForm((f) => (f ? { ...f, error: '请填写岗位名称' } : f));
+      return;
+    }
+    if (!projectJobForm.location.trim()) {
+      setProjectJobForm((f) => (f ? { ...f, error: '请填写工作地点' } : f));
+      return;
+    }
+    if (!projectJobForm.salary.trim()) {
+      setProjectJobForm((f) => (f ? { ...f, error: '请填写薪资范围' } : f));
+      return;
+    }
+    if (!projectJobForm.level.trim()) {
+      setProjectJobForm((f) => (f ? { ...f, error: '请填写级别' } : f));
       return;
     }
     const rawPid = String(projectJobLockId || projectJobForm.projectId.trim() || '').trim();
@@ -1412,17 +1632,13 @@ function ProjectManagementView({
       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">项目管理</h1>
-          <p className="text-slate-500 mt-1">管理所有招聘项目（数据来自业务库 projects / jobs）</p>
-          <p className="text-xs text-slate-400 mt-2 max-w-2xl leading-relaxed">
-            管理员可查看全部项目。交付经理仅展示与本人「所属部门」一致的项目。招聘经理仅展示在「项目招聘负责人」中包含本人姓名或登录账号的项目。以上均不展示「未分配项目」占位数据；未归入项目的岗位请在「岗位分配」中查看。
-          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 shrink-0">
           {canManage && dmDeptReady ? (
             <button
               type="button"
               onClick={openCreateModal}
-              className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-900 text-white px-5 py-2.5 text-sm font-semibold hover:bg-slate-800 transition-colors shadow-sm"
+              className={btnPrimaryLg}
             >
               <Plus className="w-4 h-4" /> 创建项目
             </button>
@@ -1502,7 +1718,7 @@ function ProjectManagementView({
                           </button>
                         </>
                       ) : null}
-                      <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-slate-900 text-white">
+                      <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-indigo-800 text-white">
                         {project.status || '进行中'}
                       </span>
                     </div>
@@ -1696,6 +1912,16 @@ function ProjectManagementView({
               <form onSubmit={submitCreate} className="flex flex-col flex-1 min-h-0">
                 <div className="px-6 py-4 space-y-4 overflow-y-auto flex-1">
                   <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1.5">项目编号</label>
+                    <input
+                      value={formId}
+                      readOnly
+                      className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-mono bg-slate-50 text-slate-600 outline-none cursor-default focus:ring-2 focus:ring-slate-900/10 focus:border-slate-300"
+                      placeholder="PRJ-2024-001"
+                      aria-readonly="true"
+                    />
+                  </div>
+                  <div>
                     <label className="block text-xs font-medium text-slate-500 mb-1.5">项目名称</label>
                     <input
                       value={formName}
@@ -1704,20 +1930,6 @@ function ProjectManagementView({
                       placeholder="例如：2024 技术部招聘"
                       required
                     />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-500 mb-1.5">项目编号</label>
-                    <input
-                      value={formId}
-                      onChange={(e) => setFormId(e.target.value)}
-                      disabled={Boolean(editingProjectId)}
-                      className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-slate-900/20 focus:border-slate-400 outline-none disabled:bg-slate-50 disabled:text-slate-500"
-                      placeholder="PRJ-2024-001"
-                      required={!editingProjectId}
-                    />
-                    <p className="text-[11px] text-slate-400 mt-1">
-                      {editingProjectId ? '项目主键不可修改' : '作为主键写入数据库，需唯一'}
-                    </p>
                   </div>
                   {editingProjectId ? (
                     <div>
@@ -1738,7 +1950,7 @@ function ProjectManagementView({
                       className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-slate-900/20 focus:border-slate-400 outline-none"
                     >
                       <option value="">选择部门</option>
-                      {depts.map((d) => (
+                      {projectFormDeptOptions.map((d) => (
                         <option key={d.id} value={d.name}>
                           {d.name}
                         </option>
@@ -1751,9 +1963,6 @@ function ProjectManagementView({
                         <label className="block text-xs font-medium text-slate-600">
                           项目招聘负责人（招聘经理）
                         </label>
-                        <p className="text-[11px] text-slate-500 leading-relaxed">
-                          由交付经理或管理员维护；可跨部门添加多名招聘经理。配置完成后，对应招聘经理可在「岗位分配」中为该项目下的每个岗位指定一名招聘人员。
-                        </p>
                         <div className="flex flex-wrap gap-1.5 min-h-[1.5rem]">
                           {parseRecruitersInput(formProjectRecruitmentLeads).map((name, i) => (
                             <span
@@ -1786,8 +1995,8 @@ function ProjectManagementView({
                             disabled={createSubmitting}
                             className="w-full sm:flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white"
                           >
-                            <option value="">选择部门</option>
-                            {depts.map((d) => (
+                            <option value="">选择部门（招聘类型）</option>
+                            {projectRecruitmentLeadDeptOptions.map((d) => (
                               <option key={d.id} value={d.name}>
                                 {d.name}
                               </option>
@@ -1803,10 +2012,10 @@ function ProjectManagementView({
                             {activeUsersInDept(hrUsers, projectLeadPickDept)
                               .filter((u) => isRecruitingManagerUserRole(u.role))
                               .map((u) => (
-                                <option key={u.username} value={u.username}>
-                                  {u.name}（{u.username}）
-                                </option>
-                              ))}
+                              <option key={u.username} value={u.username}>
+                                {u.name}（{u.username}）
+                              </option>
+                            ))}
                           </select>
                           <button
                             type="button"
@@ -1896,14 +2105,14 @@ function ProjectManagementView({
                     type="button"
                     disabled={createSubmitting}
                     onClick={closeProjectModal}
-                    className="px-4 py-2 text-sm font-medium text-slate-700 border border-slate-200 rounded-lg hover:bg-white"
+                    className={btnSecondarySm}
                   >
                     取消
                   </button>
                   <button
                     type="submit"
                     disabled={createSubmitting}
-                    className="px-5 py-2 text-sm font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-60"
+                    className={btnPrimaryMd}
                   >
                     {createSubmitting
                       ? editingProjectId
@@ -1929,7 +2138,7 @@ function ProjectManagementView({
         setRecruiterPickDept={setPjRecruiterPickDept}
         recruiterPickUsername={pjRecruiterPickUsername}
         setRecruiterPickUsername={setPjRecruiterPickUsername}
-        jobFormDepts={depts}
+        jobFormDepts={jobFormDeptOptions}
         jobFormUsers={hrUsers}
         selectableProjects={selectableProjectsForJob}
         onSubmit={submitProjectJobForm}
@@ -2188,7 +2397,6 @@ function WorkbenchView({
   const statCards: Array<{
     key: string;
     label: string;
-    sublabel?: string;
     icon: typeof FolderOpen;
     iconWrap: string;
     displayValue: string;
@@ -2203,7 +2411,6 @@ function WorkbenchView({
     {
       key: 'resume',
       label: '收到简历',
-      sublabel: '简历筛查记录数',
       icon: Users,
       iconWrap: 'bg-emerald-100 text-emerald-600',
       displayValue:
@@ -2212,7 +2419,6 @@ function WorkbenchView({
     {
       key: 'ai',
       label: '面试报告',
-      sublabel: '候选人完成答题生成的报告',
       icon: Bot,
       iconWrap: 'bg-violet-100 text-violet-600',
       displayValue:
@@ -2221,7 +2427,6 @@ function WorkbenchView({
     {
       key: 'hire',
       label: '面试通过',
-      sublabel: '报告中标记为通过',
       icon: UserCheck,
       iconWrap: 'bg-orange-100 text-orange-600',
       displayValue:
@@ -2233,10 +2438,6 @@ function WorkbenchView({
     <div className="space-y-8">
       <div>
         <h1 className="text-2xl font-bold text-slate-900">工作台</h1>
-        <p className="text-slate-500 mt-1">欢迎使用智能招聘管理系统</p>
-        <p className="text-xs text-slate-400 mt-2 max-w-2xl leading-relaxed">
-          简历与面试相关统计来自「简历筛查」与「面试报告」；在招项目数来自项目列表。请先登录以加载业务数据（本页已不使用管理库中的演示投递/简历数据）。
-        </p>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
@@ -2252,9 +2453,6 @@ function WorkbenchView({
             </div>
             <div className="min-w-0">
               <p className="text-sm text-slate-500">{c.label}</p>
-              {c.sublabel ? (
-                <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">{c.sublabel}</p>
-              ) : null}
               <p className="text-3xl font-bold text-slate-900 tabular-nums mt-1">{c.displayValue}</p>
             </div>
           </div>
@@ -2318,23 +2516,23 @@ function WorkbenchView({
               recentProjects.map((p) => {
                 const leadLine = projectRecruitingLeadDisplay(p);
                 return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => onNavigate('project-list')}
-                    className="w-full flex items-center justify-between gap-3 rounded-lg border border-slate-100 bg-slate-50/50 px-4 py-3 text-left hover:bg-slate-50 transition-colors"
-                  >
-                    <div className="min-w-0">
-                      <p className="font-semibold text-slate-900 truncate">{p.name}</p>
-                      <p className="text-xs text-slate-500 mt-0.5 truncate">
-                        {p.dept || '—'}
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => onNavigate('project-list')}
+                  className="w-full flex items-center justify-between gap-3 rounded-lg border border-slate-100 bg-slate-50/50 px-4 py-3 text-left hover:bg-slate-50 transition-colors"
+                >
+                  <div className="min-w-0">
+                    <p className="font-semibold text-slate-900 truncate">{p.name}</p>
+                    <p className="text-xs text-slate-500 mt-0.5 truncate">
+                      {p.dept || '—'}
                         {leadLine !== '—' ? ` · 项目招聘负责人 ${leadLine}` : ''}
-                      </p>
-                    </div>
-                    <span className="shrink-0 text-xs font-medium px-2.5 py-1 rounded-md bg-slate-900 text-white">
-                      {p.status || '进行中'}
-                    </span>
-                  </button>
+                    </p>
+                  </div>
+                  <span className="shrink-0 text-xs font-medium px-2.5 py-1 rounded-md bg-indigo-800 text-white">
+                    {p.status || '进行中'}
+                  </span>
+                </button>
                 );
               })
             )}
@@ -2345,7 +2543,6 @@ function WorkbenchView({
           <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
             <div>
               <h2 className="font-bold text-slate-900">最近筛查候选人</h2>
-              <p className="text-[11px] text-slate-400 mt-0.5">与简历筛查列表一致，登录后展示</p>
             </div>
             {(currentRole === 'admin' ||
               currentRole === 'recruiter' ||
@@ -2385,7 +2582,7 @@ function WorkbenchView({
                       </p>
                     </div>
                   </div>
-                  <span className="shrink-0 text-xs font-medium px-2.5 py-1 rounded-md bg-slate-900 text-white">
+                  <span className="shrink-0 text-xs font-medium px-2.5 py-1 rounded-md bg-indigo-800 text-white">
                     {row.status || '—'}
                   </span>
                 </button>
@@ -2588,14 +2785,50 @@ function JobEditorModal({
   onClose: () => void;
   onNavigateResumeScreening?: () => void;
   projectIdLocked?: string | null;
-  /** none：交付经理/管理员；single：招聘经理为每岗指定一名招聘人员；multi：保留多选（一般不用） */
+  /** none：交付经理/管理员；single：单选一名招聘人员；multi：招聘经理可添加多名招聘人员 */
   recruiterFieldMode?: 'none' | 'single' | 'multi';
   /** single 模式下可选的一线招聘人员列表（可跨部门） */
   recruiterStaffOptions?: User[];
 }) {
+  const [jdGenerating, setJdGenerating] = useState(false);
+  useEffect(() => {
+    if (!jobForm) setJdGenerating(false);
+  }, [jobForm]);
+
+  const handleAiGenerateJd = async () => {
+    if (!jobForm) return;
+    const title = jobForm.title.trim();
+    const level = jobForm.level.trim();
+    if (!title || !level) return;
+    setJdGenerating(true);
+    setJobForm((f) => (f ? { ...f, error: '' } : f));
+    try {
+      const r = await fetch('/api/jobs/generate-jd', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title,
+          level,
+          location: jobForm.location.trim(),
+          salary: jobForm.salary.trim()
+        })
+      });
+      const j = (await r.json().catch(() => ({}))) as { jdText?: string; message?: string };
+      if (!r.ok) throw new Error(j.message || `生成失败 ${r.status}`);
+      const jd = String(j.jdText || '').trim();
+      if (!jd) throw new Error('未生成有效内容');
+      setJobForm((f) => (f ? { ...f, jdText: jd } : f));
+    } catch (e) {
+      setJobForm((f) => (f ? { ...f, error: e instanceof Error ? e.message : 'AI 生成失败' } : f));
+    } finally {
+      setJdGenerating(false);
+    }
+  };
+
   if (typeof document === 'undefined') return null;
   if (!jobForm) return null;
   const rfMode = recruiterFieldMode ?? 'none';
+  const canAiJd = Boolean(jobForm.title.trim() && jobForm.level.trim());
   return createPortal(
     <AnimatePresence>
       <motion.div
@@ -2618,14 +2851,11 @@ function JobEditorModal({
           className="bg-white rounded-xl shadow-xl border border-slate-200 w-full max-w-2xl max-h-[min(92vh,720px)] flex flex-col"
           onClick={(e) => e.stopPropagation()}
         >
-          <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
+          <div className="px-6 py-3 border-b border-slate-100 flex items-center justify-between shrink-0">
             <div>
               <h3 id="job-form-title" className="text-lg font-bold text-slate-900">
                 {jobForm.mode === 'create' ? '添加岗位' : '编辑岗位'}
               </h3>
-              <p className="text-xs text-slate-500 mt-0.5">
-                数据写入业务库 jobs 表；所属项目需已在项目管理中创建。
-              </p>
             </div>
             <button
               type="button"
@@ -2638,15 +2868,14 @@ function JobEditorModal({
             </button>
           </div>
           <form onSubmit={onSubmit} className="flex flex-col flex-1 min-h-0">
-            <div className="px-6 py-4 space-y-4 overflow-y-auto flex-1">
+            <div className="px-6 py-3 space-y-2.5 overflow-y-auto flex-1 flex flex-col min-h-0">
               <div>
-                <label className="block text-xs font-medium text-slate-500 mb-1.5">所属项目</label>
+                <label className="block text-xs font-medium text-slate-500 mb-1">所属项目</label>
                 {projectIdLocked ? (
                   <>
                     <p className="text-sm text-slate-800 font-medium">
                       {selectableProjects.find((p) => p.id === projectIdLocked)?.name || projectIdLocked}
                     </p>
-                    <p className="text-[11px] text-slate-400 mt-1">在当前项目下维护岗位，所属项目不可更改。</p>
                   </>
                 ) : (
                   <select
@@ -2654,7 +2883,7 @@ function JobEditorModal({
                     onChange={(e) => setJobForm((f) => (f ? { ...f, projectId: e.target.value } : f))}
                     disabled={jobForm.submitting || selectableProjects.length === 0}
                     required={selectableProjects.length > 0}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white disabled:bg-slate-50 disabled:text-slate-500"
+                    className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm bg-white disabled:bg-slate-50 disabled:text-slate-500"
                   >
                     {selectableProjects.length === 0 ? (
                       <option value="">暂无可用项目，请先在「项目管理」中创建</option>
@@ -2669,82 +2898,90 @@ function JobEditorModal({
                 )}
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-500 mb-1.5">岗位名称 *</label>
+                <label className="block text-xs font-medium text-slate-500 mb-1">
+                  岗位名称 <span className="text-red-500">*</span>
+                </label>
                 <input
                   value={jobForm.title}
                   onChange={(e) => setJobForm((f) => (f ? { ...f, title: e.target.value } : f))}
                   required
-                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+                  className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
                   placeholder="例如：高级前端工程师"
                 />
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-500 mb-1.5">所属部门</label>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">所属部门</label>
                   <input
                     value={jobForm.department}
                     onChange={(e) => setJobForm((f) => (f ? { ...f, department: e.target.value } : f))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+                    className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
                     placeholder="例如：技术部"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-slate-500 mb-1.5">HC（需求人数）</label>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">HC（需求人数）</label>
                   <input
                     type="number"
                     min={1}
                     value={jobForm.demand}
                     onChange={(e) => setJobForm((f) => (f ? { ...f, demand: e.target.value } : f))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+                    className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
                   />
                 </div>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-500 mb-1.5">地点</label>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">
+                    地点 <span className="text-red-500">*</span>
+                  </label>
                   <input
                     value={jobForm.location}
                     onChange={(e) => setJobForm((f) => (f ? { ...f, location: e.target.value } : f))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+                    required
+                    className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
                     placeholder="例如：北京"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-slate-500 mb-1.5">薪资范围</label>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">
+                    薪资范围 <span className="text-red-500">*</span>
+                  </label>
                   <input
                     value={jobForm.salary}
                     onChange={(e) => setJobForm((f) => (f ? { ...f, salary: e.target.value } : f))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+                    required
+                    className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
                     placeholder="例如：25-35万"
                   />
                 </div>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-500 mb-1.5">级别</label>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">
+                    级别 <span className="text-red-500">*</span>
+                  </label>
                   <input
                     value={jobForm.level}
                     onChange={(e) => setJobForm((f) => (f ? { ...f, level: e.target.value } : f))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+                    required
+                    className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
                     placeholder="例如：高级"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-slate-500 mb-1.5">技能关键词</label>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">技能关键词</label>
                   <input
                     value={jobForm.skills}
                     onChange={(e) => setJobForm((f) => (f ? { ...f, skills: e.target.value } : f))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+                    className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
                     placeholder="例如：React, TypeScript"
                   />
                 </div>
               </div>
               {rfMode === 'single' ? (
                 <div>
-                  <label className="block text-xs font-medium text-slate-500 mb-1.5">招聘人员（每岗仅一人）</label>
-                  <p className="text-[11px] text-slate-400 mb-2">
-                    由招聘经理指定一名一线招聘人员；列表包含各部门账号，与项目「招聘负责人」配置配合使用。
-                  </p>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">招聘人员（每岗仅一人）</label>
                   <select
                     value={parseRecruitersInput(jobForm.recruiters)[0] || ''}
                     onChange={(e) =>
@@ -2772,10 +3009,7 @@ function JobEditorModal({
                 </div>
               ) : rfMode === 'multi' ? (
                 <div>
-                  <label className="block text-xs font-medium text-slate-500 mb-1.5">招聘负责人（可见招聘）</label>
-                  <p className="text-[11px] text-slate-400 mb-2">
-                    先选部门，再选人员并添加；可切换部门多次添加不同部门的负责人。下方可继续用顿号或逗号手填补充。
-                  </p>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">招聘人员</label>
                   <div className="flex flex-wrap gap-1.5 mb-2 min-h-[1.75rem]">
                     {parseRecruitersInput(jobForm.recruiters).map((name, i) => (
                       <span
@@ -2860,24 +3094,40 @@ function JobEditorModal({
                   />
                 </div>
               ) : null}
-              <div>
-                <label className="block text-xs font-medium text-slate-500 mb-1.5">职位描述（JD）</label>
+              <div className="flex flex-col flex-1 min-h-[min(52vh,400px)] gap-2 pt-1 border-t border-slate-100 mt-0.5">
+                <div className="flex flex-wrap items-center justify-between gap-2 shrink-0">
+                  <label className="text-xs font-medium text-slate-500">职位描述（JD）</label>
+                  <button
+                    type="button"
+                    disabled={jobForm.submitting || jdGenerating || !canAiJd}
+                    onClick={() => void handleAiGenerateJd()}
+                    title={!canAiJd ? '请先填写岗位名称与级别' : undefined}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-800 hover:bg-indigo-100 disabled:opacity-50 disabled:pointer-events-none"
+                  >
+                    {jdGenerating ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Sparkles className="w-3.5 h-3.5" />
+                    )}
+                    AI 生成
+                  </button>
+                </div>
                 <textarea
                   value={jobForm.jdText}
                   onChange={(e) => setJobForm((f) => (f ? { ...f, jdText: e.target.value } : f))}
-                  rows={5}
-                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm resize-none"
-                  placeholder="岗位职责与任职要求"
+                  rows={14}
+                  className="w-full flex-1 min-h-[min(42vh,280px)] border border-slate-200 rounded-lg px-3 py-2 text-sm resize-y"
+                  placeholder="岗位职责与任职要求；可点击「AI 生成」根据岗位名称与级别起草（已填地点、薪资会一并参考）"
                 />
               </div>
-              {jobForm.error ? <p className="text-sm text-red-600">{jobForm.error}</p> : null}
+              {jobForm.error ? <p className="text-sm text-red-600 shrink-0">{jobForm.error}</p> : null}
             </div>
-            <div className="px-6 py-4 border-t border-slate-100 bg-slate-50/80 flex flex-wrap justify-end gap-2 shrink-0">
+            <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 flex flex-wrap justify-end gap-2 shrink-0">
               <button
                 type="button"
                 disabled={jobForm.submitting}
                 onClick={onClose}
-                className="px-4 py-2 text-sm font-medium text-slate-700 border border-slate-200 rounded-lg hover:bg-white"
+                className={btnSecondarySm}
               >
                 取消
               </button>
@@ -2897,7 +3147,7 @@ function JobEditorModal({
               <button
                 type="submit"
                 disabled={jobForm.submitting}
-                className="px-5 py-2 text-sm font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-60"
+                className={btnPrimaryMd}
               >
                 {jobForm.submitting ? '保存中…' : '保存'}
               </button>
@@ -2998,7 +3248,9 @@ function JobQueryView({
   useEffect(() => {
     void fetch('/api/depts')
       .then((res) => res.json())
-      .then((rows: Dept[]) => setJobFormDepts(Array.isArray(rows) ? rows : []))
+      .then((rows: unknown) =>
+        setJobFormDepts(Array.isArray(rows) ? (rows as Record<string, unknown>[]).map(mapDeptRow) : [])
+      )
       .catch(() => setJobFormDepts([]));
   }, []);
 
@@ -3013,6 +3265,26 @@ function JobQueryView({
     () => jobFormUsers.filter((u) => isFrontlineRecruiterStaffRole(u.role)),
     [jobFormUsers]
   );
+  const recruiterSelectableDepts = useMemo(() => {
+    if (currentRole !== 'recruiting_manager') return jobFormDepts;
+    return deliveryManagerDeptSubtree(jobFormDepts, String(authProfile?.dept || '').trim());
+  }, [authProfile?.dept, currentRole, jobFormDepts]);
+
+  useEffect(() => {
+    if (currentRole !== 'recruiting_manager') return;
+    if (!recruiterPickDept) return;
+    const exists = recruiterSelectableDepts.some((d) => deptNamesMatch(d.name, recruiterPickDept));
+    if (!exists) {
+      setRecruiterPickDept('');
+      setRecruiterPickUsername('');
+    }
+  }, [
+    currentRole,
+    recruiterPickDept,
+    recruiterSelectableDepts,
+    setRecruiterPickDept,
+    setRecruiterPickUsername
+  ]);
 
   const selectableProjects = projectOptions.filter((p) => !['EMPTY', 'UNASSIGNED'].includes(p.id));
 
@@ -3096,6 +3368,18 @@ function JobQueryView({
       setJobForm((f) => (f ? { ...f, error: '请填写岗位名称' } : f));
       return;
     }
+    if (!jobForm.location.trim()) {
+      setJobForm((f) => (f ? { ...f, error: '请填写工作地点' } : f));
+      return;
+    }
+    if (!jobForm.salary.trim()) {
+      setJobForm((f) => (f ? { ...f, error: '请填写薪资范围' } : f));
+      return;
+    }
+    if (!jobForm.level.trim()) {
+      setJobForm((f) => (f ? { ...f, error: '请填写级别' } : f));
+      return;
+    }
     if (selectableProjects.length === 0) {
       setJobForm((f) => (f ? { ...f, error: '暂无可用项目，请先在「项目管理」中创建' } : f));
       return;
@@ -3107,7 +3391,6 @@ function JobQueryView({
     }
     setJobForm((f) => (f ? { ...f, submitting: true, error: '' } : f));
     const recruitersParsed = parseRecruitersInput(jobForm.recruiters);
-    const recruitersRm = recruitersParsed.slice(0, 1);
     const demand = Math.max(1, Math.min(99999, Number(jobForm.demand) || 1));
     const projectId = pidTrim;
     const isRm = currentRole === 'recruiting_manager';
@@ -3127,7 +3410,7 @@ function JobQueryView({
         const jc = jobForm.jobCode.trim();
         const body: Record<string, unknown> = {
           ...basePayload,
-          recruiters: isRm ? recruitersRm : []
+          recruiters: isRm ? recruitersParsed : []
         };
         if (jc) body.jobCode = jc.toUpperCase();
         const r = await fetch('/api/jobs', {
@@ -3139,7 +3422,7 @@ function JobQueryView({
         if (!r.ok) throw new Error(j.message || `创建失败 ${r.status}`);
       } else {
         const patchBody: Record<string, unknown> = { ...basePayload };
-        if (isRm) patchBody.recruiters = recruitersRm;
+        if (isRm) patchBody.recruiters = recruitersParsed;
         const r = await fetch(`/api/jobs/${encodeURIComponent(jobForm.jobCode)}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -3179,23 +3462,6 @@ function JobQueryView({
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-slate-900">岗位分配</h1>
-        <p className="text-slate-500 mt-1">为招聘项目分配岗位需求</p>
-        <p className="text-xs text-slate-400 mt-2 max-w-3xl leading-relaxed">
-          HC 列为「简历筛查条数 / 需求人数」：左侧为业务库 <span className="font-mono text-slate-500">resume_screenings</span>{' '}
-          按岗位码汇总；右侧为岗位编制需求。状态列为所属
-          <span className="font-medium text-slate-600">项目</span>
-          状态（非岗位独立状态）。
-          {currentRole === 'recruiting_manager' ? (
-            <span className="block mt-1.5 text-slate-500">
-              招聘经理仅展示与编辑：本人在「项目招聘负责人」名单中的项目下的岗位；每个岗位可指定一名一线「招聘人员」（单选）。未包含您的项目不会出现在此列表。
-            </span>
-          ) : null}
-          {currentRole === 'delivery_manager' ? (
-            <span className="block mt-1.5 text-slate-500">
-              交付经理仅展示与本人「所属部门」一致的项目下的岗位；项目招聘负责人在「项目管理」中维护。岗位上的招聘人员由招聘经理在此页为每岗指定一人。未归入项目的岗位不在此列表。
-            </span>
-          ) : null}
-        </p>
       </div>
 
       {currentRole === 'delivery_manager' &&
@@ -3217,7 +3483,7 @@ function JobQueryView({
             <button
               type="button"
               onClick={openCreate}
-              className="inline-flex items-center justify-center w-9 h-9 rounded-lg bg-slate-900 text-white hover:bg-slate-800 transition-colors shadow-sm"
+              className={btnPrimaryIcon}
               aria-label="添加岗位"
             >
               <Plus className="w-5 h-5" />
@@ -3347,13 +3613,13 @@ function JobQueryView({
         setRecruiterPickDept={setRecruiterPickDept}
         recruiterPickUsername={recruiterPickUsername}
         setRecruiterPickUsername={setRecruiterPickUsername}
-        jobFormDepts={jobFormDepts}
+        jobFormDepts={recruiterSelectableDepts}
         jobFormUsers={jobFormUsers}
         selectableProjects={selectableProjects}
         onSubmit={submitJobForm}
         onClose={() => setJobForm(null)}
         onNavigateResumeScreening={() => onNavigate('resume-screening')}
-        recruiterFieldMode={currentRole === 'recruiting_manager' ? 'single' : 'none'}
+        recruiterFieldMode={currentRole === 'recruiting_manager' ? 'multi' : 'none'}
         recruiterStaffOptions={recruiterStaffOptions}
       />
     </div>
@@ -3517,6 +3783,70 @@ function mapScreeningRow(r: {
   }
 }
 
+function ListPaginationBar({
+  page,
+  pageSize,
+  total,
+  onPageChange,
+  onPageSizeChange
+}: {
+  page: number
+  pageSize: number
+  total: number
+  onPageChange: (p: number) => void
+  onPageSizeChange: (n: number) => void
+}) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize) || 1)
+  const safePage = Math.min(Math.max(1, page), totalPages)
+  const from = total === 0 ? 0 : (safePage - 1) * pageSize + 1
+  const to = Math.min(safePage * pageSize, total)
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-3 border-t border-slate-100 bg-slate-50/70 text-sm text-slate-600">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-slate-500">每页</span>
+        <select
+          value={pageSize}
+          onChange={(e) => onPageSizeChange(Number(e.target.value))}
+          className="border border-slate-200 rounded-md px-2 py-1 text-sm bg-white outline-none focus:ring-2 focus:ring-indigo-500"
+        >
+          {[10, 20, 50].map((n) => (
+            <option key={n} value={n}>
+              {n} 条
+            </option>
+          ))}
+        </select>
+        <span className="text-slate-500">共 {total} 条</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="text-slate-500 hidden sm:inline">
+          {total === 0 ? '无数据' : `第 ${from}–${to} 条`}
+        </span>
+        <button
+          type="button"
+          disabled={safePage <= 1}
+          onClick={() => onPageChange(safePage - 1)}
+          className="inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white p-1.5 text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-40 disabled:pointer-events-none"
+          aria-label="上一页"
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+        <span className="tabular-nums min-w-[4.5rem] text-center text-slate-700">
+          {safePage} / {totalPages}
+        </span>
+        <button
+          type="button"
+          disabled={safePage >= totalPages}
+          onClick={() => onPageChange(safePage + 1)}
+          className="inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white p-1.5 text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-40 disabled:pointer-events-none"
+          aria-label="下一页"
+        >
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function ResumeScreeningView({
   currentRole,
   authProfile
@@ -3548,6 +3878,8 @@ function ResumeScreeningView({
   const [uploading, setUploading] = useState(false);
   const [uploadHint, setUploadHint] = useState('');
   const [screenListError, setScreenListError] = useState('');
+  const [screenListPage, setScreenListPage] = useState(1);
+  const [screenPageSize, setScreenPageSize] = useState(10);
   const [reportResume, setReportResume] = useState<Resume | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { codes: recruiterJobCodes, loading: recruiterScopeLoading } = useRecruiterScopedJobCodes(
@@ -3672,6 +4004,20 @@ function ResumeScreeningView({
   useEffect(() => {
     loadScreenings();
   }, [loadScreenings]);
+
+  useEffect(() => {
+    setScreenListPage(1);
+  }, [resumeProjectFilter]);
+
+  const pagedResumes = useMemo(() => {
+    const start = (screenListPage - 1) * screenPageSize;
+    return resumes.slice(start, start + screenPageSize);
+  }, [resumes, screenListPage, screenPageSize]);
+
+  useEffect(() => {
+    const tp = Math.max(1, Math.ceil(resumes.length / screenPageSize) || 1);
+    setScreenListPage((p) => Math.min(Math.max(1, p), tp));
+  }, [resumes.length, screenPageSize]);
 
   useEffect(() => {
     if (!apiBase || !hasToken) {
@@ -3927,13 +4273,9 @@ function ResumeScreeningView({
         </div>
       ) : null}
       <div className="space-y-6">
-        {/* Upload Area */}
         <div>
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 flex flex-col">
             <h3 className="font-bold text-slate-900 mb-4">上传简历进行 AI 筛查</h3>
-            <p className="text-xs text-slate-500 mb-4 leading-relaxed">
-              系统会从简历正文中自动识别候选人姓名与手机号（大模型 + 文本规则）；识别成功则写入筛查记录，识别不到则仅保存姓名推断结果，不强制填写。
-            </p>
             <div className="mb-4">
               <label className="block text-sm font-medium text-slate-700 mb-1">项目筛选</label>
               <select
@@ -3958,20 +4300,6 @@ function ResumeScreeningView({
                   </option>
                 ))}
               </select>
-              <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
-                {isDeliveryManager ? (
-                  <>
-                    交付经理仅可选择与本人「所属部门」一致的项目；未选具体项目时，岗位与筛查记录也仅限本部门项目范围。
-                  </>
-                ) : isRecruitingManager ? (
-                  <>
-                    招聘经理仅可选择本人为「项目招聘负责人」的项目；未选具体项目时，岗位与下方 AI
-                    筛查结果也仅限这些项目下的岗位。
-                  </>
-                ) : (
-                  <>选择项目后，下方「目标匹配岗位」仅展示该项目下的岗位；下方筛查结果列表也会按同一项目过滤。</>
-                )}
-              </p>
             </div>
             <div className="mb-4">
               <label className="block text-sm font-medium text-slate-700 mb-1">目标匹配岗位</label>
@@ -4047,7 +4375,6 @@ function ResumeScreeningView({
           </div>
         </div>
 
-        {/* Results Area */}
         <div>
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden h-full flex flex-col">
             <div className="p-6 border-b border-slate-100 flex flex-row items-center justify-between gap-3">
@@ -4070,7 +4397,7 @@ function ResumeScreeningView({
                     : '暂无筛查记录。请从左侧上传简历；若长期无数据，请联系管理员确认系统是否正常。'}
                 </p>
               ) : null}
-              {resumes.map(resume => (
+              {pagedResumes.map(resume => (
                 <div key={resume.id} className="border border-slate-200 rounded-lg p-4 flex items-center gap-6 hover:border-indigo-300 transition-colors">
                   <div className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center flex-shrink-0">
                     <FileText className="w-6 h-6 text-slate-500" />
@@ -4129,6 +4456,18 @@ function ResumeScreeningView({
                 </div>
               ))}
             </div>
+            {apiBase && hasToken && resumes.length > 0 ? (
+              <ListPaginationBar
+                page={screenListPage}
+                pageSize={screenPageSize}
+                total={resumes.length}
+                onPageChange={setScreenListPage}
+                onPageSizeChange={(n) => {
+                  setScreenPageSize(n);
+                  setScreenListPage(1);
+                }}
+              />
+            ) : null}
           </div>
         </div>
       </div>
@@ -4197,7 +4536,7 @@ function ResumeScreeningView({
                 <button
                   type="button"
                   onClick={() => setInviteModal(null)}
-                  className="px-4 py-2 text-sm font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors"
+                  className={btnSaveSm}
                 >
                   知道了
                 </button>
@@ -4317,6 +4656,8 @@ function ApplicationManagementView({
     qa: Array<{ questionId?: string; question?: string; answer?: string }>
     updatedAt: string
   }>(null)
+  const [appListPage, setAppListPage] = useState(1)
+  const [appPageSize, setAppPageSize] = useState(10)
   const isAdminRole = currentRole === 'admin'
   const userDept = String(authProfile?.dept || '').trim()
   const deptScoped = Boolean(userDept && userDept !== '-')
@@ -4384,7 +4725,7 @@ function ApplicationManagementView({
               if (jc) leadJobCodes.add(jc)
             }
           }
-          setRows(
+        setRows(
             mapped.filter((x) => {
               const jc = String(x.jobCode || '').trim()
               return Boolean(jc && leadJobCodes.has(jc))
@@ -4450,6 +4791,20 @@ function ApplicationManagementView({
     return true
   })
 
+  useEffect(() => {
+    setAppListPage(1)
+  }, [keyword, statusFilter, scoreFilter])
+
+  const pagedFilteredRows = useMemo(() => {
+    const start = (appListPage - 1) * appPageSize
+    return filteredRows.slice(start, start + appPageSize)
+  }, [filteredRows, appListPage, appPageSize])
+
+  useEffect(() => {
+    const tp = Math.max(1, Math.ceil(filteredRows.length / appPageSize) || 1)
+    setAppListPage((p) => Math.min(Math.max(1, p), tp))
+  }, [filteredRows.length, appPageSize])
+
   const statusOptions = Array.from(new Set(rows.map((x) => x.status).filter(Boolean)))
   const highCount = rows.filter((x) => x.score >= 80).length
   const midCount = rows.filter((x) => x.score >= 60 && x.score < 80).length
@@ -4494,12 +4849,6 @@ function ApplicationManagementView({
           <div className="flex justify-between items-center gap-3 flex-wrap">
             <div>
               <h3 className="font-bold text-slate-900">初面管理</h3>
-              <p className="text-xs text-slate-500 mt-1 max-w-3xl leading-relaxed">
-                一条记录对应一次简历筛查。<span className="font-medium text-slate-600">平台管理员</span>始终查看全部筛查记录；<span className="font-medium text-slate-600">招聘经理</span>仅展示本人在「项目招聘负责人」中的项目下的岗位所对应的记录；<span className="font-medium text-slate-600">招聘专员</span>仅展示「岗位分配」中将自己设为该岗位「招聘人员」的岗位所对应的记录（姓名或登录账号须与本人一致）；<span className="font-medium text-slate-600">交付经理</span>按本人「所属部门」在项目中的岗位（岗位码）筛选。
-                <span className="font-medium text-slate-600">流程阶段</span>随漏斗推进：筛查完成 → 从筛查页「发起面试」后为已发邀请 → 候选人完成面试并生成报告后为初面结果。
-                面试报告按岗位码 + 姓名关联；综合分有报告时显示面试分，否则为简历匹配分。
-                「面试情况」根据邀请标记、报告与会话表汇总为可读说明（姓名不一致时可能无法关联报告）。
-              </p>
             </div>
             <button
               type="button"
@@ -4577,7 +4926,7 @@ function ApplicationManagementView({
             ) : filteredRows.length === 0 ? (
               <tr><td className="px-6 py-8 text-slate-500" colSpan={7}>暂无数据，请先在简历筛查上传简历</td></tr>
             ) : (
-              filteredRows.map((row) => (
+              pagedFilteredRows.map((row) => (
                   <tr key={row.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-6 py-4 font-bold text-slate-900">{row.candidateName}</td>
                     <td className="px-6 py-4 text-slate-600">{row.jobTitle}（{row.jobCode}）</td>
@@ -4598,21 +4947,21 @@ function ApplicationManagementView({
                       技能 {row.skill} / 经验 {row.experience} / 学历 {row.education} / 稳定 {row.stability}
                     </td>
                     <td className="px-6 py-4">
-                      <span
-                        className={`inline-block px-2 py-1 rounded text-xs font-medium ${
-                          row.status === '初面通过'
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : row.status === '初面待提升'
-                              ? 'bg-rose-100 text-rose-800'
-                              : row.status === '初面已完成' || row.status === '面试报告已出具'
-                                ? 'bg-violet-100 text-violet-800'
-                                : row.status === '已发面试邀请'
-                                  ? 'bg-amber-100 text-amber-900'
-                                  : 'bg-sky-100 text-sky-800'
-                        }`}
-                      >
-                        {row.status}
-                      </span>
+                        <span
+                          className={`inline-block px-2 py-1 rounded text-xs font-medium ${
+                            row.status === '初面通过'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : row.status === '初面待提升'
+                                ? 'bg-rose-100 text-rose-800'
+                                : row.status === '初面已完成' || row.status === '面试报告已出具'
+                                  ? 'bg-violet-100 text-violet-800'
+                                  : row.status === '已发面试邀请'
+                                    ? 'bg-amber-100 text-amber-900'
+                                    : 'bg-sky-100 text-sky-800'
+                          }`}
+                        >
+                          {row.status}
+                        </span>
                     </td>
                     <td className="px-6 py-4 text-xs text-slate-600 leading-relaxed max-w-xs">
                       {row.interviewSituation}
@@ -4644,6 +4993,18 @@ function ApplicationManagementView({
             )}
           </tbody>
         </table>
+        {!loading && filteredRows.length > 0 ? (
+          <ListPaginationBar
+            page={appListPage}
+            pageSize={appPageSize}
+            total={filteredRows.length}
+            onPageChange={setAppListPage}
+            onPageSizeChange={(n) => {
+              setAppPageSize(n)
+              setAppListPage(1)
+            }}
+          />
+        ) : null}
       </div>
       <AnimatePresence>
         {reportModal ? (
@@ -4808,10 +5169,12 @@ function SystemCrudModal({
 }
 
 function mapDeptRow(r: Record<string, unknown>): Dept {
+  const rawType = r.dept_type ?? r.deptType ?? (r as { DEPT_TYPE?: unknown }).DEPT_TYPE;
   return {
     id: String(r.id ?? ''),
     parentId: r.parent_id != null && String(r.parent_id).trim() ? String(r.parent_id) : null,
     name: String(r.name ?? ''),
+    deptType: String(rawType ?? '').trim(),
     level: Number(r.level) || 0,
     manager: String(r.manager ?? '-'),
     count: Number(r.count) || 0
@@ -4863,6 +5226,67 @@ function flattenDeptTree(depts: Dept[]): { dept: Dept; depth: number }[] {
   return out;
 }
 
+const RECRUITMENT_DEPT_BUSINESS_TYPE = '招聘';
+
+function deptIsRecruitmentBusinessType(d: Dept): boolean {
+  return String(d.deptType ?? '').trim() === RECRUITMENT_DEPT_BUSINESS_TYPE;
+}
+
+/** 沿 parentId 向上直到顶级，得到该节点所在子树的根 */
+function getRootAncestorDept(depts: Dept[], startId: string): Dept | null {
+  const byId = new Map(depts.map((d) => [d.id, d]));
+  let cur = byId.get(startId);
+  if (!cur) return null;
+  const seen = new Set<string>();
+  for (;;) {
+    if (seen.has(cur.id)) return cur;
+    seen.add(cur.id);
+    const pid = String(cur.parentId || '').trim();
+    if (!pid) return cur;
+    const next = byId.get(pid);
+    if (!next) return cur;
+    cur = next;
+  }
+}
+
+/**
+ * 项目招聘负责人 — 选部门：登录人所属部门在组织树上的顶级祖先之下的整棵子树内，
+ * 且部门类型为「招聘」的部门（按树顺序）。管理员若账号未匹配到部门节点，则展示全部「招聘」类型部门。
+ */
+function recruitmentDeptOptionsForProjectLeads(depts: Dept[], userDeptName: string, role: Role): Dept[] {
+  const recruitmentOrdered = flattenDeptTree(depts)
+    .map(({ dept }) => dept)
+    .filter((d) => deptIsRecruitmentBusinessType(d));
+
+  const ud = String(userDeptName || '').trim();
+  if (!ud || ud === '-') {
+    return role === 'admin' ? recruitmentOrdered : [];
+  }
+
+  const matched = depts.filter((d) => deptNamesMatch(ud, d.name));
+  if (!matched.length) {
+    return role === 'admin' ? recruitmentOrdered : [];
+  }
+
+  const rootIds: string[] = [];
+  for (const m of matched) {
+    const root = getRootAncestorDept(depts, m.id);
+    if (root && !rootIds.includes(root.id)) rootIds.push(root.id);
+  }
+  if (!rootIds.length) {
+    return role === 'admin' ? recruitmentOrdered : [];
+  }
+
+  const allowed = collectDescendantDeptIds(depts, rootIds);
+  return recruitmentOrdered.filter((d) => allowed.has(d.id));
+}
+
+function normalizeDeptFormType(s: string | undefined): '交付' | '招聘' | '其他' {
+  const t = String(s || '').trim();
+  if (t === '交付' || t === '招聘' || t === '其他') return t;
+  return '其他';
+}
+
 function SystemDeptView() {
   const [depts, setDepts] = useState<Dept[]>([]);
   const [loading, setLoading] = useState(true);
@@ -4873,6 +5297,7 @@ function SystemDeptView() {
   >(null);
   const [saving, setSaving] = useState(false);
   const [formName, setFormName] = useState('');
+  const [formDeptType, setFormDeptType] = useState<'交付' | '招聘' | '其他'>('交付');
   const [formLevel, setFormLevel] = useState('0');
   const [formManager, setFormManager] = useState('');
   const [formCount, setFormCount] = useState('0');
@@ -4910,6 +5335,7 @@ function SystemDeptView() {
   const openCreate = () => {
     setDialog({ mode: 'create' });
     setFormName('');
+    setFormDeptType('交付');
     setFormLevel('0');
     setFormManager('');
     setFormCount('0');
@@ -4918,6 +5344,7 @@ function SystemDeptView() {
   const openChild = (parent: Dept) => {
     setDialog({ mode: 'child', parent });
     setFormName('');
+    setFormDeptType('交付');
     setFormManager('');
     setFormCount('0');
   };
@@ -4925,6 +5352,7 @@ function SystemDeptView() {
   const openEdit = (d: Dept) => {
     setDialog({ mode: 'edit', record: d });
     setFormName(d.name);
+    setFormDeptType(normalizeDeptFormType(d.deptType));
     setFormLevel(String(Number(d.level) || 0));
     setFormManager(d.manager || '');
     setFormCount(String(Number(d.count) || 0));
@@ -4939,16 +5367,18 @@ function SystemDeptView() {
     setLoading(true);
     setError(null);
     try {
-      const [deptRows, userPayload] = await Promise.all([
-        adminFetchJson<Array<Record<string, unknown>>>('/api/depts'),
-        adminFetchJson<unknown>('/api/users')
-      ]);
-      setDepts(deptRows.map(mapDeptRow));
-      setHrUsers(usersFromApiPayload(userPayload));
+      const deptRows = await adminFetchJson<Array<Record<string, unknown>>>('/api/depts');
+      const rows = Array.isArray(deptRows) ? deptRows : [];
+      setDepts(rows.map(mapDeptRow));
     } catch (e) {
-      setError(e instanceof Error ? e.message : '加载失败');
+      setError(e instanceof Error ? e.message : '加载部门失败');
       setDepts([]);
-      setHrUsers([]);
+    }
+    try {
+      const userPayload = await adminFetchJson<unknown>('/api/users');
+      setHrUsers(usersFromApiPayload(userPayload));
+    } catch {
+      // 与部门列表无关：用户接口失败时保留已有部门数据，避免保存后整表被清空
     } finally {
       setLoading(false);
     }
@@ -4977,13 +5407,21 @@ function SystemDeptView() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             name,
+            deptType: formDeptType,
+            dept_type: formDeptType,
             level: Math.max(0, Math.min(99, level)),
             manager,
             count
           })
         });
       } else {
-        const body: Record<string, unknown> = { name, manager, count };
+        const body: Record<string, unknown> = {
+          name,
+          deptType: formDeptType,
+          dept_type: formDeptType,
+          manager,
+          count
+        };
         if (dialog.mode === 'child' && dialog.parent) {
           body.parentId = dialog.parent.id;
         } else {
@@ -5024,11 +5462,6 @@ function SystemDeptView() {
 
   return (
     <div className="space-y-6">
-      <p className="text-xs text-slate-500 max-w-3xl leading-relaxed">
-        上下级通过 <span className="font-mono text-slate-600">parent_id</span> 关联：点「新增子部门」会关联上级部门，层级由系统自动计算；部门编号由系统生成。若保存提示缺少列，请在库{' '}
-        <span className="font-mono">ai_recruit_admin</span> 执行{' '}
-        <span className="font-mono">server/migration_depts_parent_id.sql</span>。
-      </p>
       <div className="flex justify-between items-center flex-wrap gap-3">
         <div className="relative">
           <Search className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -5043,7 +5476,7 @@ function SystemDeptView() {
         <button
           type="button"
           onClick={openCreate}
-          className="bg-indigo-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-indigo-700 transition-colors shadow-sm"
+          className={btnPrimarySmFlex}
         >
           <Plus className="w-4 h-4" /> 新增顶级部门
         </button>
@@ -5068,6 +5501,7 @@ function SystemDeptView() {
             <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
               <tr>
                 <th className="px-6 py-4 font-medium">部门名称</th>
+                <th className="px-6 py-4 font-medium">类型</th>
                 <th className="px-6 py-4 font-medium">部门编号</th>
                 <th className="px-6 py-4 font-medium">负责人</th>
                 <th className="px-6 py-4 font-medium">成员数量</th>
@@ -5087,6 +5521,23 @@ function SystemDeptView() {
                       <span>{dept.name}</span>
                       <span className="text-xs font-normal text-slate-400">L{dept.level}</span>
                     </div>
+                  </td>
+                  <td className="px-6 py-4 text-slate-600 text-xs">
+                    {dept.deptType ? (
+                      <span
+                        className={
+                          dept.deptType === '招聘'
+                            ? 'rounded-md bg-emerald-50 text-emerald-800 px-2 py-0.5 font-medium'
+                            : dept.deptType === '交付'
+                              ? 'rounded-md bg-sky-50 text-sky-800 px-2 py-0.5 font-medium'
+                              : 'rounded-md bg-slate-100 text-slate-700 px-2 py-0.5 font-medium'
+                        }
+                      >
+                        {dept.deptType}
+                      </span>
+                    ) : (
+                      <span className="text-slate-400">—</span>
+                    )}
                   </td>
                   <td className="px-6 py-4 font-mono text-xs text-slate-500">{dept.id}</td>
                   <td className="px-6 py-4 text-slate-600">{dept.manager}</td>
@@ -5131,7 +5582,7 @@ function SystemDeptView() {
               type="button"
               onClick={closeDialog}
               disabled={saving}
-              className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg"
+              className={btnSecondarySm}
             >
               取消
             </button>
@@ -5139,7 +5590,7 @@ function SystemDeptView() {
               type="button"
               disabled={saving}
               onClick={() => void submitDept()}
-              className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+              className={btnSaveSm}
             >
               {saving ? '保存中…' : '保存'}
             </button>
@@ -5152,16 +5603,22 @@ function SystemDeptView() {
             <span className="text-slate-500"> · 保存后层级 = {Number(dialog.parent.level) + 1}</span>
           </div>
         ) : null}
-        {dialog?.mode === 'edit' && dialog.record?.parentId ? (
-          <p className="text-[11px] text-slate-500">
-            上级：
-            {deptById.get(dialog.record.parentId)?.name || dialog.record.parentId}
-            （子部门层级请在库中通过调整上级关系维护，此处可改数字层级作校正）
-          </p>
-        ) : null}
         <div>
           <label className="block text-xs font-medium text-slate-500 mb-1">部门名称</label>
           <input className={systemFieldClass} value={formName} onChange={(e) => setFormName(e.target.value)} />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-500 mb-1">部门类型</label>
+          <select
+            className={systemFieldClass}
+            value={formDeptType}
+            onChange={(e) => setFormDeptType(e.target.value as '交付' | '招聘' | '其他')}
+            disabled={saving}
+          >
+            <option value="交付">交付</option>
+            <option value="招聘">招聘</option>
+            <option value="其他">其他</option>
+          </select>
         </div>
         {dialog?.mode === 'edit' ? (
           <div>
@@ -5175,13 +5632,7 @@ function SystemDeptView() {
               onChange={(e) => setFormLevel(e.target.value)}
             />
           </div>
-        ) : (
-          <p className="text-xs text-slate-500">
-            {dialog?.mode === 'child'
-              ? '子部门层级由系统根据上级自动写入，无需手填。'
-              : '顶级部门层级固定为 0。'}
-          </p>
-        )}
+        ) : null}
         <div>
           <label className="block text-xs font-medium text-slate-500 mb-1">成员数量（展示用）</label>
           <input
@@ -5194,9 +5645,6 @@ function SystemDeptView() {
         </div>
         <div>
           <label className="block text-xs font-medium text-slate-500 mb-1">负责人</label>
-          <p className="text-[11px] text-slate-400 mb-1.5">
-            可从用户管理中的在职账号选择（写入姓名），也可在下方直接填写或修改。
-          </p>
           <select
             className={systemFieldClass}
             value={deptManagerSelectValue}
@@ -5253,6 +5701,7 @@ function SystemUserView({
   const [ufRole, setUfRole] = useState('');
   const [ufStatus, setUfStatus] = useState<'正常' | '停用'>('正常');
   const [ufPassword, setUfPassword] = useState('');
+  const [ufPasswordConfirm, setUfPasswordConfirm] = useState('');
 
   const myDept = String(authProfile?.dept || '').trim();
   const myDeptOk = Boolean(myDept && myDept !== '-');
@@ -5263,11 +5712,12 @@ function SystemUserView({
     setLoading(true);
     setError(null);
     try {
-      const [userRows, deptRows, roleRows] = await Promise.all([
+      const [userRows, deptRowsRaw, roleRows] = await Promise.all([
         adminFetchJson<User[]>('/api/users'),
-        adminFetchJson<Dept[]>('/api/depts'),
+        adminFetchJson<Array<Record<string, unknown>>>('/api/depts'),
         adminFetchJson<Array<Record<string, unknown>>>('/api/roles')
       ]);
+      const deptRows = Array.isArray(deptRowsRaw) ? deptRowsRaw.map(mapDeptRow) : [];
       const ud = String(authProfile?.dept || '').trim();
       const udOk = Boolean(ud && ud !== '-');
       const showAll = currentRole === 'admin';
@@ -5308,14 +5758,42 @@ function SystemUserView({
     if (!listAllUsers) setDeptFilter('');
   }, [listAllUsers]);
 
+  const userDialogRoleSelectOptions = useMemo(() => {
+    const base = roleOptions.filter((r) => roleNameAllowedInUserDialogForCreator(currentRole, r.name));
+    const list = base.length > 0 ? base : roleOptions;
+    if (userDialog?.mode === 'edit' && userDialog.user) {
+      const cur = String(userDialog.user.role || '').trim();
+      if (cur && !list.some((r) => r.name === cur)) {
+        return [...list, { id: '__current_role__', name: cur, desc: '', users: 0 }];
+      }
+    }
+    return list;
+  }, [roleOptions, currentRole, userDialog]);
+
   const openUserCreate = () => {
     setUserDialog({ mode: 'create' });
     setUfName('');
     setUfUsername('');
     setUfDept(listAllUsers ? '' : myDeptOk && deptNames.includes(myDept) ? myDept : deptNames[0] || '');
-    setUfRole(roleOptions[0]?.name || '招聘人员');
+    const allowed = roleOptions.filter((r) => roleNameAllowedInUserDialogForCreator(currentRole, r.name));
+    const priority: string[] =
+      currentRole === 'delivery_manager'
+        ? ['交付经理']
+        : currentRole === 'recruiting_manager'
+          ? ['招聘经理', '招聘人员', '招聘专员']
+          : [];
+    let def = '';
+    for (const p of priority) {
+      if (allowed.some((r) => r.name === p)) {
+        def = p;
+        break;
+      }
+    }
+    if (!def) def = allowed[0]?.name || roleOptions[0]?.name || '招聘人员';
+    setUfRole(def);
     setUfStatus('正常');
     setUfPassword('');
+    setUfPasswordConfirm('');
   };
 
   const openUserEdit = (u: User) => {
@@ -5326,11 +5804,13 @@ function SystemUserView({
     setUfRole(u.role || '');
     setUfStatus(u.status === '停用' ? '停用' : '正常');
     setUfPassword('');
+    setUfPasswordConfirm('');
   };
 
   const closeUserDialog = () => {
     if (saving) return;
     setUserDialog(null);
+    setUfPasswordConfirm('');
   };
 
   const submitUser = async () => {
@@ -5339,8 +5819,16 @@ function SystemUserView({
     const username = ufUsername.trim();
     const dept = ufDept.trim() || '-';
     const role = ufRole.trim() || '招聘人员';
-    if (!name || !username) {
-      setError('请填写姓名与登录账号');
+    if (!name.trim()) {
+      setError('请填写姓名');
+      return;
+    }
+    if (!username) {
+      if (userDialog.mode === 'create' && !roleAllowsNonMobileLoginUsername(role)) {
+        setError('请填写手机号（即登录账号）');
+      } else {
+        setError(roleAllowsNonMobileLoginUsername(role) ? '请填写登录账号' : '请填写手机号（即登录账号）');
+      }
       return;
     }
     if (!listAllUsers && myDeptOk && !deptNamesMatch(myDept, dept)) {
@@ -5356,9 +5844,30 @@ function SystemUserView({
       setError(unErr);
       return;
     }
-    if (userDialog.mode === 'create' && !ufPassword.trim()) {
-      setError('请设置初始密码');
+    if (userDialog.mode === 'create') {
+      if (!ufPassword.trim()) {
+        setError('请输入初始密码');
+        return;
+      }
+      if (!ufPasswordConfirm.trim()) {
+        setError('请输入确认密码');
+        return;
+      }
+      if (ufPassword !== ufPasswordConfirm) {
+        setError('两次输入的密码不一致');
+        return;
+      }
+    }
+    if (currentRole !== 'admin' && userDialog.mode === 'create' && !roleNameAllowedInUserDialogForCreator(currentRole, role)) {
+      setError('当前账号无权创建该角色');
       return;
+    }
+    if (currentRole !== 'admin' && userDialog.mode === 'edit' && userDialog.user) {
+      const prev = String(userDialog.user.role || '').trim();
+      if (role !== prev && !roleNameAllowedInUserDialogForCreator(currentRole, role)) {
+        setError('当前账号无权将该用户改为所选角色');
+        return;
+      }
     }
     setSaving(true);
     setError(null);
@@ -5392,6 +5901,8 @@ function SystemUserView({
         });
       }
       setUserDialog(null);
+      setUfPassword('');
+      setUfPasswordConfirm('');
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : '保存失败');
@@ -5450,11 +5961,6 @@ function SystemUserView({
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-slate-900">用户管理</h1>
-        <p className="text-xs text-slate-500 mt-2 max-w-3xl leading-relaxed">
-          {listAllUsers
-            ? '平台管理员可查看与维护全部用户（与本人是否配置「所属部门」无关）。'
-            : '仅展示与当前登录账号「所属部门」一致的用户；其他部门人员不在此列表。新建用户时部门限定在本部门范围内。'}
-        </p>
       </div>
       {!listAllUsers && !myDeptOk ? (
         <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">
@@ -5474,25 +5980,25 @@ function SystemUserView({
             />
           </div>
           {listAllUsers ? (
-            <select
-              value={deptFilter}
-              onChange={(e) => setDeptFilter(e.target.value)}
-              className="border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none text-slate-600 min-w-[10rem]"
-            >
-              <option value="">全部部门</option>
-              {deptNames.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
+          <select
+            value={deptFilter}
+            onChange={(e) => setDeptFilter(e.target.value)}
+            className="border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none text-slate-600 min-w-[10rem]"
+          >
+            <option value="">全部部门</option>
+            {deptNames.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
           ) : null}
         </div>
         <button
           type="button"
           onClick={openUserCreate}
           disabled={!listAllUsers && !myDeptOk}
-          className="bg-indigo-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-indigo-700 transition-colors shadow-sm disabled:opacity-50 disabled:pointer-events-none"
+          className={`${btnPrimarySmFlex} disabled:opacity-50 disabled:pointer-events-none`}
         >
           <Plus className="w-4 h-4" /> 新增用户
         </button>
@@ -5525,7 +6031,7 @@ function SystemUserView({
             <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
               <tr>
                 <th className="px-6 py-4 font-medium">姓名</th>
-                <th className="px-6 py-4 font-medium">登录账号</th>
+                <th className="px-6 py-4 font-medium">手机号（登录）</th>
                 <th className="px-6 py-4 font-medium">所属部门</th>
                 <th className="px-6 py-4 font-medium">角色</th>
                 <th className="px-6 py-4 font-medium">状态</th>
@@ -5608,7 +6114,7 @@ function SystemUserView({
               type="button"
               onClick={closeUserDialog}
               disabled={saving}
-              className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg"
+              className={btnSecondarySm}
             >
               取消
             </button>
@@ -5616,7 +6122,7 @@ function SystemUserView({
               type="button"
               disabled={saving}
               onClick={() => void submitUser()}
-              className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+              className={btnSaveSm}
             >
               {saving ? '保存中…' : '保存'}
             </button>
@@ -5629,13 +6135,17 @@ function SystemUserView({
         </div>
         <div>
           <label className="block text-xs font-medium text-slate-500 mb-1">
-            {roleAllowsNonMobileLoginUsername(ufRole) ? '登录账号' : '登录账号（手机号）'}
+            {userDialog?.mode === 'create' && !roleAllowsNonMobileLoginUsername(ufRole) ? (
+              <>
+                手机号（即登录账号）
+                <span className="text-red-500 font-medium ml-0.5" title="必填">
+                  *
+                </span>
+              </>
+            ) : (
+              '登录账号'
+            )}
           </label>
-          <p className="text-[11px] text-slate-400 mb-1.5">
-            {roleAllowsNonMobileLoginUsername(ufRole)
-              ? '平台管理员等可使用字母/数字账号（如 admin）。'
-              : '新增用户请使用 11 位中国大陆手机号作为登录名，与员工手机号一致。'}
-          </p>
           <input
             type={roleAllowsNonMobileLoginUsername(ufRole) ? 'text' : 'tel'}
             className={systemFieldClass}
@@ -5647,6 +6157,8 @@ function SystemUserView({
             placeholder={
               roleAllowsNonMobileLoginUsername(ufRole) ? '例如 admin' : '例如 13800138000'
             }
+            required={userDialog?.mode === 'create' && !roleAllowsNonMobileLoginUsername(ufRole)}
+            aria-required={userDialog?.mode === 'create' && !roleAllowsNonMobileLoginUsername(ufRole)}
           />
         </div>
         <div>
@@ -5684,15 +6196,10 @@ function SystemUserView({
             value={ufRole}
             onChange={(e) => setUfRole(e.target.value)}
           >
-            {userDialog?.mode === 'edit' &&
-            ufRole &&
-            !roleOptions.some((r) => r.name === ufRole) ? (
-              <option value={ufRole}>{ufRole}</option>
-            ) : null}
-            {roleOptions.length === 0 ? (
+            {userDialogRoleSelectOptions.length === 0 ? (
               <option value="招聘人员">招聘人员</option>
             ) : (
-              roleOptions.map((r) => (
+              userDialogRoleSelectOptions.map((r) => (
                 <option key={r.id} value={r.name}>
                   {r.name}
                 </option>
@@ -5711,18 +6218,41 @@ function SystemUserView({
             <option value="停用">停用</option>
           </select>
         </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-500 mb-1">
-            {userDialog?.mode === 'edit' ? '新密码（留空则不修改）' : '初始密码'}
-          </label>
-          <input
-            type="password"
-            className={systemFieldClass}
-            value={ufPassword}
-            onChange={(e) => setUfPassword(e.target.value)}
-            autoComplete="new-password"
-          />
-        </div>
+        {userDialog?.mode === 'edit' ? (
+          <div>
+            <label className="block text-xs font-medium text-slate-500 mb-1">新密码（留空则不修改）</label>
+            <input
+              type="password"
+              className={systemFieldClass}
+              value={ufPassword}
+              onChange={(e) => setUfPassword(e.target.value)}
+              autoComplete="new-password"
+            />
+          </div>
+        ) : (
+          <>
+            <div>
+              <label className="block text-xs font-medium text-slate-500 mb-1">初始密码</label>
+              <input
+                type="password"
+                className={systemFieldClass}
+                value={ufPassword}
+                onChange={(e) => setUfPassword(e.target.value)}
+                autoComplete="new-password"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-500 mb-1">确认密码</label>
+              <input
+                type="password"
+                className={systemFieldClass}
+                value={ufPasswordConfirm}
+                onChange={(e) => setUfPasswordConfirm(e.target.value)}
+                autoComplete="new-password"
+              />
+            </div>
+          </>
+        )}
       </SystemCrudModal>
     </div>
   );
@@ -5905,7 +6435,7 @@ function SystemRoleView() {
         <button
           type="button"
           onClick={openCreate}
-          className="bg-indigo-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-indigo-700 transition-colors shadow-sm"
+          className={btnPrimarySmFlex}
         >
           <Plus className="w-4 h-4" /> 新增角色
         </button>
@@ -5989,7 +6519,7 @@ function SystemRoleView() {
               type="button"
               onClick={closeDialog}
               disabled={saving}
-              className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg"
+              className={btnSecondarySm}
             >
               取消
             </button>
@@ -5997,7 +6527,7 @@ function SystemRoleView() {
               type="button"
               disabled={saving}
               onClick={() => void submitRole()}
-              className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+              className={btnSaveSm}
             >
               {saving ? '保存中…' : '保存'}
             </button>
@@ -6025,13 +6555,9 @@ function SystemRoleView() {
             value={rfUsers}
             onChange={(e) => setRfUsers(e.target.value)}
           />
-          <p className="text-xs text-slate-400 mt-1">与真实 users 表未自动同步，仅作展示。</p>
         </div>
         <div className="border-t border-slate-100 pt-4 mt-2">
-          <p className="text-xs font-semibold text-slate-700 mb-2">可见菜单（与左侧导航一致）</p>
-          <p className="text-[11px] text-slate-500 mb-3 leading-relaxed">
-            用户管理里「角色」字段须与本角色<strong>名称完全一致</strong>，登录后才会套用此处配置。选择「跟随职级默认」时不写入限制，侧边栏仅按账号职级（管理员/交付/招聘）显示。
-          </p>
+          <p className="text-xs font-semibold text-slate-700 mb-2">可见菜单</p>
           <div className="flex flex-col gap-2 mb-3">
             <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
               <input
@@ -6266,17 +6792,6 @@ function SystemMenuView() {
 
   return (
     <div className="space-y-6">
-      <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 px-4 py-3 text-sm text-indigo-950 leading-relaxed">
-        <p className="font-semibold text-indigo-900 mb-1">说明</p>
-        <p>
-          左侧导航<strong>实际显示哪些菜单</strong>由「角色管理」中各角色的<strong>可见菜单</strong>配置（写入{' '}
-          <code className="text-xs bg-white/80 px-1 rounded">roles.menu_keys</code>
-          ）与账号<strong>职级</strong>共同决定：仅勾选且职级允许的项会显示。本页维护菜单树与路由路径元数据；目录下新增子菜单依赖库表{' '}
-          <code className="text-xs bg-white/80 px-1 rounded">menus.parent_id</code>
-          ，若列表无法树形展开或保存报错，请在管理库执行{' '}
-          <span className="font-mono text-xs">server/migration_menus_parent_id.sql</span>。
-        </p>
-      </div>
       <div className="flex justify-between items-center flex-wrap gap-3">
         <div className="relative">
           <Search className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -6291,7 +6806,7 @@ function SystemMenuView() {
         <button
           type="button"
           onClick={openCreate}
-          className="bg-indigo-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-indigo-700 transition-colors shadow-sm"
+          className={btnPrimarySmFlex}
         >
           <Plus className="w-4 h-4" /> 新增菜单
         </button>
@@ -6403,7 +6918,6 @@ function SystemMenuView() {
         {dialog?.mode === 'child' && dialog.parent ? (
           <div className="rounded-lg bg-slate-50 border border-slate-100 px-3 py-2 text-xs text-slate-600">
             上级菜单：<span className="font-medium text-slate-800">{dialog.parent.name}</span>
-            <span className="text-slate-500"> · 保存后将挂在此目录下；层级由后台按上级自动计算。</span>
           </div>
         ) : null}
         <div>
@@ -6447,11 +6961,6 @@ function SystemMenuView() {
         </div>
         <div>
           <label className="block text-xs font-medium text-slate-500 mb-1">路由路径</label>
-          <p className="text-[11px] text-slate-400 mb-1.5 leading-relaxed">
-            建议与模块 URL 前缀一致：如 <span className="font-mono">/projects/list</span>、
-            <span className="font-mono">/recruitment/resume</span>、<span className="font-mono">/system/users</span> 等。左侧实际高亮与跳转由代码中的菜单 id（如{' '}
-            <span className="font-mono">project-list</span>）与角色可见菜单配置决定，此处 path 主要作分层展示与文档对照。
-          </p>
           <input className={systemFieldClass} value={mfPath} onChange={(e) => setMfPath(e.target.value)} />
         </div>
       </SystemCrudModal>

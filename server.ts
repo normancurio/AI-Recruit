@@ -81,6 +81,80 @@ function normalizeRecruitersForDb(raw: unknown): string {
   return '[]';
 }
 
+type GenerateJdPayload = { title: string; level: string; location?: string; salary?: string };
+
+async function generateJobJdDashScope(payload: GenerateJdPayload): Promise<string> {
+  const apiKey = process.env.DASHSCOPE_API_KEY?.trim();
+  const base = (
+    process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+  ).replace(/\/$/, '');
+  const model = (process.env.QWEN_QUESTION_MODEL || 'qwen-turbo').trim();
+  const loc = String(payload.location || '').trim();
+  const sal = String(payload.salary || '').trim();
+  const userMsg = [
+    '请根据以下信息编写一份中文职位描述（JD），结构包含：一、岗位概述；二、岗位职责（分条）；三、任职要求（分条）；四、加分项（可选）。语气专业简洁，不要使用 markdown 代码围栏。',
+    '',
+    `岗位名称：${payload.title}`,
+    `级别：${payload.level}`,
+    loc ? `工作地点：${loc}` : '',
+    sal ? `薪资范围：${sal}` : ''
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  if (!apiKey) {
+    return [
+      `【${payload.title}】（${payload.level}）`,
+      '',
+      '一、岗位概述',
+      `本岗位与「${payload.title}」相关工作，级别为 ${payload.level}。`,
+      loc ? `工作地点：${loc}。` : '',
+      sal ? `参考薪资：${sal}。` : '',
+      '',
+      '二、岗位职责',
+      '（请根据实际业务补充）',
+      '',
+      '三、任职要求',
+      `1. 符合「${payload.level}」能力要求；`,
+      '2. 良好的沟通与协作能力。',
+      '',
+      '—— 未配置 DASHSCOPE_API_KEY 时为占位模板；配置阿里云百炼密钥后可生成更完整 JD。'
+    ].join('\n');
+  }
+
+  const resp = await fetch(`${base}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.65,
+      messages: [
+        {
+          role: 'system',
+          content:
+            '你是资深招聘与用人经理，只输出可直接粘贴到招聘系统的岗位 JD 正文，使用中文，适当用序号分条，不要输出 JSON，不要用 markdown 代码块围栏。'
+        },
+        { role: 'user', content: userMsg }
+      ]
+    })
+  });
+  const data = (await resp.json()) as {
+    choices?: { message?: { content?: string } }[];
+    error?: { message?: string };
+    message?: string;
+  };
+  if (!resp.ok) {
+    const msg = data?.error?.message || data?.message || JSON.stringify(data);
+    throw new Error(msg || '大模型调用失败');
+  }
+  const text = String(data?.choices?.[0]?.message?.content || '').trim();
+  if (!text) throw new Error('大模型未返回内容');
+  return text;
+}
+
 /** 业务库 projects 是否已执行 migration_projects_ui_fields.sql */
 let bizProjectsUiFields: boolean | null = null;
 async function bizProjectsHaveUiFields(pool: mysql.Pool): Promise<boolean> {
@@ -203,6 +277,26 @@ function assertLoginUsernameMatchesRole(username: string, role: string): string 
   return null;
 }
 
+/** 老库若未执行 migration_depts_dept_type.sql，会导致列表类型一直为「—」且无法写入 */
+async function ensureAdminDeptsDeptTypeColumn(pool: mysql.Pool, database: string): Promise<void> {
+  try {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT 1 AS ok FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'depts' AND COLUMN_NAME = 'dept_type' LIMIT 1`,
+      [database]
+    );
+    if (Array.isArray(rows) && rows.length > 0) return;
+    await pool.query(
+      `ALTER TABLE depts ADD COLUMN dept_type VARCHAR(32) NOT NULL DEFAULT '' COMMENT '交付/招聘/其他等' AFTER name`
+    );
+    console.log('[server.ts] 已为管理库 depts 表自动补充 dept_type 列（此前缺失）');
+  } catch (e) {
+    const err = e as { code?: string };
+    if (err.code === 'ER_DUP_FIELDNAME') return;
+    console.warn('[server.ts] 检查/补充 depts.dept_type 列未成功（若部门类型仍无法保存，请手动执行 server/migration_depts_dept_type.sql）', e);
+  }
+}
+
 async function startServer() {
   try {
     await adminPool.query('SELECT 1');
@@ -212,6 +306,8 @@ async function startServer() {
     console.error(e);
     process.exit(1);
   }
+
+  await ensureAdminDeptsDeptTypeColumn(adminPool, adminDb);
 
   const app = express();
   /** 与 server/index.ts 的 PORT（默认 3001）分离，避免同时跑两套服务时端口冲突 */
@@ -607,6 +703,25 @@ async function startServer() {
     }
   });
 
+  app.post('/api/jobs/generate-jd', async (req, res) => {
+    try {
+      const body = req.body as Record<string, unknown> | null;
+      const title = String(body?.title || '').trim();
+      const level = String(body?.level || '').trim();
+      if (!title || !level) {
+        res.status(400).json({ message: '请填写岗位名称与级别后再生成 JD' });
+        return;
+      }
+      const location = String(body?.location || '').trim();
+      const salary = String(body?.salary || '').trim();
+      const jdText = await generateJobJdDashScope({ title, level, location, salary });
+      res.json({ jdText });
+    } catch (e) {
+      console.error('[POST /api/jobs/generate-jd]', e);
+      res.status(500).json({ message: e instanceof Error ? e.message : '生成失败' });
+    }
+  });
+
   app.post('/api/jobs', async (req, res) => {
     try {
       const body = req.body as Record<string, unknown> | null;
@@ -614,6 +729,21 @@ async function startServer() {
       let jobCode = String(body?.jobCode || '').trim().toUpperCase();
       if (!title) {
         res.status(400).json({ message: '岗位名称必填' });
+        return;
+      }
+      const locationReq = String(body?.location ?? '').trim();
+      const levelReq = String(body?.level ?? '').trim();
+      const salaryReq = String(body?.salary ?? '').trim();
+      if (!locationReq) {
+        res.status(400).json({ message: '工作地点必填' });
+        return;
+      }
+      if (!levelReq) {
+        res.status(400).json({ message: '级别必填' });
+        return;
+      }
+      if (!salaryReq) {
+        res.status(400).json({ message: '薪资范围必填' });
         return;
       }
       if (!jobCode) {
@@ -633,10 +763,10 @@ async function startServer() {
       const rawDemand = Number(body?.demand);
       const demand =
         Number.isFinite(rawDemand) && rawDemand > 0 ? Math.min(Math.floor(rawDemand), 99999) : 1;
-      const location = String(body?.location ?? '').trim() || null;
+      const location = locationReq || null;
       const skills = String(body?.skills ?? '').trim() || null;
-      const level = String(body?.level ?? '').trim() || null;
-      const salary = String(body?.salary ?? '').trim() || null;
+      const level = levelReq || null;
+      const salary = salaryReq || null;
       const recruitersJson = normalizeRecruitersForDb(body?.recruiters);
       const hasClaim = await jobsHaveClaimedBy(bizPool);
       const initialClaim = null;
@@ -707,6 +837,21 @@ async function startServer() {
         res.status(400).json({ message: '岗位名称必填' });
         return;
       }
+      const locationReq = String(body?.location ?? '').trim();
+      const levelReq = String(body?.level ?? '').trim();
+      const salaryReq = String(body?.salary ?? '').trim();
+      if (!locationReq) {
+        res.status(400).json({ message: '工作地点必填' });
+        return;
+      }
+      if (!levelReq) {
+        res.status(400).json({ message: '级别必填' });
+        return;
+      }
+      if (!salaryReq) {
+        res.status(400).json({ message: '薪资范围必填' });
+        return;
+      }
       const department = String(body?.department ?? '').trim();
       const jdText = body?.jdText !== undefined ? String(body.jdText) : '';
       const projectIdRaw = body?.projectId;
@@ -726,10 +871,10 @@ async function startServer() {
       const rawDemand = Number(body?.demand);
       const demand =
         Number.isFinite(rawDemand) && rawDemand > 0 ? Math.min(Math.floor(rawDemand), 99999) : 1;
-      const location = String(body?.location ?? '').trim();
+      const location = locationReq;
       const skills = String(body?.skills ?? '').trim();
-      const level = String(body?.level ?? '').trim();
-      const salary = String(body?.salary ?? '').trim();
+      const level = levelReq;
+      const salary = salaryReq;
       const recruitersJson =
         body?.recruiters !== undefined ? normalizeRecruitersForDb(body.recruiters) : undefined;
 
@@ -748,13 +893,13 @@ async function startServer() {
       fields.push('demand=?');
       vals.push(demand);
       fields.push('location=?');
-      vals.push(location || null);
+      vals.push(location);
       fields.push('skills=?');
       vals.push(skills || null);
       fields.push('level=?');
-      vals.push(level || null);
+      vals.push(level);
       fields.push('salary=?');
-      vals.push(salary || null);
+      vals.push(salary);
       if (recruitersJson !== undefined) {
         fields.push('recruiters=CAST(? AS JSON)');
         vals.push(recruitersJson);
@@ -891,6 +1036,7 @@ async function startServer() {
       return;
     }
     const parentId = String(b.parentId || b.parent_id || '').trim() || null;
+    const deptType = String(b.deptType || b.dept_type || '').trim().slice(0, 32);
     const manager = String(b.manager || '').trim() || '-';
     const count = Number(b.count);
     const ct = Number.isFinite(count) ? count : 0;
@@ -916,8 +1062,8 @@ async function startServer() {
         customId ||
         `dept_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
       await adminPool.query(
-        'INSERT INTO depts (id, parent_id, name, level, manager, count) VALUES (?, ?, ?, ?, ?, ?)',
-        [id, parentId, name, lv, manager, ct]
+        'INSERT INTO depts (id, parent_id, name, dept_type, level, manager, count) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [id, parentId, name, deptType, lv, manager, ct]
       );
       res.status(201).json({ id });
     } catch (e) {
@@ -926,6 +1072,12 @@ async function startServer() {
         return;
       }
       const err = e as { code?: string; message?: string };
+      if (err.code === 'ER_BAD_FIELD_ERROR' && String(err.message || '').includes('dept_type')) {
+        res.status(503).json({
+          message: 'depts 表缺少 dept_type 列，请执行 server/migration_depts_dept_type.sql 后重试'
+        });
+        return;
+      }
       if (err.code === 'ER_BAD_FIELD_ERROR' || String(err.message || '').includes('parent_id')) {
         res.status(503).json({
           message: 'depts 表缺少 parent_id 列，请执行 server/migration_depts_parent_id.sql 后重试'
@@ -969,6 +1121,11 @@ async function startServer() {
       patches.push('count = ?');
       vals.push(Number.isFinite(count) ? count : 0);
     }
+    if (b.deptType !== undefined || b.dept_type !== undefined) {
+      const raw = b.deptType !== undefined ? b.deptType : b.dept_type;
+      patches.push('dept_type = ?');
+      vals.push(String(raw ?? '').trim().slice(0, 32));
+    }
     if (patches.length === 0) {
       res.status(400).json({ message: '无有效更新字段' });
       return;
@@ -979,12 +1136,27 @@ async function startServer() {
         `UPDATE depts SET ${patches.join(', ')} WHERE id = ?`,
         vals
       );
+      // MySQL 默认「受影响行数」常为*实际被改写的行*：若新值与旧值完全一致，affectedRows 可能为 0，但部门仍存在。
       if (!hdr.affectedRows) {
-        res.status(404).json({ message: '部门不存在' });
-        return;
+        const [existRows] = await adminPool.query<RowDataPacket[]>(
+          'SELECT 1 AS ok FROM depts WHERE id = ? LIMIT 1',
+          [id]
+        );
+        if (!existRows.length) {
+          res.status(404).json({ message: '部门不存在' });
+          return;
+        }
       }
       res.json({ ok: true });
-    } catch {
+    } catch (e) {
+      const err = e as { code?: string; message?: string };
+      if (err.code === 'ER_BAD_FIELD_ERROR' && String(err.message || '').includes('dept_type')) {
+        res.status(503).json({
+          message: 'depts 表缺少 dept_type 列，请执行 server/migration_depts_dept_type.sql 后重试'
+        });
+        return;
+      }
+      console.error('[PATCH /api/depts/:id]', e);
       res.status(500).json({ message: 'db error' });
     }
   });

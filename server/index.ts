@@ -111,6 +111,79 @@ async function pingRedis(): Promise<boolean> {
   }
 }
 
+/** 管理端登录图形验证码（存 Redis，TTL 默认 180s） */
+const ADMIN_CAPTCHA_PREFIX =
+  String(process.env.REDIS_CAPTCHA_PREFIX || 'ar:admin:captcha:').trim() || 'ar:admin:captcha:'
+const ADMIN_CAPTCHA_TTL_SEC = Math.min(
+  600,
+  Math.max(60, Number.parseInt(String(process.env.ADMIN_CAPTCHA_TTL_SEC || '180'), 10) || 180)
+)
+
+function escapeXmlText(s: string): string {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function randomAdminCaptchaText(len = 4): string {
+  const chars = '346789ABCDEFGHJKLMNPQRTUVWXY'
+  const buf = crypto.randomBytes(len)
+  let out = ''
+  for (let i = 0; i < len; i++) out += chars[buf[i]! % chars.length]!
+  return out
+}
+
+function buildAdminCaptchaSvg(text: string): string {
+  const w = 132
+  const h = 44
+  const chars = [...text]
+  let texts = ''
+  let x = 14
+  for (let i = 0; i < chars.length; i++) {
+    const ch = escapeXmlText(chars[i]!)
+    const rot = ((i * 7 + (chars[i]!.charCodeAt(0) % 11)) % 9) - 4
+    texts += `<text x="${x}" y="31" font-size="22" font-family="system-ui,Segoe UI,sans-serif" font-weight="700" fill="#0f172a" transform="rotate(${rot} ${x + 10} 24)">${ch}</text>`
+    x += 28
+  }
+  let lines = ''
+  for (let i = 0; i < 5; i++) {
+    const b1 = crypto.randomBytes(4)
+    const x1 = b1[0]! % w
+    const y1 = b1[1]! % h
+    const x2 = b1[2]! % w
+    const y2 = b1[3]! % h
+    lines += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#cbd5e1" stroke-width="1"/>`
+  }
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
+    `<rect width="100%" height="100%" fill="#f1f5f9"/>` +
+    lines +
+    texts +
+    `</svg>`
+  )
+}
+
+/** 校验通过后删除 key（一次性）；错误输入不删，可继续试同一图 */
+async function verifyAdminCaptchaAndConsume(captchaId: string, captchaCode: string): Promise<boolean> {
+  const r = getRedisClient()
+  if (!r) return false
+  const id = String(captchaId || '').trim()
+  const input = String(captchaCode || '').trim().toLowerCase()
+  if (!id || !input) return false
+  const key = `${ADMIN_CAPTCHA_PREFIX}${id}`
+  try {
+    const stored = await r.get(key)
+    if (!stored) return false
+    if (String(stored).toLowerCase() !== input) return false
+    await r.del(key)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function maskSecret(value: string, keepStart = 3, keepEnd = 2) {
   if (!value) return '(empty)'
   if (value.length <= keepStart + keepEnd) return '*'.repeat(value.length)
@@ -815,22 +888,14 @@ function genTrtcUserSig(sdkAppId: number, secretKey: string, userId: string, exp
   return api.genSig(userId, expireSeconds)
 }
 
-/** 小程序 AI 面：Q1 自我介绍；Q2～Q3 基于简历项目；Q4～Q6 纯技术（结合 JD）。仅大模型生成，无内置题库兜底。 */
-async function generatePersonalizedInterviewSix(params: {
+function buildPersonalizedInterviewUserPromptBlock(params: {
   title: string
   department?: string
   jdText: string
   resumeText: string
   candidateName: string
 }) {
-  const total = PERSONALIZED_INTERVIEW_TOTAL
   const hasResume = Boolean(String(params.resumeText || '').trim())
-  const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
-  if (!apiKey) {
-    if (flowLogEnabled) flowLog('interview-questions AI', false, '未配置 DASHSCOPE_API_KEY')
-    throwInterviewQuestionsHttp(503, '未配置大模型密钥（DASHSCOPE_API_KEY），面试题仅由模型生成')
-  }
-  const model = process.env.QWEN_QUESTION_MODEL || 'qwen3.5-plus'
   const clipResume = String(params.resumeText || '')
     .replace(/\s+/g, ' ')
     .slice(0, 20000)
@@ -846,6 +911,138 @@ async function generatePersonalizedInterviewSix(params: {
       ? `简历全文（节选）：${clipResume}`
       : '（未提供匹配到该候选人姓名的简历正文：Q2、Q3 请结合 JD 设计「假设候选人具备典型背景」的项目深挖题，题干中不要写「因无简历」之类字样。）'
   ].join('\n')
+  return { hasResume, userPrompt }
+}
+
+function assertDashScopeForInterview(): { apiKey: string; model: string } {
+  const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
+  if (!apiKey) {
+    if (flowLogEnabled) flowLog('interview-questions AI', false, '未配置 DASHSCOPE_API_KEY')
+    throwInterviewQuestionsHttp(503, '未配置大模型密钥（DASHSCOPE_API_KEY），面试题仅由模型生成')
+  }
+  const model = process.env.QWEN_QUESTION_MODEL || 'qwen3.5-plus'
+  return { apiKey, model }
+}
+
+/** 仅 Q1：供小程序先开答，其余题异步拉取 */
+async function generatePersonalizedInterviewFirst(params: {
+  title: string
+  department?: string
+  jdText: string
+  resumeText: string
+  candidateName: string
+}) {
+  const { model } = assertDashScopeForInterview()
+  const { userPrompt } = buildPersonalizedInterviewUserPromptBlock(params)
+  try {
+    const data = await dashScopeChatCompletions({
+      model,
+      messages: [
+        {
+          role: 'system',
+          content:
+            '你是资深技术面试官。请严格输出恰好 1 道中文面试题，放在一个 JSON 对象里，格式：{"questions":[{"id":"Q1","text":"题干"}]}。\n' +
+            '要求：Q1 为开场自我介绍题，约 2～3 分钟，可提示包含教育、工作/项目亮点；不要 markdown 代码块，不要其它说明文字。'
+        },
+        { role: 'user', content: userPrompt }
+      ],
+      temperature: 0.45
+    })
+    const raw = data?.choices?.[0]?.message?.content
+    const text = typeof raw === 'string' ? raw : ''
+    if (!text.trim()) {
+      if (flowLogEnabled) {
+        flowLog('interview-questions AI', false, `模型返回空(首题) model=${model} ${JSON.stringify(data).slice(0, 400)}`)
+      }
+      throwInterviewQuestionsHttp(502, '大模型未返回有效题目，请稍后重试')
+    }
+    const parsed = parseQuestionsJson(text, 1)
+    if (parsed?.length === 1 && parsed[0].text) {
+      return [{ id: 'Q1', text: parsed[0].text }]
+    }
+    if (flowLogEnabled) flowLog('interview-questions AI', false, `JSON 解析失败(首题) model=${model}`)
+    throwInterviewQuestionsHttp(502, '大模型输出格式异常（首题），请稍后重试')
+  } catch (e) {
+    if ((e as InterviewQuestionsHttpError).httpStatus) throw e
+    const msg = e instanceof Error ? e.message : String(e)
+    if (flowLogEnabled) flowLog('interview-questions AI', false, `DashScope 异常(首题) model=${model} ${msg}`)
+    throwInterviewQuestionsHttp(502, `大模型出题失败：${msg.slice(0, 200)}`)
+  }
+}
+
+/** Q2～Q6：在首题已展示后生成，题干勿与首题重复 */
+async function generatePersonalizedInterviewRest(params: {
+  title: string
+  department?: string
+  jdText: string
+  resumeText: string
+  candidateName: string
+  firstQuestionText: string
+}) {
+  const restCount = PERSONALIZED_INTERVIEW_TOTAL - 1
+  const { model } = assertDashScopeForInterview()
+  const { userPrompt } = buildPersonalizedInterviewUserPromptBlock(params)
+  const firstT = String(params.firstQuestionText || '').trim().slice(0, 2000)
+  const userWithFirst = [userPrompt, `首题已向候选人展示，请勿重复首题内容，并自然衔接深度考察：\n${firstT || '（首题文本缺失，仍请输出 Q2～Q6）'}`].join(
+    '\n\n'
+  )
+  try {
+    const data = await dashScopeChatCompletions({
+      model,
+      messages: [
+        {
+          role: 'system',
+          content:
+            `你是资深技术面试官。请严格输出恰好 ${restCount} 道中文面试题，放在一个 JSON 对象里，格式：{"questions":[{"id":"Q2","text":"题干"},…]}。\n` +
+            '要求：\n' +
+            '1) Q2、Q3：必须围绕简历中的具体项目、实习或工作经历追问（技术细节、职责边界、难点与结果）；若用户消息中说明无简历则结合 JD 设计两道「项目/交付」情景深挖题。\n' +
+            '2) Q4、Q5、Q6：与岗位 JD 强相关的纯技术题（可含原理、方案对比、排错、性能、安全等），不要行为面或空泛的「你怎么看」。\n' +
+            `id 必须为 Q2 到 Q${PERSONALIZED_INTERVIEW_TOTAL} 递增；不要 markdown 代码块，不要其它说明文字。`
+        },
+        { role: 'user', content: userWithFirst }
+      ],
+      temperature: 0.45
+    })
+    const raw = data?.choices?.[0]?.message?.content
+    const text = typeof raw === 'string' ? raw : ''
+    if (!text.trim()) {
+      if (flowLogEnabled) {
+        flowLog('interview-questions AI', false, `模型返回空(余题) model=${model} ${JSON.stringify(data).slice(0, 400)}`)
+      }
+      throwInterviewQuestionsHttp(502, '大模型未返回有效题目，请稍后重试')
+    }
+    const parsed = parseQuestionsJson(text, restCount)
+    if (parsed?.length) {
+      const out = parsed
+        .slice(0, restCount)
+        .map((q, idx) => ({
+          id: `Q${idx + 2}`,
+          text: String(q?.text || '').trim()
+        }))
+        .filter((q) => q.text)
+      if (out.length === restCount) return out
+    }
+    if (flowLogEnabled) flowLog('interview-questions AI', false, `JSON 解析失败或题量不足(余题) model=${model}`)
+    throwInterviewQuestionsHttp(502, '大模型输出格式异常或未生成完整后续题目，请稍后重试')
+  } catch (e) {
+    if ((e as InterviewQuestionsHttpError).httpStatus) throw e
+    const msg = e instanceof Error ? e.message : String(e)
+    if (flowLogEnabled) flowLog('interview-questions AI', false, `DashScope 异常(余题) model=${model} ${msg}`)
+    throwInterviewQuestionsHttp(502, `大模型出题失败：${msg.slice(0, 200)}`)
+  }
+}
+
+/** 小程序 AI 面：Q1 自我介绍；Q2～Q3 基于简历项目；Q4～Q6 纯技术（结合 JD）。仅大模型生成，无内置题库兜底。 */
+async function generatePersonalizedInterviewSix(params: {
+  title: string
+  department?: string
+  jdText: string
+  resumeText: string
+  candidateName: string
+}) {
+  const total = PERSONALIZED_INTERVIEW_TOTAL
+  const { model } = assertDashScopeForInterview()
+  const { userPrompt } = buildPersonalizedInterviewUserPromptBlock(params)
   try {
     const data = await dashScopeChatCompletions({
       model,
@@ -1363,7 +1560,35 @@ app.get('/api/admin/auth-status', async (_req, res) => {
   res.json({
     passwordLogin: envAdminPasswordLoginConfigured() || dbPasswordLogin,
     dbPasswordLogin,
-    legacyToken: Boolean(String(process.env.ADMIN_API_TOKEN || '').trim())
+    legacyToken: Boolean(String(process.env.ADMIN_API_TOKEN || '').trim()),
+    /** 已配置 Redis 时登录须校验图形验证码（与 admin session 共用 Redis） */
+    captchaEnabled: adminRedisConfigured()
+  })
+})
+
+/** 获取登录图形验证码（需 Redis）；返回 SVG 由前端以 data URL 展示 */
+app.get('/api/admin/captcha', async (_req, res) => {
+  const r = getRedisClient()
+  if (!r) {
+    return res.status(503).json({ message: '验证码需要 Redis：请配置 REDIS_HOST 或 REDIS_URL' })
+  }
+  const text = randomAdminCaptchaText(4)
+  const id = crypto.randomBytes(16).toString('hex')
+  const key = `${ADMIN_CAPTCHA_PREFIX}${id}`
+  try {
+    await r.setex(key, ADMIN_CAPTCHA_TTL_SEC, text.toLowerCase())
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'redis set failed'
+    flowLog('admin/captcha', false, msg)
+    return res.status(503).json({ message: 'Redis 不可用，无法签发验证码' })
+  }
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
+  res.json({
+    data: {
+      captchaId: id,
+      svg: buildAdminCaptchaSvg(text),
+      expiresInSec: ADMIN_CAPTCHA_TTL_SEC
+    }
   })
 })
 
@@ -1454,6 +1679,18 @@ app.post('/api/admin/login', async (req, res) => {
   const password = String(req.body?.password ?? '')
   if (!username || !password) {
     return res.status(400).json({ message: 'username and password required' })
+  }
+
+  if (adminRedisConfigured()) {
+    const captchaId = String(req.body?.captchaId || '').trim()
+    const captchaCode = String(req.body?.captchaCode ?? '').trim()
+    if (!captchaId || !captchaCode) {
+      return res.status(400).json({ message: '请输入图形验证码' })
+    }
+    const captchaOk = await verifyAdminCaptchaAndConsume(captchaId, captchaCode)
+    if (!captchaOk) {
+      return res.status(400).json({ message: '验证码错误或已过期，请刷新验证码后重试' })
+    }
   }
 
   try {
@@ -2931,60 +3168,162 @@ app.post('/api/candidate/login-invite', async (req, res) => {
   }
 })
 
+async function loadInterviewQuestionContext(params: {
+  jobId: string
+  candidateName: string
+  resumeScreeningIdRaw: string
+}): Promise<{
+  title: string
+  department: string
+  jdText: string
+  resumeText: string
+  effectiveCandidateName: string
+  resumeBoundByScreeningId: boolean
+}> {
+  const jobId = params.jobId
+  const candidateName = params.candidateName
+  const resumeScreeningIdRaw = params.resumeScreeningIdRaw
+  const [rows] = await mysqlPool.query<any[]>(
+    'SELECT title, department, jd_text FROM jobs WHERE job_code=? LIMIT 1',
+    [jobId]
+  )
+  const row = rows.length ? rows[0] : null
+  const fallbackJob = JOBS[jobId as keyof typeof JOBS]
+  if (!row && !fallbackJob) {
+    const err = new Error('job not found') as Error & { httpStatus?: number }
+    err.httpStatus = 404
+    throw err
+  }
+  const title = String(row?.title || fallbackJob?.title || jobId)
+  const department = String(row?.department || fallbackJob?.department || '')
+  const jdText = String(row?.jd_text || '')
+
+  let resumeText = ''
+  let effectiveCandidateName = candidateName || '候选人'
+  let resumeBoundByScreeningId = false
+  if (resumeScreeningIdRaw && /^\d+$/.test(resumeScreeningIdRaw)) {
+    const bound = await fetchResumeTextByScreeningId(jobId, Number(resumeScreeningIdRaw))
+    if (bound) {
+      resumeText = bound.text
+      if (bound.candidateName) effectiveCandidateName = bound.candidateName
+      resumeBoundByScreeningId = true
+    }
+  }
+  if (!resumeText && candidateName) {
+    resumeText = await fetchResumeTextForCandidate(jobId, candidateName)
+  }
+  return {
+    title,
+    department,
+    jdText,
+    resumeText,
+    effectiveCandidateName: effectiveCandidateName || '候选人',
+    resumeBoundByScreeningId
+  }
+}
+
 app.get('/api/candidate/interview-questions', async (req, res) => {
   const jobId = String(req.query.jobId || '').trim().toUpperCase()
   const candidateName = String(req.query.candidateName || req.query.name || '').trim()
   const resumeScreeningIdRaw = String(req.query.resumeScreeningId || req.query.screeningId || '').trim()
+  const phase = String(req.query.phase || '').trim().toLowerCase()
   if (!jobId) return res.status(400).json({ message: 'jobId required' })
   try {
     flowLog(
       'interview-questions 开始',
       true,
-      `jobId=${jobId} candidate=${candidateName ? candidateName.slice(0, 8) : '(none)'} screening=${resumeScreeningIdRaw || '—'}`
+      `jobId=${jobId} candidate=${candidateName ? candidateName.slice(0, 8) : '(none)'} screening=${resumeScreeningIdRaw || '—'} phase=${phase || 'full'}`
     )
-    const [rows] = await mysqlPool.query<any[]>(
-      'SELECT title, department, jd_text FROM jobs WHERE job_code=? LIMIT 1',
-      [jobId]
-    )
-    const row = rows.length ? rows[0] : null
-    const fallbackJob = JOBS[jobId as keyof typeof JOBS]
-    if (!row && !fallbackJob) return res.status(404).json({ message: 'job not found' })
-    const title = String(row?.title || fallbackJob?.title || jobId)
-    const department = String(row?.department || fallbackJob?.department || '')
-    const jdText = String(row?.jd_text || '')
-
-    let resumeText = ''
-    let effectiveCandidateName = candidateName || '候选人'
-    let resumeBoundByScreeningId = false
-    if (resumeScreeningIdRaw && /^\d+$/.test(resumeScreeningIdRaw)) {
-      const bound = await fetchResumeTextByScreeningId(jobId, Number(resumeScreeningIdRaw))
-      if (bound) {
-        resumeText = bound.text
-        if (bound.candidateName) effectiveCandidateName = bound.candidateName
-        resumeBoundByScreeningId = true
-      }
-    }
-    if (!resumeText && candidateName) {
-      resumeText = await fetchResumeTextForCandidate(jobId, candidateName)
-    }
-
-    const aiQuestions = await generatePersonalizedInterviewSix({
-      title,
-      department,
-      jdText,
-      resumeText,
-      candidateName: effectiveCandidateName || '候选人'
+    const ctx = await loadInterviewQuestionContext({
+      jobId,
+      candidateName,
+      resumeScreeningIdRaw
     })
+    const genParams = {
+      title: ctx.title,
+      department: ctx.department,
+      jdText: ctx.jdText,
+      resumeText: ctx.resumeText,
+      candidateName: ctx.effectiveCandidateName || '候选人'
+    }
+
+    if (phase === 'first') {
+      const first = await generatePersonalizedInterviewFirst(genParams)
+      flowLog(
+        'interview-questions 首包',
+        true,
+        `count=${first.length} resume=${ctx.resumeText ? 'yes' : 'no'} resumeBind=${ctx.resumeBoundByScreeningId}`
+      )
+      return res.json({
+        data: {
+          questions: first,
+          partial: true,
+          expectedTotal: PERSONALIZED_INTERVIEW_TOTAL
+        }
+      })
+    }
+
+    const aiQuestions = await generatePersonalizedInterviewSix(genParams)
     flowLog(
       'interview-questions 成功',
       true,
-      `count=${aiQuestions.length} resume=${resumeText ? 'yes' : 'no'} resumeBind=${resumeBoundByScreeningId}`
+      `count=${aiQuestions.length} resume=${ctx.resumeText ? 'yes' : 'no'} resumeBind=${ctx.resumeBoundByScreeningId}`
     )
     res.json({ data: aiQuestions })
   } catch (e) {
-    const http = (e as InterviewQuestionsHttpError).httpStatus
+    const http = (e as InterviewQuestionsHttpError).httpStatus ?? (e as Error & { httpStatus?: number })?.httpStatus
     const msg = e instanceof Error ? e.message : 'generate questions failed'
     flowLog('interview-questions 失败', false, msg)
+    if (typeof http === 'number' && http >= 400 && http < 600) {
+      return res.status(http).json({ message: msg })
+    }
+    res.status(500).json({ message: 'generate questions failed' })
+  }
+})
+
+/** 首题已展示后拉取 Q2～Q6（POST 避免首题题干过长超出 GET URL 限制） */
+app.post('/api/candidate/interview-questions-rest', async (req, res) => {
+  const jobId = String(req.body?.jobId || '').trim().toUpperCase()
+  const candidateName = String(req.body?.candidateName || req.body?.name || '').trim()
+  const resumeScreeningIdRaw = String(req.body?.resumeScreeningId || req.body?.screeningId || '').trim()
+  const firstQuestionText = String(req.body?.firstQuestionText || '').trim()
+  if (!jobId) return res.status(400).json({ message: 'jobId required' })
+  if (!firstQuestionText) return res.status(400).json({ message: 'firstQuestionText required' })
+  try {
+    flowLog(
+      'interview-questions-rest 开始',
+      true,
+      `jobId=${jobId} candidate=${candidateName ? candidateName.slice(0, 8) : '(none)'} screening=${resumeScreeningIdRaw || '—'}`
+    )
+    const ctx = await loadInterviewQuestionContext({
+      jobId,
+      candidateName,
+      resumeScreeningIdRaw
+    })
+    const rest = await generatePersonalizedInterviewRest({
+      title: ctx.title,
+      department: ctx.department,
+      jdText: ctx.jdText,
+      resumeText: ctx.resumeText,
+      candidateName: ctx.effectiveCandidateName || '候选人',
+      firstQuestionText
+    })
+    flowLog(
+      'interview-questions-rest 成功',
+      true,
+      `count=${rest.length} resume=${ctx.resumeText ? 'yes' : 'no'} resumeBind=${ctx.resumeBoundByScreeningId}`
+    )
+    res.json({
+      data: {
+        questions: rest,
+        partial: false,
+        expectedTotal: PERSONALIZED_INTERVIEW_TOTAL
+      }
+    })
+  } catch (e) {
+    const http = (e as InterviewQuestionsHttpError).httpStatus ?? (e as Error & { httpStatus?: number })?.httpStatus
+    const msg = e instanceof Error ? e.message : 'generate questions failed'
+    flowLog('interview-questions-rest 失败', false, msg)
     if (typeof http === 'number' && http >= 400 && http < 600) {
       return res.status(http).json({ message: msg })
     }
@@ -3111,6 +3450,41 @@ app.post('/api/live/session/start', async (req, res) => {
     res.json({ ok: true })
   } catch (e) {
     flowLog('live/session/start 异常', false, e instanceof Error ? e.message : 'db error')
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
+/** 首题已入库后追加 Q2～Q6（流式出题第二阶段） */
+app.post('/api/live/session/append-questions', async (req, res) => {
+  const sessionId = String(req.body?.sessionId || '').trim()
+  const questions = Array.isArray(req.body?.questions) ? req.body.questions : []
+  if (!sessionId) return res.status(400).json({ message: 'sessionId required' })
+  if (!questions.length) return res.json({ ok: true, inserted: 0 })
+
+  try {
+    const sid = await getSessionInternalId(sessionId)
+    if (!sid) return res.status(404).json({ message: 'session not found' })
+
+    const [maxRows] = await mysqlPool.query<{ m: number }[]>(
+      'SELECT COALESCE(MAX(question_no), 0) AS m FROM interview_questions WHERE session_id=?',
+      [sid]
+    )
+    let no = Number(maxRows[0]?.m || 0) + 1
+    let inserted = 0
+    for (const q of questions) {
+      const text = String((q as { text?: string })?.text || '').trim()
+      if (!text) continue
+      await mysqlPool.query(
+        'INSERT INTO interview_questions(session_id, question_no, question_text, source) VALUES (?,?,?,?)',
+        [sid, no, text, 'ai']
+      )
+      no += 1
+      inserted += 1
+    }
+    flowLog('live/session/append-questions', true, `${sessionId} inserted=${inserted}`)
+    res.json({ ok: true, inserted })
+  } catch (e) {
+    flowLog('live/session/append-questions 异常', false, e instanceof Error ? e.message : 'db error')
     res.status(500).json({ message: 'db error' })
   }
 })
