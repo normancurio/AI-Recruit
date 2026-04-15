@@ -1,13 +1,14 @@
 .login-page {
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 24px;
+  padding-top: 4px;
 }
 
 .header {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .title {
@@ -17,14 +18,17 @@
 }
 
 .subtitle {
-  font-size: 28px;
+  font-size: 26px;
   color: #64748b;
+  line-height: 1.5;
 }
 
 .form-card {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 22px;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 12rpx 36rpx rgba(15, 23, 42, 0.08);
 }
 
 .field {
@@ -36,15 +40,28 @@
 .label {
   font-size: 26px;
   color: #334155;
+  font-weight: 600;
+}
+
+.required-star {
+  color: #ef4444;
+  margin-left: 4px;
 }
 
 .input {
   height: 84px;
-  border: 2px solid #e2e8f0;
+  border: 2px solid #dbe3ee;
   border-radius: 16px;
   padding: 0 20px;
   font-size: 28px;
   box-sizing: border-box;
+  background: #ffffff;
+}
+
+.field-tip {
+  font-size: 22px;
+  color: #94a3b8;
+  line-height: 1.4;
 }
 
 .primary-btn {
@@ -56,6 +73,11 @@
   color: #ffffff;
   font-size: 30px;
   font-weight: 600;
+  box-shadow: 0 10rpx 24rpx rgba(79, 70, 229, 0.3);
+}
+
+.primary-btn[disabled] {
+  opacity: 0.55;
 }
 
 .interviewer-btn {

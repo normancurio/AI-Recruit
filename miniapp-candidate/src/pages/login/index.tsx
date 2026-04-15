@@ -29,8 +29,8 @@ export default function LoginPage() {
   })
 
   const canSubmit = useMemo(() => {
-    return Boolean(name.trim() && inviteCode.trim())
-  }, [inviteCode, name])
+    return Boolean(name.trim() && phone.trim() && inviteCode.trim())
+  }, [inviteCode, name, phone])
 
   const handleNext = async () => {
     const code = inviteCode.trim().toUpperCase()
@@ -44,6 +44,11 @@ export default function LoginPage() {
       Taro.showToast({ title: '邀请码仅支持字母、数字与 - _ . @', icon: 'none' })
       return
     }
+    const phoneTrimmed = phone.trim()
+    if (!/^1[3-9]\d{9}$/.test(phoneTrimmed)) {
+      Taro.showToast({ title: '请输入正确的11位手机号', icon: 'none' })
+      return
+    }
     try {
       setLoading(true)
       const loginRes = await Taro.login()
@@ -55,7 +60,7 @@ export default function LoginPage() {
         code: loginRes.code,
         inviteCode: code,
         name: name.trim(),
-        phone: phone.trim() || undefined
+        phone: phoneTrimmed
       })
       Taro.setStorageSync('wx_openid', data.openid)
       Taro.setStorageSync('session_id', data.sessionId)
@@ -70,7 +75,7 @@ export default function LoginPage() {
       }
       const profile: CandidateProfile = {
         name: data.name,
-        phone: phone.trim(),
+        phone: phoneTrimmed,
         inviteCode: code,
         openid: data.openid
       }
@@ -94,12 +99,14 @@ export default function LoginPage() {
     <View className='safe-container login-page'>
       <View className='header'>
         <Text className='title'>欢迎参加面试</Text>
-        <Text className='subtitle'>请输入您的真实姓名和手机号，并填写面试邀请码进行登记</Text>
+        <Text className='subtitle'>请填写真实信息并输入面试邀请码完成登记</Text>
       </View>
 
       <View className='card form-card'>
         <View className='field'>
-          <Text className='label'>姓名</Text>
+          <Text className='label'>
+            姓名<Text className='required-star'>*</Text>
+          </Text>
           <Input
             className='input'
             value={name}
@@ -109,19 +116,24 @@ export default function LoginPage() {
         </View>
 
         <View className='field'>
-          <Text className='label'>手机号（选填）</Text>
+          <Text className='label'>
+            手机号<Text className='required-star'>*</Text>
+          </Text>
           <Input
             className='input'
             value={phone}
             type='number'
             maxlength={11}
-            placeholder='选填，便于企业联系'
+            placeholder='请输入11位手机号'
             onInput={(e) => setPhone(e.detail.value)}
           />
+          <Text className='field-tip'>用于面试身份确认与通知联系</Text>
         </View>
 
         <View className='field'>
-          <Text className='label'>面试邀请码</Text>
+          <Text className='label'>
+            面试邀请码<Text className='required-star'>*</Text>
+          </Text>
           <Input
             className='input'
             value={inviteCode}

@@ -1261,8 +1261,6 @@ function ProjectManagementView({
   const [formProjectCode, setFormProjectCode] = useState('');
   const [hrUsers, setHrUsers] = useState<User[]>([]);
   const [formProjectRecruitmentLeads, setFormProjectRecruitmentLeads] = useState('');
-  const [projectLeadPickDept, setProjectLeadPickDept] = useState('');
-  const [projectLeadPickUsername, setProjectLeadPickUsername] = useState('');
   const [projectJobForm, setProjectJobForm] = useState<JobFormState | null>(null);
   const [pjRecruiterPickDept, setPjRecruiterPickDept] = useState('');
   const [pjRecruiterPickUsername, setPjRecruiterPickUsername] = useState('');
@@ -1300,8 +1298,6 @@ function ProjectManagementView({
     setCreateOpen(false);
     setEditingProjectId(null);
     setFormProjectRecruitmentLeads('');
-    setProjectLeadPickDept('');
-    setProjectLeadPickUsername('');
   };
 
   const openCreateModal = () => {
@@ -1317,8 +1313,6 @@ function ProjectManagementView({
     setFormMemberCount('0');
     setFormProjectCode('');
     setFormProjectRecruitmentLeads('');
-    setProjectLeadPickDept('');
-    setProjectLeadPickUsername('');
     setCreateError('');
     setCreateOpen(true);
   };
@@ -1335,8 +1329,6 @@ function ProjectManagementView({
     setFormMemberCount(String(p.memberCount ?? 0));
     setFormProjectCode((p.projectCode || p.id || '').trim());
     setFormProjectRecruitmentLeads((p.recruitmentLeads && p.recruitmentLeads.length ? p.recruitmentLeads : []).join('、'));
-    setProjectLeadPickDept('');
-    setProjectLeadPickUsername('');
     setCreateError('');
     setCreateOpen(true);
   };
@@ -1366,6 +1358,10 @@ function ProjectManagementView({
     }
     if (isEdit && !name) {
       setCreateError('请填写项目名称');
+      return;
+    }
+    if ((role === 'admin' || role === 'delivery_manager') && parseRecruitersInput(formProjectRecruitmentLeads).length === 0) {
+      setCreateError('请至少选择 1 位项目招聘负责人');
       return;
     }
     const memberCount = Math.max(0, Math.min(9999, Number(formMemberCount) || 0));
@@ -1454,15 +1450,32 @@ function ProjectManagementView({
     () => recruitmentDeptOptionsForProjectLeads(depts, dmUserDept, role),
     [depts, dmUserDept, role]
   );
-
-  useEffect(() => {
-    if (!createOpen || !projectLeadPickDept) return;
-    const ok = projectRecruitmentLeadDeptOptions.some((d) => d.name === projectLeadPickDept);
-    if (!ok) {
-      setProjectLeadPickDept('');
-      setProjectLeadPickUsername('');
-    }
-  }, [createOpen, projectLeadPickDept, projectRecruitmentLeadDeptOptions]);
+  const projectRecruitmentLeadGroups = useMemo(() => {
+    return projectRecruitmentLeadDeptOptions
+      .map((d) => {
+        const managers = activeUsersInDept(hrUsers, d.name)
+          .filter((u) => isRecruitingManagerUserRole(u.role))
+          .filter((u) => String(u.name || '').trim())
+          .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN'));
+        return { dept: d, managers };
+      })
+      .filter((g) => g.managers.length > 0);
+  }, [hrUsers, projectRecruitmentLeadDeptOptions]);
+  const selectedProjectLeads = useMemo(
+    () => parseRecruitersInput(formProjectRecruitmentLeads),
+    [formProjectRecruitmentLeads]
+  );
+  const toggleProjectLead = (name: string, checked: boolean) => {
+    const n = String(name || '').trim();
+    if (!n) return;
+    const existing = parseRecruitersInput(formProjectRecruitmentLeads);
+    const next = checked
+      ? existing.some((x) => x.toLowerCase() === n.toLowerCase())
+        ? existing
+        : [...existing, n]
+      : existing.filter((x) => x.toLowerCase() !== n.toLowerCase());
+    setFormProjectRecruitmentLeads(next.join('、'));
+  };
 
   const listProjects = useMemo(() => {
     const base = projects.filter((p) => p.id !== 'EMPTY' && p.id !== 'UNASSIGNED');
@@ -1895,15 +1908,22 @@ function ProjectManagementView({
                     className="bg-white rounded-2xl shadow-xl border border-slate-200 w-full max-w-lg max-h-[min(90vh,640px)] flex flex-col"
                     onClick={(e) => e.stopPropagation()}
                   >
-              <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-                <h3 className="text-lg font-bold text-slate-900">
-                  {editingProjectId ? '编辑项目' : '创建新招聘项目'}
-                </h3>
+              <div className="px-6 py-4 border-b border-slate-100 flex items-start justify-between gap-3">
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1">
+                  <h3 className="text-lg font-bold text-slate-900 shrink-0">
+                    {editingProjectId ? '编辑项目' : '创建新招聘项目'}
+                  </h3>
+                  {createError ? (
+                    <p className="text-sm text-red-600 min-w-0 flex-1" role="alert">
+                      {createError}
+                    </p>
+                  ) : null}
+                </div>
                 <button
                   type="button"
                   disabled={createSubmitting}
                   onClick={closeProjectModal}
-                  className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+                  className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 shrink-0"
                   aria-label="关闭"
                 >
                   <XCircle className="w-5 h-5" />
@@ -1960,11 +1980,48 @@ function ProjectManagementView({
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {(role === 'admin' || role === 'delivery_manager') && (
                       <div className="sm:col-span-2 rounded-lg border border-indigo-100 bg-indigo-50/40 px-3 py-3 space-y-2">
-                        <label className="block text-xs font-medium text-slate-600">
-                          项目招聘负责人（招聘经理）
+                        <label className="block text-xs font-medium text-slate-700">
+                          项目招聘负责人（招聘经理）<span className="text-red-500 ml-1">*</span>
                         </label>
+                        <div className="max-h-56 overflow-y-auto rounded-lg border border-indigo-100 bg-white p-2">
+                          {projectRecruitmentLeadGroups.length === 0 ? (
+                            <p className="px-2 py-1 text-xs text-slate-500">暂无可选招聘经理，请先在招聘部门创建“招聘经理”角色账号。</p>
+                          ) : (
+                            projectRecruitmentLeadGroups.map((g) => (
+                              <div key={g.dept.id} className="mb-2 last:mb-0 rounded-md border border-slate-100">
+                                <div className="px-2.5 py-1.5 text-xs font-semibold text-indigo-900 bg-indigo-50/60 border-b border-indigo-100">
+                                  {g.dept.name}
+                                </div>
+                                <div className="p-2 grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                                  {g.managers.map((u) => {
+                                    const checked = selectedProjectLeads.some(
+                                      (x) => x.toLowerCase() === String(u.name || '').trim().toLowerCase()
+                                    );
+                                    return (
+                                      <label
+                                        key={`${g.dept.id}-${u.username}`}
+                                        className="inline-flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-slate-700 hover:bg-slate-50 cursor-pointer"
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          checked={checked}
+                                          disabled={createSubmitting}
+                                          onChange={(e) => toggleProjectLead(String(u.name || ''), e.target.checked)}
+                                          className="rounded border-slate-300"
+                                        />
+                                        <span>
+                                          {u.name}（{u.username}）
+                                        </span>
+                                      </label>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
                         <div className="flex flex-wrap gap-1.5 min-h-[1.5rem]">
-                          {parseRecruitersInput(formProjectRecruitmentLeads).map((name, i) => (
+                          {selectedProjectLeads.map((name, i) => (
                             <span
                               key={`${i}-${name}`}
                               className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-md text-xs font-medium bg-white text-indigo-900 border border-indigo-100"
@@ -1973,10 +2030,7 @@ function ProjectManagementView({
                               <button
                                 type="button"
                                 disabled={createSubmitting}
-                                onClick={() => {
-                                  const next = parseRecruitersInput(formProjectRecruitmentLeads).filter((x) => x !== name);
-                                  setFormProjectRecruitmentLeads(next.join('、'));
-                                }}
+                                onClick={() => toggleProjectLead(name, false)}
                                 className="p-0.5 rounded hover:bg-indigo-50 text-indigo-600"
                                 aria-label={`移除 ${name}`}
                               >
@@ -1985,62 +2039,6 @@ function ProjectManagementView({
                             </span>
                           ))}
                         </div>
-                        <div className="flex flex-col sm:flex-row gap-2">
-                          <select
-                            value={projectLeadPickDept}
-                            onChange={(e) => {
-                              setProjectLeadPickDept(e.target.value);
-                              setProjectLeadPickUsername('');
-                            }}
-                            disabled={createSubmitting}
-                            className="w-full sm:flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white"
-                          >
-                            <option value="">选择部门（招聘类型）</option>
-                            {projectRecruitmentLeadDeptOptions.map((d) => (
-                              <option key={d.id} value={d.name}>
-                                {d.name}
-                              </option>
-                            ))}
-                          </select>
-                          <select
-                            value={projectLeadPickUsername}
-                            onChange={(e) => setProjectLeadPickUsername(e.target.value)}
-                            disabled={createSubmitting || !projectLeadPickDept}
-                            className="w-full sm:flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white disabled:bg-slate-50"
-                          >
-                            <option value="">{projectLeadPickDept ? '选择招聘经理' : '请先选择部门'}</option>
-                            {activeUsersInDept(hrUsers, projectLeadPickDept)
-                              .filter((u) => isRecruitingManagerUserRole(u.role))
-                              .map((u) => (
-                              <option key={u.username} value={u.username}>
-                                {u.name}（{u.username}）
-                              </option>
-                            ))}
-                          </select>
-                          <button
-                            type="button"
-                            disabled={createSubmitting || !projectLeadPickUsername}
-                            onClick={() => {
-                              const u = hrUsers.find((x) => x.username === projectLeadPickUsername);
-                              const n = u?.name?.trim();
-                              if (!n) return;
-                              const existing = parseRecruitersInput(formProjectRecruitmentLeads);
-                              if (existing.some((x) => x.toLowerCase() === n.toLowerCase())) return;
-                              setFormProjectRecruitmentLeads([...existing, n].join('、'));
-                            }}
-                            className="w-full sm:w-auto shrink-0 px-4 py-2 text-sm font-medium rounded-lg border border-indigo-200 bg-white text-indigo-900 hover:bg-indigo-50 disabled:opacity-50"
-                          >
-                            添加
-                          </button>
-                        </div>
-                        <textarea
-                          value={formProjectRecruitmentLeads}
-                          onChange={(e) => setFormProjectRecruitmentLeads(e.target.value)}
-                          disabled={createSubmitting}
-                          rows={2}
-                          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm resize-none bg-white"
-                          placeholder="也可手填姓名，顿号或逗号分隔"
-                        />
                       </div>
                     )}
                     <div>
@@ -2098,7 +2096,6 @@ function ProjectManagementView({
                       placeholder="简要说明招聘背景与岗位范围"
                     />
                   </div>
-                  {createError ? <p className="text-sm text-red-600">{createError}</p> : null}
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 flex justify-end gap-3 bg-slate-50/80 rounded-b-2xl">
                   <button
@@ -4258,7 +4255,7 @@ function ResumeScreeningView({
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {inviteBanner ? (
         <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">{inviteBanner}</div>
       ) : null}
@@ -4272,57 +4269,59 @@ function ResumeScreeningView({
           当前账号未被设为任何项目的「项目招聘负责人」，因此没有可选项目与岗位。请交付经理或管理员在「项目管理」中将您加入对应项目的「项目招聘负责人」。
         </div>
       ) : null}
-      <div className="space-y-6">
+      <div className="space-y-4">
         <div>
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 flex flex-col">
-            <h3 className="font-bold text-slate-900 mb-4">上传简历进行 AI 筛查</h3>
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-slate-700 mb-1">项目筛选</label>
-              <select
-                value={resumeProjectFilter}
-                onChange={(e) => setResumeProjectFilter(e.target.value)}
-                disabled={
-                  !apiBase ||
-                  !hasToken ||
-                  projectsLoading ||
-                  recruiterScopeLoading ||
-                  (isDeliveryManager &&
-                    (!String(authProfile?.dept || '').trim() || String(authProfile?.dept || '').trim() === '-'))
-                }
-                className="w-full border border-slate-200 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 outline-none text-sm text-slate-900 disabled:bg-slate-100"
-              >
-                <option value="">
-                  {isDeliveryManager ? '本部门全部项目' : isRecruitingManager ? '我的负责项目（全部）' : '全部项目'}
-                </option>
-                {projectFilterOptions.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 flex flex-col gap-3">
+            <h3 className="text-base font-bold text-slate-900">上传简历进行 AI 筛查</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-0.5">项目筛选</label>
+                <select
+                  value={resumeProjectFilter}
+                  onChange={(e) => setResumeProjectFilter(e.target.value)}
+                  disabled={
+                    !apiBase ||
+                    !hasToken ||
+                    projectsLoading ||
+                    recruiterScopeLoading ||
+                    (isDeliveryManager &&
+                      (!String(authProfile?.dept || '').trim() || String(authProfile?.dept || '').trim() === '-'))
+                  }
+                  className="w-full border border-slate-200 rounded-lg py-2 px-2.5 focus:ring-2 focus:ring-indigo-500 outline-none text-sm text-slate-900 disabled:bg-slate-100"
+                >
+                  <option value="">
+                    {isDeliveryManager ? '本部门全部项目' : isRecruitingManager ? '我的负责项目（全部）' : '全部项目'}
                   </option>
-                ))}
-              </select>
-            </div>
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-slate-700 mb-1">目标匹配岗位</label>
-              <select
-                value={selectedJobCode}
-                onChange={(e) => setSelectedJobCode(e.target.value)}
-                disabled={
-                  !jobsForUploadSelect.length || inviteJobsLoading || recruiterScopeLoading || !inviteJobs.length
-                }
-                className="w-full border border-slate-200 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 outline-none text-sm disabled:bg-slate-100"
-              >
-                {!inviteJobs.length ? (
-                  <option value="">暂无可用岗位，请联系管理员在系统中维护岗位信息</option>
-                ) : jobsForUploadSelect.length === 0 ? (
-                  <option value="">当前项目下暂无岗位，请更换项目或绑定岗位到项目</option>
-                ) : (
-                  jobsForUploadSelect.map((j) => (
-                    <option key={j.job_code} value={j.job_code}>
-                      {j.title} ({j.job_code})
+                  {projectFilterOptions.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
                     </option>
-                  ))
-                )}
-              </select>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-0.5">目标匹配岗位</label>
+                <select
+                  value={selectedJobCode}
+                  onChange={(e) => setSelectedJobCode(e.target.value)}
+                  disabled={
+                    !jobsForUploadSelect.length || inviteJobsLoading || recruiterScopeLoading || !inviteJobs.length
+                  }
+                  className="w-full border border-slate-200 rounded-lg py-2 px-2.5 focus:ring-2 focus:ring-indigo-500 outline-none text-sm disabled:bg-slate-100"
+                >
+                  {!inviteJobs.length ? (
+                    <option value="">暂无可用岗位，请联系管理员在系统中维护岗位信息</option>
+                  ) : jobsForUploadSelect.length === 0 ? (
+                    <option value="">当前项目下暂无岗位，请更换项目或绑定岗位到项目</option>
+                  ) : (
+                    jobsForUploadSelect.map((j) => (
+                      <option key={j.job_code} value={j.job_code}>
+                        {j.title} ({j.job_code})
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
             </div>
             <input
               ref={fileInputRef}
@@ -4337,7 +4336,7 @@ function ResumeScreeningView({
             />
             {uploadHint ? (
               <p
-                className={`text-xs mb-3 ${
+                className={`text-xs -mt-0.5 ${
                   /失败|未创建|请先|未能|不支持|错误/i.test(uploadHint) ? 'text-amber-700' : 'text-emerald-700'
                 }`}
               >
@@ -4362,15 +4361,15 @@ function ResumeScreeningView({
                 const f = e.dataTransfer.files?.[0];
                 runUpload(f || null);
               }}
-              className={`min-h-[220px] border-2 border-dashed border-slate-300 rounded-xl flex flex-col items-center justify-center p-8 text-center transition-colors group ${
+              className={`min-h-[120px] border-2 border-dashed border-slate-300 rounded-lg flex flex-col items-center justify-center py-4 px-4 text-center transition-colors group ${
                 uploading ? 'opacity-60 cursor-wait' : 'hover:bg-slate-50 hover:border-indigo-400 cursor-pointer'
               }`}
             >
-              <div className="w-16 h-16 bg-indigo-50 rounded-full flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-                <UploadCloud className="w-8 h-8 text-indigo-500" />
+              <div className="w-10 h-10 bg-indigo-50 rounded-full flex items-center justify-center mb-2 group-hover:scale-105 transition-transform">
+                <UploadCloud className="w-5 h-5 text-indigo-500" />
               </div>
-              <p className="font-medium text-slate-700 mb-1">{uploading ? '正在解析与打分…' : '点击或拖拽简历文件到此处'}</p>
-              <p className="text-xs text-slate-500">支持 PDF、DOCX、TXT；旧版 .doc 请另存为 DOCX 后再上传。</p>
+              <p className="text-sm font-medium text-slate-700">{uploading ? '正在解析与打分…' : '点击或拖拽简历文件到此处'}</p>
+              <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">支持 PDF、DOCX、TXT；旧版 .doc 请另存为 DOCX 后再上传。</p>
             </div>
           </div>
         </div>

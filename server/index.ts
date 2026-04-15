@@ -2115,17 +2115,24 @@ app.patch('/api/admin/jobs/:jobCode', async (req, res) => {
   }
 })
 
+/** job_code 跨表比较统一排序规则，避免 utf8mb4_unicode_ci / utf8mb4_0900_ai_ci 混用导致 JOIN 报错 */
+function resumeScreeningsJobCodeMatchSql(jobAlias: string, screeningAlias: string): string {
+  return `CONVERT(TRIM(${jobAlias}.job_code) USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+          CONVERT(TRIM(${screeningAlias}.job_code) USING utf8mb4) COLLATE utf8mb4_unicode_ci`
+}
+
 /** 按项目筛筛查记录：与 jobs.job_code + jobs.project_id 关联；`_null` 表示仅岗位未绑定项目 */
 function resumeScreeningsJobFilterJoinSql(projectId: string | null): { fragment: string; params: unknown[] } {
   if (!projectId) return { fragment: '', params: [] }
+  const onJob = resumeScreeningsJobCodeMatchSql('j', 's')
   if (projectId === '_null') {
     return {
-      fragment: ` INNER JOIN jobs j ON j.job_code = s.job_code AND (j.project_id IS NULL OR TRIM(j.project_id) = '') `,
+      fragment: ` INNER JOIN jobs j ON ${onJob} AND (j.project_id IS NULL OR TRIM(j.project_id) = '') `,
       params: []
     }
   }
   return {
-    fragment: ` INNER JOIN jobs j ON j.job_code = s.job_code AND j.project_id = ? `,
+    fragment: ` INNER JOIN jobs j ON ${onJob} AND j.project_id = ? `,
     params: [projectId]
   }
 }
