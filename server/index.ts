@@ -1912,6 +1912,63 @@ function recruitersFromRow(raw: unknown): string[] {
   return []
 }
 
+function adminRecruiterIdentityKeys(username: string, displayName: string): string[] {
+  const u = String(username || '')
+    .trim()
+    .toLowerCase()
+  const n = String(displayName || '')
+    .trim()
+    .toLowerCase()
+  return [u, n].filter(Boolean)
+}
+
+function recruitersJsonContainsIdentity(recruitersRaw: unknown, keys: string[]): boolean {
+  if (!keys.length) return false
+  const arr = recruitersFromRow(recruitersRaw)
+    .map((x) => String(x || '').trim().toLowerCase())
+    .filter(Boolean)
+  if (!arr.length) return false
+  return arr.some((r) => keys.includes(r))
+}
+
+async function loadAdminSessionActor(token: string): Promise<{
+  username: string
+  displayName: string
+  uiRole: ReturnType<typeof mapAdminDbRoleToUiRole>
+} | null> {
+  const un = await resolveAdminDbUsernameFromToken(token)
+  if (!un) return null
+  try {
+    const [rows] = await mysqlAdminPool.query<RowDataPacket[]>(
+      'SELECT username, name, role FROM users WHERE username = ? LIMIT 1',
+      [un]
+    )
+    const row = rows[0] as { username?: string | null; name?: string | null; role?: string | null } | undefined
+    const username = String(row?.username || un).trim() || un
+    const displayName = String(row?.name || '').trim() || username
+    const uiRole = mapAdminDbRoleToUiRole(String(row?.role || ''))
+    return { username, displayName, uiRole }
+  } catch {
+    return { username: un, displayName: un, uiRole: mapAdminDbRoleToUiRole('') }
+  }
+}
+
+async function screeningJobAllowsRecruiter(
+  jobCode: string,
+  actor: { username: string; displayName: string }
+): Promise<boolean> {
+  const jc = String(jobCode || '').trim()
+  if (!jc) return false
+  const keys = adminRecruiterIdentityKeys(actor.username, actor.displayName)
+  const [jr] = await mysqlPool.query<RowDataPacket[]>(
+    'SELECT recruiters FROM jobs WHERE UPPER(TRIM(job_code)) = UPPER(TRIM(?)) LIMIT 1',
+    [jc]
+  )
+  const row = jr[0] as { recruiters?: unknown } | undefined
+  if (!row) return false
+  return recruitersJsonContainsIdentity(row.recruiters, keys)
+}
+
 /** mysql2 对 BIGINT 等可能返回 bigint，JSON.stringify 会抛错 */
 function jsonSafeMysqlCell(v: unknown): unknown {
   if (typeof v === 'bigint') return v.toString()
@@ -2158,7 +2215,7 @@ function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: bo
   // 标量子查询取最新报告；CONVERT+COLLATE 避免表间 utf8mb4_unicode_ci / utf8mb4_0900_ai_ci 混用报错
   const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
-              s.status, ${ps}s.report_summary, s.file_name, s.created_at,
+              s.status, ${ps}s.report_summary, s.file_name, s.uploader_username, s.created_at,
               lr.overall_score AS interview_overall_score,
               lr.passed AS interview_passed,
               lr.updated_at AS interview_report_updated_at,
@@ -2187,7 +2244,7 @@ function resumeScreeningsPlainSql(withPipelineStage: boolean, projectId: string 
   const { fragment: jobJoin, params: jobParams } = resumeScreeningsJobFilterJoinSql(projectId)
   const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
-              s.status, ${ps}s.report_summary, s.file_name, s.created_at
+              s.status, ${ps}s.report_summary, s.file_name, s.uploader_username, s.created_at
        FROM resume_screenings s
        ${jobJoin}
        ORDER BY s.id DESC
@@ -2289,6 +2346,79 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
     }
     const ex = e as { code?: string; errno?: number; message?: string }
     console.error('[GET /api/admin/resume-screenings]', ex.code, ex.errno, ex.message, e)
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.patch('/api/admin/resume-screenings/:id', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const idRaw = String(req.params.id || '').trim()
+  const idNum = Number(idRaw)
+  if (!Number.isFinite(idNum) || idNum <= 0) {
+    return res.status(400).json({ message: 'invalid id' })
+  }
+  const hasPhone = req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'candidatePhone')
+  if (!hasPhone) {
+    return res.status(400).json({ message: '请提供 candidatePhone' })
+  }
+  let candidatePhone: string | null | undefined
+  if (hasPhone) {
+    const raw = String(req.body.candidatePhone ?? '').trim()
+    if (!raw) candidatePhone = null
+    else {
+      const norm = normalizeCnMobile(raw)
+      candidatePhone = norm ?? raw.replace(/\s/g, '').slice(0, 32)
+    }
+  }
+  try {
+    const token = extractAdminRequestToken(req)
+    const actor = await loadAdminSessionActor(token)
+    if (!actor?.username) {
+      return res.status(403).json({ message: '当前登录方式无法识别上传人，不能修改手机号' })
+    }
+    const [srows] = await mysqlPool.query<RowDataPacket[]>(
+      'SELECT id, job_code, uploader_username FROM resume_screenings WHERE id = ? LIMIT 1',
+      [Math.floor(idNum)]
+    )
+    if (!srows?.length) {
+      return res.status(404).json({ message: '记录不存在' })
+    }
+    const row = srows[0] as { job_code?: string; uploader_username?: string | null }
+    const uploader = String(row.uploader_username || '').trim().toLowerCase()
+    const actorUsername = String(actor.username || '').trim().toLowerCase()
+    if (!uploader) {
+      return res.status(403).json({ message: '该记录缺少上传人信息，无法校验修改权限' })
+    }
+    if (!actorUsername || actorUsername !== uploader) {
+      return res.status(403).json({ message: '仅上传该简历的账号可修改手机号' })
+    }
+    const fields: string[] = []
+    const vals: unknown[] = []
+    if (candidatePhone !== undefined) {
+      fields.push('candidate_phone = ?')
+      vals.push(candidatePhone)
+    }
+    if (!fields.length) {
+      return res.status(400).json({ message: '无更新字段' })
+    }
+    vals.push(Math.floor(idNum))
+    const [hdr] = await mysqlPool.query<ResultSetHeader>(
+      `UPDATE resume_screenings SET ${fields.join(', ')} WHERE id = ?`,
+      vals
+    )
+    if (!hdr.affectedRows) {
+      return res.status(404).json({ message: '记录不存在' })
+    }
+    res.json({ ok: true })
+  } catch (e: unknown) {
+    const ex = e as { code?: string; errno?: number; message?: string }
+    if (ex.errno === 1054 || ex.code === 'ER_BAD_FIELD_ERROR') {
+      return res.status(503).json({
+        message:
+          '库表缺少 candidate_phone / uploader_username 字段，请执行 server/migration_resume_screenings_candidate_phone.sql 和 server/migration_resume_screenings_uploader_username.sql'
+      })
+    }
+    console.error('[PATCH /api/admin/resume-screenings/:id]', ex.message, e)
     res.status(500).json({ message: 'db error' })
   }
 })
@@ -2504,6 +2634,11 @@ app.post(
     if (!jobCode) return res.status(400).json({ message: 'jobCode required' })
     if (!req.file?.buffer?.length) return res.status(400).json({ message: 'file required' })
     try {
+      const actorToken = extractAdminRequestToken(req)
+      const uploaderUsername = (await resolveAdminDbUsernameFromToken(actorToken)) || ''
+      if (!uploaderUsername) {
+        return res.status(403).json({ message: '当前登录方式缺少账号标识，无法上传简历用于后续手机号权限校验' })
+      }
       const [jobRows] = await mysqlPool.query<any[]>(
         'SELECT title, department, jd_text FROM jobs WHERE job_code=? LIMIT 1',
         [jobCode]
@@ -2549,8 +2684,8 @@ app.post(
             `INSERT INTO resume_screenings (
                job_code, candidate_name, candidate_phone, matched_job_title, match_score,
                skill_score, experience_score, education_score, stability_score,
-               status, report_summary, resume_plaintext, file_name
-             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+               status, report_summary, resume_plaintext, file_name, uploader_username
+             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
             [
               jobCode,
               candidateName,
@@ -2564,7 +2699,8 @@ app.post(
               result.status,
               result.summary,
               plainStore,
-              String(req.file.originalname || '').slice(0, 255)
+              String(req.file.originalname || '').slice(0, 255),
+              uploaderUsername
             ]
           )
           return h
@@ -2573,8 +2709,8 @@ app.post(
           `INSERT INTO resume_screenings (
              job_code, candidate_name, matched_job_title, match_score,
              skill_score, experience_score, education_score, stability_score,
-             status, report_summary, resume_plaintext, file_name
-           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+             status, report_summary, resume_plaintext, file_name, uploader_username
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [
             jobCode,
             candidateName,
@@ -2587,7 +2723,8 @@ app.post(
             result.status,
             result.summary,
             plainStore,
-            String(req.file.originalname || '').slice(0, 255)
+            String(req.file.originalname || '').slice(0, 255),
+            uploaderUsername
           ]
         )
         return h

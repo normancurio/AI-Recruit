@@ -17,7 +17,7 @@ import {
   Search, Plus, UploadCloud, BrainCircuit, ChevronDown,
   ChevronRight, ChevronLeft, MoreHorizontal, CheckCircle2, XCircle,
   LogOut, Bell, LayoutDashboard, FolderOpen, Bot,
-  Clock, Calendar, Pencil, Trash2, Loader2, KeyRound, Sparkles, UserRound, Lock
+  Clock, Calendar, Pencil, Trash2, Loader2, KeyRound, Sparkles, UserRound, Lock, X
 } from 'lucide-react';
 
 /**
@@ -254,6 +254,8 @@ export interface Resume {
   name: string
   /** 上传时填写的手机号，存于 resume_screenings.candidate_phone */
   phone?: string
+  /** 上传该简历筛查记录的后台登录账号 */
+  uploaderUsername?: string
   job: string
   jobCode?: string
   matchScore: number
@@ -687,6 +689,35 @@ export default function App() {
   const currentRole: Role = authProfile?.uiRole ?? 'delivery_manager';
   const [activeMenu, setActiveMenu] = useState('project-list');
   const [expandedMenus, setExpandedMenus] = useState<string[]>(['projects', 'recruitment', 'system']);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  const navigateMenu = useCallback((id: string) => {
+    setActiveMenu(id);
+    setMobileNavOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMobileNavOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [mobileNavOpen]);
+
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 768px)');
+    const onChange = () => {
+      if (mq.matches) setMobileNavOpen(false);
+    };
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
 
   const submitHrLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1025,31 +1056,53 @@ export default function App() {
           </main>
         </div>
       ) : (
-      <div className="min-h-screen bg-slate-50 flex">
-      <aside className="w-64 bg-slate-900 text-slate-300 flex flex-col shadow-xl z-20">
-        <div className="h-16 flex items-center px-6 border-b border-slate-800 bg-slate-950">
-          <BrainCircuit className="w-6 h-6 text-indigo-400 mr-3" />
-          <span className="text-lg font-bold text-white tracking-wide">智能招聘系统</span>
+      <div className="min-h-screen min-h-[100dvh] bg-slate-50 flex">
+      {mobileNavOpen ? (
+        <div
+          className="fixed inset-0 z-20 bg-slate-900/50 md:hidden"
+          role="presentation"
+          onClick={() => setMobileNavOpen(false)}
+        />
+      ) : null}
+      <aside
+        className={`fixed md:static inset-y-0 left-0 z-30 flex h-[100dvh] md:h-auto w-64 max-w-[min(100vw,16rem)] flex-col bg-slate-900 text-slate-300 shadow-xl transition-transform duration-200 ease-out md:translate-x-0 ${
+          mobileNavOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
+        <div className="h-14 md:h-16 shrink-0 flex items-center justify-between gap-2 border-b border-slate-800 bg-slate-950 px-4 md:px-6">
+          <div className="flex min-w-0 flex-1 items-center">
+            <BrainCircuit className="mr-2 h-6 w-6 shrink-0 text-indigo-400 md:mr-3" />
+            <span className="truncate text-base font-bold tracking-wide text-white md:text-lg">智能招聘系统</span>
+          </div>
+          <button
+            type="button"
+            className="shrink-0 rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white md:hidden"
+            onClick={() => setMobileNavOpen(false)}
+            aria-label="关闭菜单"
+          >
+            <X className="h-5 w-5" />
+          </button>
         </div>
-        
-        <div className="flex-1 overflow-y-auto py-4">
+
+        <div className="flex-1 overflow-y-auto overscroll-contain py-4">
           {navConfig.map((nav) => (
             <div key={nav.id} className="mb-1">
               {nav.children ? (
                 <>
-                  <button 
+                  <button
+                    type="button"
                     onClick={() => toggleMenu(nav.id)}
-                    className="w-full flex items-center justify-between px-6 py-3 hover:bg-slate-800 hover:text-white transition-colors"
+                    className="flex w-full items-center justify-between px-4 py-3 transition-colors hover:bg-slate-800 hover:text-white md:px-6"
                   >
                     <div className="flex items-center gap-3">
                       {nav.icon}
                       <span className="font-medium">{nav.title}</span>
                     </div>
-                    <ChevronDown className={`w-4 h-4 transition-transform ${expandedMenus.includes(nav.id) ? 'rotate-180' : ''}`} />
+                    <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${expandedMenus.includes(nav.id) ? 'rotate-180' : ''}`} />
                   </button>
                   <AnimatePresence>
                     {expandedMenus.includes(nav.id) && (
-                      <motion.div 
+                      <motion.div
                         initial={{ height: 0, opacity: 0 }}
                         animate={{ height: 'auto', opacity: 1 }}
                         exit={{ height: 0, opacity: 0 }}
@@ -1057,13 +1110,14 @@ export default function App() {
                       >
                         {nav.children.map((child) => (
                           <button
+                            type="button"
                             key={child.id}
-                            onClick={() => setActiveMenu(child.id)}
-                            className={`w-full flex items-center gap-3 pl-14 pr-6 py-2.5 text-sm transition-colors ${
-                              activeMenu === child.id ? 'text-indigo-400 bg-indigo-500/10 font-medium' : 'hover:text-white hover:bg-slate-800'
+                            onClick={() => navigateMenu(child.id)}
+                            className={`flex w-full items-center gap-3 py-2.5 pl-12 pr-4 text-sm transition-colors md:pl-14 md:pr-6 ${
+                              activeMenu === child.id ? 'bg-indigo-500/10 font-medium text-indigo-400' : 'hover:bg-slate-800 hover:text-white'
                             }`}
                           >
-                            {child.icon || <div className="w-1.5 h-1.5 rounded-full bg-current opacity-50" />}
+                            {child.icon || <div className="h-1.5 w-1.5 rounded-full bg-current opacity-50" />}
                             {child.title}
                           </button>
                         ))}
@@ -1073,9 +1127,12 @@ export default function App() {
                 </>
               ) : (
                 <button
-                  onClick={() => setActiveMenu(nav.id)}
-                  className={`w-full flex items-center gap-3 px-6 py-3 transition-colors ${
-                    activeMenu === nav.id ? 'text-indigo-400 bg-indigo-500/10 border-r-2 border-indigo-400' : 'hover:bg-slate-800 hover:text-white'
+                  type="button"
+                  onClick={() => navigateMenu(nav.id)}
+                  className={`flex w-full items-center gap-3 px-4 py-3 transition-colors md:px-6 ${
+                    activeMenu === nav.id
+                      ? 'border-r-2 border-indigo-400 bg-indigo-500/10 text-indigo-400'
+                      : 'hover:bg-slate-800 hover:text-white'
                   }`}
                 >
                   {nav.icon}
@@ -1087,50 +1144,60 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 shadow-sm z-10">
-          <div className="flex items-center gap-4">
-            <h2 className="text-xl font-bold text-slate-800">
-              {navConfig.flatMap(n => n.children ? [n, ...n.children] : [n]).find(n => n.id === activeMenu)?.title || '招聘管理'}
+      <main className="flex min-h-0 min-w-0 min-h-[100dvh] flex-1 flex-col overflow-hidden md:min-h-screen">
+        <header className="z-10 flex shrink-0 flex-col gap-2 border-b border-slate-200 bg-white px-3 py-2.5 shadow-sm sm:px-5 sm:py-3 md:h-16 md:flex-row md:items-center md:justify-between md:gap-4 md:px-8 md:py-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <button
+              type="button"
+              className="shrink-0 rounded-lg p-2 text-slate-600 hover:bg-slate-100 md:hidden"
+              onClick={() => setMobileNavOpen(true)}
+              aria-label="打开菜单"
+            >
+              <MenuIcon className="h-5 w-5" />
+            </button>
+            <h2 className="min-w-0 flex-1 truncate text-base font-bold text-slate-800 sm:text-lg md:flex-none md:text-xl">
+              {navConfig.flatMap((n) => (n.children ? [n, ...n.children] : [n])).find((n) => n.id === activeMenu)?.title ||
+                '招聘管理'}
             </h2>
           </div>
-          <div className="flex items-center gap-6">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 sm:gap-x-3 md:gap-x-4 lg:gap-6">
             {authProfile ? (
-              <span className="text-sm text-slate-500">
+              <span className="max-w-[11rem] truncate text-xs text-slate-500 sm:max-w-none sm:text-sm">
                 当前身份：<span className="font-medium text-slate-700">{roleFallbackLabel(currentRole)}</span>
               </span>
             ) : (
-              <span className="text-sm text-slate-500">
-                未登录账号时按「招聘专员」菜单展示（或使用环境令牌访问）
+              <span className="text-xs leading-snug text-slate-500 sm:text-sm">
+                未登录时按「招聘专员」菜单展示
+                <span className="hidden sm:inline">（或环境令牌）</span>
               </span>
             )}
-            <div className="w-px h-6 bg-slate-200"></div>
+            <div className="hidden h-6 w-px bg-slate-200 sm:block" />
             {authTick >= 0 && miniappApiBase && hasAdminApiCredentials() && authProfile ? (
               <button
                 type="button"
                 onClick={openChangePassword}
-                className="text-sm text-slate-600 hover:text-slate-900 flex items-center gap-1.5"
+                className="flex items-center gap-1 rounded-lg px-1.5 py-1.5 text-xs text-slate-600 hover:bg-slate-100 hover:text-slate-900 sm:text-sm"
               >
-                <KeyRound className="w-4 h-4" />
-                修改密码
+                <KeyRound className="h-4 w-4 shrink-0" />
+                <span className="hidden sm:inline">修改密码</span>
               </button>
             ) : null}
             {authTick >= 0 && miniappApiBase && hasAdminApiCredentials() ? (
               <button
                 type="button"
                 onClick={() => logoutAdminMiniappAuth()}
-                className="text-sm text-slate-600 hover:text-slate-900 flex items-center gap-1.5"
+                className="flex items-center gap-1 rounded-lg px-1.5 py-1.5 text-xs text-slate-600 hover:bg-slate-100 hover:text-slate-900 sm:text-sm"
               >
-                <LogOut className="w-4 h-4" />
-                退出登录
+                <LogOut className="h-4 w-4 shrink-0" />
+                <span className="hidden sm:inline">退出登录</span>
               </button>
             ) : null}
-            <button className="text-slate-400 hover:text-slate-600 relative">
-              <Bell className="w-5 h-5" />
-              <span className="absolute top-0 right-0 w-2 h-2 bg-red-500 rounded-full border-2 border-white"></span>
+            <button type="button" className="relative shrink-0 rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+              <Bell className="h-5 w-5" />
+              <span className="absolute right-0.5 top-0.5 h-2 w-2 rounded-full border-2 border-white bg-red-500" />
             </button>
-            <div className="flex items-center gap-2 cursor-pointer">
-              <div className="w-8 h-8 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center font-bold">
+            <div className="flex min-w-0 max-w-[40%] cursor-pointer items-center gap-1.5 sm:max-w-none sm:gap-2">
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-sm font-bold text-indigo-600">
                 {currentRole === 'admin'
                   ? 'A'
                   : currentRole === 'delivery_manager'
@@ -1139,20 +1206,20 @@ export default function App() {
                       ? 'M'
                       : 'R'}
               </div>
-              <span className="text-sm font-medium text-slate-700">
+              <span className="truncate text-xs font-medium text-slate-700 sm:text-sm">
                 {authProfile?.name ?? roleFallbackLabel(currentRole)}
               </span>
             </div>
           </div>
         </header>
 
-        <div className="flex-1 overflow-auto p-8 bg-slate-50/50">
+        <div className="min-h-0 flex-1 overflow-auto bg-slate-50/50 p-4 sm:p-6 lg:p-8">
           <motion.div
             key={activeMenu}
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.2 }}
-            className="max-w-7xl mx-auto"
+            className="mx-auto max-w-7xl"
           >
             {renderContent()}
           </motion.div>
@@ -3872,6 +3939,7 @@ function mapScreeningRow(r: {
   interview_passed?: unknown
   interview_report_updated_at?: unknown
   report_summary: string | null
+  uploader_username?: string | null
   created_at: string | Date
 }): Resume {
   const created = r.created_at
@@ -3886,6 +3954,10 @@ function mapScreeningRow(r: {
     id: String(r.id),
     name: String(r.candidate_name || '候选人'),
     phone: r.candidate_phone != null && String(r.candidate_phone).trim() ? String(r.candidate_phone).trim() : undefined,
+    uploaderUsername:
+      r.uploader_username != null && String(r.uploader_username).trim()
+        ? String(r.uploader_username).trim()
+        : undefined,
     job: String(r.matched_job_title || r.job_code || ''),
     jobCode: String(r.job_code || ''),
     matchScore: overall,
@@ -3918,7 +3990,7 @@ function ListPaginationBar({
   const from = total === 0 ? 0 : (safePage - 1) * pageSize + 1
   const to = Math.min(safePage * pageSize, total)
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-3 border-t border-slate-100 bg-slate-50/70 text-sm text-slate-600">
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 bg-slate-50/70 px-4 py-3 text-sm text-slate-600 sm:px-6">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-slate-500">每页</span>
         <select
@@ -3998,6 +4070,10 @@ function ResumeScreeningView({
   const [screenListPage, setScreenListPage] = useState(1);
   const [screenPageSize, setScreenPageSize] = useState(10);
   const [reportResume, setReportResume] = useState<Resume | null>(null);
+  const [contactEditId, setContactEditId] = useState<string | null>(null);
+  const [contactDraft, setContactDraft] = useState({ phone: '' });
+  const [contactSaving, setContactSaving] = useState(false);
+  const [contactEditError, setContactEditError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { codes: recruiterJobCodes, loading: recruiterScopeLoading } = useRecruiterScopedJobCodes(
     currentRole,
@@ -4154,6 +4230,35 @@ function ResumeScreeningView({
     const tp = Math.max(1, Math.ceil(filteredResumes.length / screenPageSize) || 1);
     setScreenListPage((p) => Math.min(Math.max(1, p), tp));
   }, [filteredResumes.length, screenPageSize]);
+
+  const saveScreeningContact = useCallback(async () => {
+    if (!contactEditId || !apiBase || !hasToken) return;
+    setContactSaving(true);
+    setContactEditError('');
+    try {
+      const r = await miniappApiFetch(`/api/admin/resume-screenings/${encodeURIComponent(contactEditId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          candidatePhone: contactDraft.phone.trim()
+        })
+      });
+      const j = (await r.json().catch(() => ({}))) as { message?: string };
+      if (!r.ok) throw new Error(j.message || `保存失败 ${r.status}`);
+      const phoneNext = contactDraft.phone.trim();
+      setReportResume((prev) =>
+        prev && prev.id === contactEditId
+          ? { ...prev, phone: phoneNext || undefined }
+          : prev
+      );
+      setContactEditId(null);
+      loadScreenings();
+    } catch (e) {
+      setContactEditError(e instanceof Error ? e.message : '保存失败');
+    } finally {
+      setContactSaving(false);
+    }
+  }, [contactEditId, contactDraft, apiBase, hasToken, loadScreenings]);
 
   useEffect(() => {
     if (!apiBase || !hasToken) {
@@ -4410,7 +4515,7 @@ function ResumeScreeningView({
       ) : null}
       <div className="space-y-4">
         <div>
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 flex flex-col gap-3">
+          <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-3 sm:p-4">
             <h3 className="text-base font-bold text-slate-900">上传简历进行 AI 筛查</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
@@ -4522,11 +4627,11 @@ function ResumeScreeningView({
 
         <div>
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden h-full flex flex-col">
-            <div className="p-6 border-b border-slate-100 flex flex-row items-center justify-between gap-3">
+            <div className="flex flex-row items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 sm:px-6 sm:py-4">
               <h3 className="font-bold text-slate-900">AI 筛查结果</h3>
-              <span className="text-sm text-slate-500 shrink-0">当前列表 {filteredResumes.length} 条</span>
+              <span className="shrink-0 text-xs text-slate-500 sm:text-sm">当前列表 {filteredResumes.length} 条</span>
             </div>
-            <div className="flex-1 overflow-auto p-6 space-y-4">
+            <div className="flex-1 space-y-3 overflow-auto p-3 sm:space-y-4 sm:p-6">
               {screenListError ? (
                 <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">{screenListError}</div>
               ) : null}
@@ -4542,64 +4647,154 @@ function ResumeScreeningView({
                     : '暂无筛查记录。请从左侧上传简历；若长期无数据，请联系管理员确认系统是否正常。'}
                 </p>
               ) : null}
-              {pagedResumes.map(resume => (
-                <div key={resume.id} className="border border-slate-200 rounded-lg p-4 flex items-center gap-6 hover:border-indigo-300 transition-colors">
-                  <div className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center flex-shrink-0">
-                    <FileText className="w-6 h-6 text-slate-500" />
-                  </div>
-                  <div className="flex-1">
-                    <div className="flex items-center gap-3 mb-1 flex-wrap">
-                      <h4 className="font-bold text-slate-900 text-lg">{resume.name}</h4>
-                      {resume.flowStage ? (
-                        <span className="text-xs font-medium px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-800">
-                          {resume.flowStage}
-                        </span>
-                      ) : null}
-                      <span className="text-xs text-slate-500">匹配岗位: {resume.job}</span>
+              {pagedResumes.map((resume) => {
+                const currentUser = String(authProfile?.username || '').trim().toLowerCase();
+                const uploader = String(resume.uploaderUsername || '').trim().toLowerCase();
+                const canEditPhone = Boolean(currentUser && uploader && currentUser === uploader);
+                return (
+                <div
+                  key={resume.id}
+                  className="flex flex-col gap-4 rounded-lg border border-slate-200 p-3 transition-colors hover:border-indigo-300 sm:flex-row sm:items-center sm:gap-5 sm:p-4"
+                >
+                  <div className="flex min-w-0 flex-1 items-start gap-3 sm:items-center">
+                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-slate-100">
+                      <FileText className="h-6 w-6 text-slate-500" />
                     </div>
-                    <div className="text-sm text-slate-500">上传时间: {resume.uploadTime}</div>
-                    {resume.phone ? (
-                      <div className="text-sm text-slate-600 mt-0.5">手机：{resume.phone}</div>
-                    ) : null}
-                    <div className="text-[11px] text-slate-400 mt-1">AI 简历结论：{resume.status}</div>
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-1 flex flex-wrap items-center gap-2 sm:gap-3">
+                        <h4 className="text-base font-bold text-slate-900 sm:text-lg">{resume.name}</h4>
+                        {resume.flowStage ? (
+                          <span className="rounded-md bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-800">
+                            {resume.flowStage}
+                          </span>
+                        ) : null}
+                        <span className="text-xs text-slate-500">匹配岗位: {resume.job}</span>
+                      </div>
+                      <div className="text-sm text-slate-500">上传时间: {resume.uploadTime}</div>
+                      <div className="mt-0.5 text-sm text-slate-600">
+                        手机：
+                        {resume.phone ? resume.phone : <span className="text-slate-400">未识别</span>}
+                      </div>
+                      <div className="mt-1 text-[11px] text-slate-400">AI 简历结论：{resume.status}</div>
+                      {apiBase && hasToken && canEditPhone ? (
+                        <div className="mt-3 rounded-lg border border-slate-100 bg-slate-50/90 px-3 py-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setContactEditError('');
+                              if (contactEditId === resume.id) {
+                                setContactEditId(null);
+                              } else {
+                                setContactEditId(resume.id);
+                                setContactDraft({ phone: resume.phone || '' });
+                              }
+                            }}
+                            className="inline-flex items-center gap-1.5 text-xs font-medium text-indigo-700 hover:text-indigo-900"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                            {contactEditId === resume.id ? '收起' : '修正手机号'}
+                          </button>
+                          {contactEditId === resume.id ? (
+                            <div className="mt-2 space-y-2">
+                              <p className="text-[11px] leading-snug text-slate-500">
+                                联系方式识别有误时可手动改正；留空表示清空手机号。
+                              </p>
+                              <div>
+                                <label className="mb-0.5 block text-[11px] font-medium text-slate-600">
+                                  手机（选填，11 位大陆号会自动规范化）
+                                </label>
+                                <input
+                                  type="tel"
+                                  inputMode="numeric"
+                                  value={contactDraft.phone}
+                                  onChange={(e) => setContactDraft((d) => ({ ...d, phone: e.target.value }))}
+                                  className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                                  placeholder="可留空"
+                                  disabled={contactSaving}
+                                />
+                              </div>
+                              {contactEditError ? (
+                                <p className="text-xs text-red-600">{contactEditError}</p>
+                              ) : null}
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  disabled={contactSaving}
+                                  onClick={() => void saveScreeningContact()}
+                                  className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                                >
+                                  {contactSaving ? '保存中…' : '保存'}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={contactSaving}
+                                  onClick={() => {
+                                    setContactEditId(null);
+                                    setContactEditError('');
+                                  }}
+                                  className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                                >
+                                  取消
+                                </button>
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
-                  <div className="w-48">
-                    <div className="flex justify-between text-sm mb-1">
-                      <span className="text-slate-600 font-medium flex items-center gap-1">
-                        <BrainCircuit className="w-4 h-4 text-indigo-500" /> AI 匹配度
+                  <div className="w-full shrink-0 sm:w-48">
+                    <div className="mb-1 flex justify-between text-sm">
+                      <span className="flex items-center gap-1 font-medium text-slate-600">
+                        <BrainCircuit className="h-4 w-4 text-indigo-500" /> AI 匹配度
                       </span>
-                      <span className={`font-bold ${resume.matchScore >= 80 ? 'text-emerald-600' : resume.matchScore >= 60 ? 'text-orange-500' : 'text-red-500'}`}>
+                      <span
+                        className={`font-bold ${
+                          resume.matchScore >= 80
+                            ? 'text-emerald-600'
+                            : resume.matchScore >= 60
+                              ? 'text-orange-500'
+                              : 'text-red-500'
+                        }`}
+                      >
                         {resume.matchScore}分
                       </span>
                     </div>
-                    <div className="w-full bg-slate-100 rounded-full h-2">
-                      <div 
-                        className={`h-2 rounded-full ${resume.matchScore >= 80 ? 'bg-emerald-500' : resume.matchScore >= 60 ? 'bg-orange-400' : 'bg-red-400'}`}
+                    <div className="h-2 w-full rounded-full bg-slate-100">
+                      <div
+                        className={`h-2 rounded-full ${
+                          resume.matchScore >= 80
+                            ? 'bg-emerald-500'
+                            : resume.matchScore >= 60
+                              ? 'bg-orange-400'
+                              : 'bg-red-400'
+                        }`}
                         style={{ width: `${resume.matchScore}%` }}
-                      ></div>
+                      />
                     </div>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex w-full shrink-0 flex-col gap-2 sm:w-auto sm:flex-row sm:justify-end">
                     <button
                       type="button"
                       onClick={() => setReportResume(resume)}
-                      className="px-3 py-1.5 bg-indigo-50 text-indigo-700 text-sm font-medium rounded hover:bg-indigo-100"
+                      className="rounded-lg bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-100 sm:py-1.5"
                     >
                       查看报告
                     </button>
-                    {resume.matchScore >= 60 && (
+                    {resume.matchScore >= 60 ? (
                       <button
                         type="button"
                         onClick={() => handleInviteFromResume(resume)}
                         disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
-                        className="px-3 py-1.5 bg-emerald-50 text-emerald-700 text-sm font-medium rounded hover:bg-emerald-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                        className="rounded-lg bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-40 sm:py-1.5"
                       >
                         发起面试
                       </button>
-                    )}
+                    ) : null}
                   </div>
                 </div>
-              ))}
+              );
+              })}
             </div>
             {apiBase && hasToken && filteredResumes.length > 0 ? (
               <ListPaginationBar
@@ -4714,7 +4909,12 @@ function ResumeScreeningView({
               <div className="flex items-start justify-between gap-4 px-6 py-4 border-b border-slate-100">
                 <div>
                   <h3 id="report-modal-title" className="text-lg font-bold text-slate-900">筛查报告 · {reportResume.name}</h3>
-                  <p className="text-sm text-slate-500 mt-0.5">{reportResume.job} · {reportResume.uploadTime}</p>
+                  <p className="mt-0.5 text-sm text-slate-500">
+                    {reportResume.job} · {reportResume.uploadTime}
+                  </p>
+                  {reportResume.phone ? (
+                    <p className="mt-0.5 text-xs text-slate-600">手机：{reportResume.phone}</p>
+                  ) : null}
                 </div>
                 <button
                   type="button"
@@ -5005,8 +5205,8 @@ function ApplicationManagementView({
         </div>
       ) : null}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="p-6 border-b border-slate-100 bg-slate-50 space-y-4">
-          <div className="flex justify-between items-center gap-3 flex-wrap">
+        <div className="space-y-4 border-b border-slate-100 bg-slate-50 px-4 py-4 sm:px-6 sm:py-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h3 className="font-bold text-slate-900">初面管理</h3>
             </div>
@@ -5067,37 +5267,54 @@ function ApplicationManagementView({
             </select>
           </div>
         </div>
-        {err ? <div className="px-6 py-3 text-sm text-red-600 border-b border-slate-100">{err}</div> : null}
-        <table className="w-full text-left text-sm">
-          <thead className="bg-white border-b border-slate-200 text-slate-600">
-            <tr>
-              <th className="px-6 py-4 font-medium">候选人</th>
-              <th className="px-6 py-4 font-medium">项目名称</th>
-              <th className="px-6 py-4 font-medium">岗位</th>
-              <th className="px-6 py-4 font-medium">综合分</th>
-              <th className="px-6 py-4 font-medium">简历维度</th>
-              <th className="px-6 py-4 font-medium">流程阶段</th>
-              <th className="px-6 py-4 font-medium min-w-[200px]">面试情况</th>
-              <th className="px-6 py-4 font-medium text-right">操作</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {loading ? (
-              <tr><td className="px-6 py-8 text-slate-500" colSpan={8}>加载中...</td></tr>
-            ) : filteredRows.length === 0 ? (
-              <tr><td className="px-6 py-8 text-slate-500" colSpan={8}>暂无数据，请先在简历筛查上传简历</td></tr>
-            ) : (
-              pagedFilteredRows.map((row) => (
-                  <tr key={row.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-6 py-4 font-bold text-slate-900">{row.candidateName}</td>
-                    <td className="px-6 py-4 text-slate-600 max-w-[200px]" title={row.projectName}>
+        {err ? (
+          <div className="border-b border-slate-100 px-4 py-3 text-sm text-red-600 sm:px-6">{err}</div>
+        ) : null}
+        <div className="overflow-x-auto overscroll-x-contain">
+          <table className="w-full min-w-[56rem] text-left text-sm">
+            <thead className="border-b border-slate-200 bg-white text-slate-600">
+              <tr>
+                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">候选人</th>
+                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">项目名称</th>
+                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">岗位</th>
+                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">综合分</th>
+                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">简历维度</th>
+                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">流程阶段</th>
+                <th className="min-w-[11rem] px-3 py-3 text-xs font-medium sm:min-w-[12.5rem] sm:px-6 sm:py-4 sm:text-sm">
+                  面试情况
+                </th>
+                <th className="px-3 py-3 text-right text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">操作</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {loading ? (
+                <tr>
+                  <td className="px-3 py-8 text-slate-500 sm:px-6" colSpan={8}>
+                    加载中...
+                  </td>
+                </tr>
+              ) : filteredRows.length === 0 ? (
+                <tr>
+                  <td className="px-3 py-8 text-slate-500 sm:px-6" colSpan={8}>
+                    暂无数据，请先在简历筛查上传简历
+                  </td>
+                </tr>
+              ) : (
+                pagedFilteredRows.map((row) => (
+                  <tr key={row.id} className="transition-colors hover:bg-slate-50">
+                    <td className="whitespace-nowrap px-3 py-3 font-bold text-slate-900 sm:px-6 sm:py-4">
+                      {row.candidateName}
+                    </td>
+                    <td className="max-w-[10rem] px-3 py-3 text-slate-600 sm:max-w-[12.5rem] sm:px-6 sm:py-4" title={row.projectName}>
                       <span className="line-clamp-2">{row.projectName}</span>
                     </td>
-                    <td className="px-6 py-4 text-slate-600">{row.jobTitle}（{row.jobCode}）</td>
-                    <td className="px-6 py-4">
-                      <div className="flex flex-col gap-0.5 items-start">
-                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 font-medium">
-                          <BrainCircuit className="w-3.5 h-3.5" /> {row.score}
+                    <td className="max-w-[11rem] px-3 py-3 text-slate-600 sm:max-w-none sm:px-6 sm:py-4">
+                      {row.jobTitle}（{row.jobCode}）
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                      <div className="flex flex-col items-start gap-0.5">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 font-medium text-slate-700">
+                          <BrainCircuit className="h-3.5 w-3.5" /> {row.score}
                           <span className="text-[10px] font-normal text-slate-500">
                             {row.hasInterviewReport ? '面试' : '简历'}
                           </span>
@@ -5107,42 +5324,42 @@ function ApplicationManagementView({
                         ) : null}
                       </div>
                     </td>
-                    <td className="px-6 py-4 text-xs text-slate-600 leading-relaxed">
+                    <td className="max-w-[9rem] px-3 py-3 text-xs leading-relaxed text-slate-600 sm:max-w-none sm:px-6 sm:py-4">
                       技能 {row.skill} / 经验 {row.experience} / 学历 {row.education} / 稳定 {row.stability}
                     </td>
-                    <td className="px-6 py-4">
-                        <span
-                          className={`inline-block px-2 py-1 rounded text-xs font-medium ${
-                            row.status === '初面通过'
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : row.status === '初面待提升'
-                                ? 'bg-rose-100 text-rose-800'
-                                : row.status === '初面已完成' || row.status === '面试报告已出具'
-                                  ? 'bg-violet-100 text-violet-800'
-                                  : row.status === '已发面试邀请'
-                                    ? 'bg-amber-100 text-amber-900'
-                                    : 'bg-sky-100 text-sky-800'
-                          }`}
-                        >
-                          {row.status}
-                        </span>
+                    <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                      <span
+                        className={`inline-block rounded px-2 py-1 text-xs font-medium ${
+                          row.status === '初面通过'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : row.status === '初面待提升'
+                              ? 'bg-rose-100 text-rose-800'
+                              : row.status === '初面已完成' || row.status === '面试报告已出具'
+                                ? 'bg-violet-100 text-violet-800'
+                                : row.status === '已发面试邀请'
+                                  ? 'bg-amber-100 text-amber-900'
+                                  : 'bg-sky-100 text-sky-800'
+                        }`}
+                      >
+                        {row.status}
+                      </span>
                     </td>
-                    <td className="px-6 py-4 text-xs text-slate-600 leading-relaxed max-w-xs">
+                    <td className="max-w-[12rem] px-3 py-3 text-xs leading-relaxed text-slate-600 sm:max-w-xs sm:px-6 sm:py-4">
                       {row.interviewSituation}
                     </td>
-                    <td className="px-6 py-4 text-right">
+                    <td className="whitespace-nowrap px-3 py-3 text-right sm:px-6 sm:py-4">
                       <button
                         type="button"
                         disabled={Boolean(reportLoadingId) || !row.hasInterviewReport}
                         onClick={() => {
-                          if (!row.hasInterviewReport) return
-                          void handleOpenInterviewReport(row)
+                          if (!row.hasInterviewReport) return;
+                          void handleOpenInterviewReport(row);
                         }}
                         title={row.hasInterviewReport ? '查看面试报告详情' : '候选人尚未产生可关联的面试报告'}
-                        className={`text-sm font-medium ${
+                        className={`text-xs font-medium sm:text-sm ${
                           row.hasInterviewReport
                             ? 'text-indigo-600 hover:text-indigo-800 disabled:opacity-50'
-                            : 'text-slate-400 cursor-not-allowed'
+                            : 'cursor-not-allowed text-slate-400'
                         }`}
                       >
                         {reportLoadingId === row.id && row.hasInterviewReport
@@ -5153,10 +5370,11 @@ function ApplicationManagementView({
                       </button>
                     </td>
                   </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
         {!loading && filteredRows.length > 0 ? (
           <ListPaginationBar
             page={appListPage}
@@ -6122,32 +6340,32 @@ function SystemUserView({
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-slate-900">用户管理</h1>
+        <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">用户管理</h1>
       </div>
       {!listAllUsers && !myDeptOk ? (
         <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">
           无法按部门列出用户：账号未设置「所属部门」。请超级管理员在「用户管理」中为您填写部门（须与「部门管理」中名称一致），保存后重新登录。
         </div>
       ) : null}
-      <div className="flex justify-between items-center flex-wrap gap-3">
-        <div className="flex gap-4 flex-wrap">
-          <div className="relative">
-            <Search className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-1 flex-wrap gap-3 sm:gap-4">
+          <div className="relative min-w-0 w-full sm:w-auto sm:max-w-md sm:flex-1">
+            <Search className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="搜索用户名、姓名、部门…"
-              className="pl-10 pr-4 py-2 border border-slate-200 rounded-lg w-64 max-w-full focus:ring-2 focus:ring-indigo-500 outline-none"
+              className="w-full min-w-0 rounded-lg border border-slate-200 py-2 pl-10 pr-4 outline-none focus:ring-2 focus:ring-indigo-500 sm:max-w-md"
             />
           </div>
           {listAllUsers ? (
           <select
             value={deptFilter}
             onChange={(e) => setDeptFilter(e.target.value)}
-            className="border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none text-slate-600 min-w-[10rem]"
+            className="w-full min-w-0 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 outline-none sm:w-auto sm:min-w-[10rem]"
           >
             <option value="">全部部门</option>
             {deptNames.map((n) => (
@@ -6162,9 +6380,9 @@ function SystemUserView({
           type="button"
           onClick={openUserCreate}
           disabled={!listAllUsers && !myDeptOk}
-          className={`${btnPrimarySmFlex} disabled:opacity-50 disabled:pointer-events-none`}
+          className={`${btnPrimarySmFlex} w-full justify-center sm:w-auto sm:justify-start disabled:pointer-events-none disabled:opacity-50`}
         >
-          <Plus className="w-4 h-4" /> 新增用户
+          <Plus className="h-4 w-4" /> 新增用户
         </button>
       </div>
       {error ? (
@@ -6191,80 +6409,86 @@ function SystemUserView({
                   : '暂无用户数据'}
           </div>
         ) : (
-          <table className="w-full text-left text-sm">
-            <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
-              <tr>
-                <th className="px-6 py-4 font-medium">姓名</th>
-                <th className="px-6 py-4 font-medium">手机号（登录）</th>
-                <th className="px-6 py-4 font-medium">所属部门</th>
-                <th className="px-6 py-4 font-medium">角色</th>
-                <th className="px-6 py-4 font-medium">状态</th>
-                <th className="px-6 py-4 font-medium text-right">操作</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filtered.map((user) => {
-                const busy = updatingId === user.id;
-                const active = user.status === '正常';
-                return (
-                  <tr key={user.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-6 py-4 font-bold text-slate-900 flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-xs shrink-0">
-                        {initial(user.name)}
-                      </div>
-                      {user.name}
-                    </td>
-                    <td className="px-6 py-4 text-slate-600 font-mono text-xs">{user.username}</td>
-                    <td className="px-6 py-4 text-slate-600">{user.dept}</td>
-                    <td className="px-6 py-4">
-                      <span className="px-2.5 py-1 bg-indigo-50 text-indigo-700 text-xs font-medium rounded-md border border-indigo-100">
-                        {user.role}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4">
-                      {active ? (
-                        <span className="flex items-center gap-1.5 text-emerald-600 font-medium">
-                          <span className="w-2 h-2 rounded-full bg-emerald-500" /> 正常
+          <div className="overflow-x-auto overscroll-x-contain">
+            <table className="w-full min-w-[36rem] text-left text-sm">
+              <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                <tr>
+                  <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">姓名</th>
+                  <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">手机号（登录）</th>
+                  <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">所属部门</th>
+                  <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">角色</th>
+                  <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">状态</th>
+                  <th className="px-3 py-3 text-right text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">操作</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filtered.map((user) => {
+                  const busy = updatingId === user.id;
+                  const active = user.status === '正常';
+                  return (
+                    <tr key={user.id} className="transition-colors hover:bg-slate-50">
+                      <td className="px-3 py-3 font-bold text-slate-900 sm:px-6 sm:py-4">
+                        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-xs font-bold text-indigo-700">
+                            {initial(user.name)}
+                          </div>
+                          <span className="min-w-0 truncate">{user.name}</span>
+                        </div>
+                      </td>
+                      <td className="max-w-[9rem] truncate px-3 py-3 font-mono text-xs text-slate-600 sm:max-w-none sm:px-6 sm:py-4">
+                        {user.username}
+                      </td>
+                      <td className="max-w-[8rem] truncate px-3 py-3 text-slate-600 sm:max-w-none sm:px-6 sm:py-4">{user.dept}</td>
+                      <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                        <span className="rounded-md border border-indigo-100 bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700">
+                          {user.role}
                         </span>
-                      ) : (
-                        <span className="flex items-center gap-1.5 text-slate-500 font-medium">
-                          <span className="w-2 h-2 rounded-full bg-slate-400" /> 停用
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 text-right space-x-2 whitespace-nowrap">
-                      <button
-                        type="button"
-                        onClick={() => openUserEdit(user)}
-                        className="text-indigo-600 hover:text-indigo-800 font-medium text-xs"
-                      >
-                        编辑
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => void toggleStatus(user)}
-                        className={
-                          active
-                            ? 'text-amber-700 hover:text-amber-900 font-medium text-xs disabled:opacity-50'
-                            : 'text-indigo-600 hover:text-indigo-800 font-medium text-xs disabled:opacity-50'
-                        }
-                      >
-                        {busy ? '…' : active ? '停用' : '启用'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void deleteUser(user)}
-                        className="text-red-600 hover:text-red-800 font-medium text-xs"
-                      >
-                        删除
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                        {active ? (
+                          <span className="flex items-center gap-1.5 font-medium text-emerald-600">
+                            <span className="h-2 w-2 rounded-full bg-emerald-500" /> 正常
+                          </span>
+                        ) : (
+                          <span className="flex items-center gap-1.5 font-medium text-slate-500">
+                            <span className="h-2 w-2 rounded-full bg-slate-400" /> 停用
+                          </span>
+                        )}
+                      </td>
+                      <td className="space-x-2 whitespace-nowrap px-3 py-3 text-right sm:px-6 sm:py-4">
+                        <button
+                          type="button"
+                          onClick={() => openUserEdit(user)}
+                          className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
+                        >
+                          编辑
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void toggleStatus(user)}
+                          className={
+                            active
+                              ? 'text-xs font-medium text-amber-700 hover:text-amber-900 disabled:opacity-50'
+                              : 'text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50'
+                          }
+                        >
+                          {busy ? '…' : active ? '停用' : '启用'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void deleteUser(user)}
+                          className="text-xs font-medium text-red-600 hover:text-red-800"
+                        >
+                          删除
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 
