@@ -62,7 +62,7 @@ function roleFallbackLabel(r: Role): string {
   if (r === 'admin') return '管理员'
   if (r === 'delivery_manager') return '交付经理'
   if (r === 'recruiting_manager') return '招聘经理'
-  return '招聘人员'
+  return '招聘专员'
 }
 
 type NavChild = {
@@ -1101,7 +1101,7 @@ export default function App() {
               </span>
             ) : (
               <span className="text-sm text-slate-500">
-                未登录账号时按「招聘人员」菜单展示（或使用环境令牌访问）
+                未登录账号时按「招聘专员」菜单展示（或使用环境令牌访问）
               </span>
             )}
             <div className="w-px h-6 bg-slate-200"></div>
@@ -2863,6 +2863,43 @@ function JobEditorModal({
     }
   };
 
+  const jobSingleStaffGroups = useMemo(
+    () =>
+      jobFormDepts
+        .map((d) => ({
+          dept: d,
+          users: recruiterStaffOptions.filter((u) => deptNamesMatch(String(u.dept || ''), d.name))
+        }))
+        .filter((g) => g.users.length > 0),
+    [jobFormDepts, recruiterStaffOptions]
+  );
+
+  const jobRecruiterSpecialistGroups = useMemo(
+    () =>
+      jobFormDepts
+        .map((d) => ({
+          dept: d,
+          specialists: recruitingSpecialistsInDept(jobFormUsers, d.name)
+        }))
+        .filter((g) => g.specialists.length > 0),
+    [jobFormDepts, jobFormUsers]
+  );
+
+  const toggleJobRecruiterPick = (name: string, checked: boolean) => {
+    const n = String(name || '').trim();
+    if (!n) return;
+    setJobForm((f) => {
+      if (!f) return f;
+      const existing = parseRecruitersInput(f.recruiters);
+      const next = checked
+        ? existing.some((x) => x.toLowerCase() === n.toLowerCase())
+          ? existing
+          : [...existing, n]
+        : existing.filter((x) => x.toLowerCase() !== n.toLowerCase());
+      return { ...f, recruiters: next.join('、') };
+    });
+  };
+
   if (typeof document === 'undefined') return null;
   if (!jobForm) return null;
   const rfMode = recruiterFieldMode ?? 'none';
@@ -3019,54 +3056,142 @@ function JobEditorModal({
                 </div>
               </div>
               {rfMode === 'single' ? (
-                <div>
-                  <label className="block text-xs font-medium text-slate-500 mb-1">招聘人员（每岗仅一人）</label>
-                  <select
-                    value={parseRecruitersInput(jobForm.recruiters)[0] || ''}
-                    onChange={(e) =>
-                      setJobForm((f) => (f ? { ...f, recruiters: e.target.value.trim() } : f))
+                <div className="rounded-lg border border-indigo-100 bg-indigo-50/40 px-3 py-3 space-y-2">
+                  <label className="block text-xs font-medium text-slate-700">招聘人员（每岗仅一人）</label>
+                  <div className="max-h-56 overflow-y-auto rounded-lg border border-indigo-100 bg-white p-2">
+                    {jobSingleStaffGroups.length === 0 ? (
+                      <p className="px-2 py-1 text-xs text-slate-500">
+                        暂无可选招聘人员，请先在招聘部门创建一线招聘角色账号。
+                      </p>
+                    ) : (
+                      <>
+                        <div className="mb-2 rounded-md border border-slate-100">
+                          <div className="px-2.5 py-1.5 text-xs font-semibold text-indigo-900 bg-indigo-50/60 border-b border-indigo-100">
+                            未指定
+                          </div>
+                          <div className="p-2">
+                            <label className="inline-flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-slate-700 hover:bg-slate-50 cursor-pointer">
+                              <input
+                                type="radio"
+                                name="job-single-recruiter"
+                                checked={!parseRecruitersInput(jobForm.recruiters)[0]}
+                                disabled={jobForm.submitting}
+                                onChange={() => setJobForm((f) => (f ? { ...f, recruiters: '' } : f))}
+                                className="border-slate-300"
+                              />
+                              <span>未指定</span>
+                            </label>
+                          </div>
+                        </div>
+                        {jobSingleStaffGroups.map((g) => (
+                          <div key={g.dept.id} className="mb-2 last:mb-0 rounded-md border border-slate-100">
+                            <div className="px-2.5 py-1.5 text-xs font-semibold text-indigo-900 bg-indigo-50/60 border-b border-indigo-100">
+                              {g.dept.name}
+                            </div>
+                            <div className="p-2 grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                              {g.users.map((u) => {
+                                const sel = parseRecruitersInput(jobForm.recruiters)[0] || '';
+                                const picked = Boolean(sel && sel.toLowerCase() === u.name.trim().toLowerCase());
+                                return (
+                                  <label
+                                    key={u.username}
+                                    className="inline-flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-slate-700 hover:bg-slate-50 cursor-pointer"
+                                  >
+                                    <input
+                                      type="radio"
+                                      name="job-single-recruiter"
+                                      checked={picked}
+                                      disabled={jobForm.submitting}
+                                      onChange={() =>
+                                        setJobForm((f) => (f ? { ...f, recruiters: u.name.trim() } : f))
+                                      }
+                                      className="border-slate-300"
+                                    />
+                                    <span>
+                                      {u.name}（{u.username}）
+                                    </span>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                  {(() => {
+                    const sel = parseRecruitersInput(jobForm.recruiters)[0] || '';
+                    const inStaff = recruiterStaffOptions.some(
+                      (u) => u.name.trim().toLowerCase() === sel.toLowerCase()
+                    );
+                    if (sel && !inStaff) {
+                      return (
+                        <p className="text-[11px] text-amber-800 px-1">
+                          当前记录：{sel}（未在可选列表中，可保留或改选上方人员）
+                        </p>
+                      );
                     }
-                    disabled={jobForm.submitting}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white"
-                  >
-                    <option value="">未指定</option>
-                    {(() => {
-                      const sel = parseRecruitersInput(jobForm.recruiters)[0] || '';
-                      const inStaff = recruiterStaffOptions.some((u) => u.name.trim() === sel);
-                      return sel && !inStaff ? (
-                        <option key="__orphan-recruiter" value={sel}>
-                          {sel}（当前）
-                        </option>
-                      ) : null;
-                    })()}
-                    {recruiterStaffOptions.map((u) => (
-                      <option key={u.username} value={u.name.trim()}>
-                        {u.name}（{u.username}）
-                      </option>
-                    ))}
-                  </select>
+                    return null;
+                  })()}
                 </div>
               ) : rfMode === 'multi' ? (
-                <div>
-                  <label className="block text-xs font-medium text-slate-500 mb-1">招聘人员</label>
-                  <div className="flex flex-wrap gap-1.5 mb-2 min-h-[1.75rem]">
+                <div className="rounded-lg border border-indigo-100 bg-indigo-50/40 px-3 py-3 space-y-2">
+                  <label className="block text-xs font-medium text-slate-700">
+                    招聘人员（招聘专员）<span className="text-red-500 ml-1">*</span>
+                  </label>
+                  <div className="max-h-56 overflow-y-auto rounded-lg border border-indigo-100 bg-white p-2">
+                    {jobRecruiterSpecialistGroups.length === 0 ? (
+                      <p className="px-2 py-1 text-xs text-slate-500">
+                        暂无可选招聘专员。请在侧边栏「用户管理」中新建用户，并为其分配「招聘专员」角色（部门需与岗位招聘部门一致）。
+                      </p>
+                    ) : (
+                      jobRecruiterSpecialistGroups.map((g) => (
+                        <div key={g.dept.id} className="mb-2 last:mb-0 rounded-md border border-slate-100">
+                          <div className="px-2.5 py-1.5 text-xs font-semibold text-indigo-900 bg-indigo-50/60 border-b border-indigo-100">
+                            {g.dept.name}
+                          </div>
+                          <div className="p-2 grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                            {g.specialists.map((u) => {
+                              const selected = parseRecruitersInput(jobForm.recruiters).some(
+                                (x) => x.toLowerCase() === String(u.name || '').trim().toLowerCase()
+                              );
+                              return (
+                                <label
+                                  key={`${g.dept.id}-${u.username}`}
+                                  className="inline-flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-slate-700 hover:bg-slate-50 cursor-pointer"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={selected}
+                                    disabled={jobForm.submitting}
+                                    onChange={(e) =>
+                                      toggleJobRecruiterPick(String(u.name || '').trim(), e.target.checked)
+                                    }
+                                    className="rounded border-slate-300"
+                                  />
+                                  <span>
+                                    {u.name}（{u.username}）
+                                  </span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 min-h-[1.5rem]">
                     {parseRecruitersInput(jobForm.recruiters).map((name, i) => (
                       <span
                         key={`${i}-${name}`}
-                        className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-md text-xs font-medium bg-indigo-50 text-indigo-800 border border-indigo-100"
+                        className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-md text-xs font-medium bg-white text-indigo-900 border border-indigo-100"
                       >
                         {name}
                         <button
                           type="button"
                           disabled={jobForm.submitting}
-                          onClick={() =>
-                            setJobForm((f) => {
-                              if (!f) return f;
-                              const next = parseRecruitersInput(f.recruiters).filter((x) => x !== name);
-                              return { ...f, recruiters: next.join('、') };
-                            })
-                          }
-                          className="p-0.5 rounded hover:bg-indigo-100 text-indigo-600 disabled:opacity-50"
+                          onClick={() => toggleJobRecruiterPick(name, false)}
+                          className="p-0.5 rounded hover:bg-indigo-50 text-indigo-600 disabled:opacity-50"
                           aria-label={`移除 ${name}`}
                         >
                           ×
@@ -3074,64 +3199,6 @@ function JobEditorModal({
                       </span>
                     ))}
                   </div>
-                  <div className="flex flex-col sm:flex-row gap-2 mb-2">
-                    <select
-                      value={recruiterPickDept}
-                      onChange={(e) => {
-                        setRecruiterPickDept(e.target.value);
-                        setRecruiterPickUsername('');
-                      }}
-                      disabled={jobForm.submitting}
-                      className="w-full sm:flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white"
-                    >
-                      <option value="">选择部门</option>
-                      {jobFormDepts.map((d) => (
-                        <option key={d.id} value={d.name}>
-                          {d.name}
-                        </option>
-                      ))}
-                    </select>
-                    <select
-                      value={recruiterPickUsername}
-                      onChange={(e) => setRecruiterPickUsername(e.target.value)}
-                      disabled={jobForm.submitting || !recruiterPickDept}
-                      className="w-full sm:flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white disabled:bg-slate-50 disabled:text-slate-400"
-                    >
-                      <option value="">{recruiterPickDept ? '选择人员' : '请先选择部门'}</option>
-                      {recruitingSpecialistsInDept(jobFormUsers, recruiterPickDept).map((u) => (
-                        <option key={u.username} value={u.username}>
-                          {u.name}（{u.username}）
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      disabled={jobForm.submitting || !recruiterPickUsername}
-                      onClick={() => {
-                        const u = jobFormUsers.find((x) => x.username === recruiterPickUsername);
-                        if (!u || !isRecruitingSpecialistStaffRole(u.role)) return;
-                        const n = u?.name?.trim();
-                        if (!n) return;
-                        setJobForm((f) => {
-                          if (!f) return f;
-                          const existing = parseRecruitersInput(f.recruiters);
-                          if (existing.some((x) => x.toLowerCase() === n.toLowerCase())) return f;
-                          return { ...f, recruiters: [...existing, n].join('、') };
-                        });
-                      }}
-                      className="w-full sm:w-auto shrink-0 px-4 py-2 text-sm font-medium rounded-lg border border-slate-200 bg-white text-slate-800 hover:bg-slate-50 disabled:opacity-50 disabled:pointer-events-none"
-                    >
-                      添加
-                    </button>
-                  </div>
-                  <textarea
-                    value={jobForm.recruiters}
-                    onChange={(e) => setJobForm((f) => (f ? { ...f, recruiters: e.target.value } : f))}
-                    disabled={jobForm.submitting}
-                    rows={2}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm resize-none"
-                    placeholder="张三、李四（顿号或逗号分隔）"
-                  />
                 </div>
               ) : null}
               <div className="flex flex-col flex-1 min-h-[min(52vh,400px)] gap-2 pt-1 border-t border-slate-100 mt-0.5">
@@ -3952,10 +4019,11 @@ function ResumeScreeningView({
       base = base.filter((p) => p.id && deptNamesMatch(ud, String(p.dept || '')));
     }
     if (!isRecruiter) return base;
+    if (inviteJobs.length === 0) return [];
     const pidSet = new Set(
       inviteJobs.map((j) => String(j.project_id || '').trim()).filter(Boolean)
     );
-    if (pidSet.size === 0) return base;
+    if (pidSet.size === 0) return [];
     return base.filter((p) => pidSet.has(p.id));
   }, [
     authProfile,
@@ -4290,7 +4358,7 @@ function ResumeScreeningView({
     if (!matched) {
       setInviteModal({
         kind: 'error',
-        message: `未在可操作岗位中找到与「${name}」对应的岗位，请联系管理员确认岗位分配。`
+        message: `未在可操作岗位中找到与「${name}」对应的岗位，请联系招聘经理确认岗位分配或您的招聘人员配置。`
       });
       return;
     }
@@ -4332,7 +4400,7 @@ function ResumeScreeningView({
       ) : null}
       {isRecruiter && !recruiterScopeLoading && recruiterJobCodes.length === 0 ? (
         <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">
-          当前账号未分配可操作岗位，请联系管理员在岗位分配中添加您的岗位负责人配置。
+          当前账号未分配可操作岗位，请联系招聘经理在「岗位分配」中为对应岗位配置招聘人员（岗位负责人）。
         </div>
       ) : null}
       {isRecruitingManager && !inviteJobsLoading && inviteJobs.length === 0 && hasToken ? (
@@ -4355,13 +4423,20 @@ function ResumeScreeningView({
                     !hasToken ||
                     projectsLoading ||
                     recruiterScopeLoading ||
+                    (isRecruiter && recruiterJobCodes.length === 0) ||
                     (isDeliveryManager &&
                       (!String(authProfile?.dept || '').trim() || String(authProfile?.dept || '').trim() === '-'))
                   }
                   className="w-full border border-slate-200 rounded-lg py-2 px-2.5 focus:ring-2 focus:ring-indigo-500 outline-none text-sm text-slate-900 disabled:bg-slate-100"
                 >
                   <option value="">
-                    {isDeliveryManager ? '本部门全部项目' : isRecruitingManager ? '我的负责项目（全部）' : '全部项目'}
+                    {isDeliveryManager
+                      ? '本部门全部项目'
+                      : isRecruitingManager
+                        ? '我的负责项目（全部）'
+                        : isRecruiter && recruiterJobCodes.length === 0
+                          ? '暂无分配岗位，无法按项目筛选'
+                          : '全部项目'}
                   </option>
                   {projectFilterOptions.map((p) => (
                     <option key={p.id} value={p.id}>
