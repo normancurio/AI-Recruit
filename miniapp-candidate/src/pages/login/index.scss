@@ -1,34 +1,52 @@
+/* 避免切换本页时底部露默认灰底 */
+page {
+  background-color: #e0ecff;
+}
+
 .login-page {
   display: flex;
   flex-direction: column;
-  gap: 24px;
-  padding-top: 4px;
+  gap: 28px;
+  padding-top: 8px;
+  min-height: 100vh;
+  box-sizing: border-box;
+  /* 与面试顶区同系的浅蓝紫渐变 + 轻微噪点感层次 */
+  background:
+    radial-gradient(120% 80% at 50% -20%, rgba(255, 255, 255, 0.55) 0%, transparent 55%),
+    linear-gradient(168deg, #e0ecff 0%, #c5d6fc 42%, #9fb4f5 100%);
 }
 
 .header {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
+  padding: 8rpx 4rpx 0;
 }
 
 .title {
   font-size: 48px;
   font-weight: 700;
-  color: #0f172a;
+  color: #0f1f3d;
+  letter-spacing: 0.02em;
 }
 
 .subtitle {
   font-size: 26px;
-  color: #64748b;
-  line-height: 1.5;
+  color: #475569;
+  line-height: 1.45;
 }
 
 .form-card {
   display: flex;
   flex-direction: column;
   gap: 22px;
-  border: 1px solid #e2e8f0;
-  box-shadow: 0 12rpx 36rpx rgba(15, 23, 42, 0.08);
+  border: 1rpx solid rgba(255, 255, 255, 0.85);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(12px);
+  box-shadow:
+    0 4rpx 24rpx rgba(30, 58, 95, 0.1),
+    0 0 0 1rpx rgba(255, 255, 255, 0.6) inset;
 }
 
 .field {
@@ -50,18 +68,18 @@
 
 .input {
   height: 84px;
-  border: 2px solid #dbe3ee;
+  border: 2rpx solid #e2e8f0;
   border-radius: 16px;
   padding: 0 20px;
   font-size: 28px;
   box-sizing: border-box;
-  background: #ffffff;
+  background: #f8fafc;
 }
 
 .field-tip {
   font-size: 22px;
-  color: #94a3b8;
-  line-height: 1.4;
+  color: #64748b;
+  line-height: 1.35;
 }
 
 .primary-btn {

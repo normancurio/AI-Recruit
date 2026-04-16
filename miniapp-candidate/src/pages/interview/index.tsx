@@ -1,7 +1,7 @@
 /// <reference path="../../types/trtc-wx-sdk.d.ts" />
 import Taro, { getCurrentInstance, useDidHide, useDidShow } from '@tarojs/taro'
 import { useCallback, useMemo, useRef, useState } from 'react'
-import { Button, Camera, Image, LivePusher, Text, View } from '@tarojs/components'
+import { Button, Camera, LivePusher, Text, View } from '@tarojs/components'
 import type { LivePusherProps } from '@tarojs/components/types/LivePusher'
 import TrtcWx from 'trtc-wx-sdk'
 
@@ -20,7 +20,7 @@ import {
 } from '../../services/interviewApi'
 import { trySendTrtcPusherCustomMessage } from '../../utils/trtcPusherMsg'
 import { flowLog, flowLogInfo } from '../../utils/flowLog'
-import { playInterviewQuestionTts } from '../../utils/interviewQuestionTts'
+import { playInterviewQuestionTts, prefetchInterviewQuestionTtsPath } from '../../utils/interviewQuestionTts'
 import { CandidateProfile, InterviewAnswer, InterviewQuestion, JobInfo } from '../../types/interview'
 
 import './index.scss'
@@ -48,6 +48,14 @@ export default function InterviewPage() {
   /** 通话场景顶部状态：读题 / 作答 */
   const [callStatusLine, setCallStatusLine] = useState('正在连接…')
   const [initError, setInitError] = useState('')
+  const firstListenGateRef = useRef({ sid: '', text: '' })
+  /** 首题 textToSpeech 预拉路径；用户点击里同步 play，规避微信对异步回调内 play 的限制 */
+  const firstQuestionPrefetchedFileRef = useRef('')
+  const pendingUsePrefetchedFirstTtsRef = useRef(false)
+  const firstQuestionPrefetchUiTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const firstQuestionTtsPrefetchingRef = useRef(false)
+  /** 首题自动播放失败后，等待用户任意点击重试一次 */
+  const firstQuestionNeedsTapRetryRef = useRef(false)
   const [cameraError, setCameraError] = useState('')
   /** 已用 TRTC live-pusher 进房（未配置或服务端 503 时为 false，使用原生 Camera） */
   const [trtcActive, setTrtcActive] = useState(false)
@@ -288,6 +296,14 @@ export default function InterviewPage() {
 
   useDidHide(() => {
     visibleRef.current = false
+    firstQuestionTtsPrefetchingRef.current = false
+    firstQuestionPrefetchedFileRef.current = ''
+    pendingUsePrefetchedFirstTtsRef.current = false
+    firstQuestionNeedsTapRetryRef.current = false
+    if (firstQuestionPrefetchUiTimerRef.current) {
+      clearTimeout(firstQuestionPrefetchUiTimerRef.current)
+      firstQuestionPrefetchUiTimerRef.current = null
+    }
     closeAnswerTranscriptDisplay()
     pendingRestartSidRef.current = null
     pendingTtsAfterStopRef.current = null
@@ -526,20 +542,27 @@ export default function InterviewPage() {
       }
     }
 
-    /** 读题结束：若识别已在跑则只重新“开门”，避免重复 start；否则走 openRecognition。 */
+    /** 读题结束：强制重开一段识别，避免 manager 偶发失活导致有声无字。 */
     const resumeAnswerAfterQuestionTts = (sidInner: string) => {
       if (!visibleRef.current) return
       setCallStatusLine('请口述您的回答')
-      if (!transcribingRef.current) {
-        openRecognition(sidInner)
-        return
+      const mgr = recordManagerRef.current
+      if (mgr) {
+        try {
+          mgr.stop?.()
+        } catch {
+          /* ignore */
+        }
       }
+      recordManagerRef.current = null
+      setTranscribing(false)
       if (answerPhaseGateTimerRef.current) {
         clearTimeout(answerPhaseGateTimerRef.current)
         answerPhaseGateTimerRef.current = null
       }
       answerTranscriptOpenRef.current = true
       setShowAnswerTranscript(true)
+      setTimeout(() => openRecognition(sidInner), 120)
     }
 
     const playTtsThenResume = (sidInner: string, ttsRaw: string) => {
@@ -558,19 +581,34 @@ export default function InterviewPage() {
       // 最短屏蔽时长：防止 InnerAudio onEnded 过早触发导致 questionTtsPlaying 提前关闭、读题声进框。
       const minTtsCoverMs = Math.max(4200, Math.min(24000, ttsText.length * 200 + 2400))
       ignoreRecognizeBeforeTsRef.current = ttsStartAt + minTtsCoverMs
+      let prebuilt: string | undefined
+      if (pendingUsePrefetchedFirstTtsRef.current && questionIndexRef.current === 0) {
+        pendingUsePrefetchedFirstTtsRef.current = false
+        const f = firstQuestionPrefetchedFileRef.current
+        if (f) prebuilt = f
+      }
       playInterviewQuestionTts(
         ttsText,
         {
           requirePlugin: (name) => requirePluginFn(name),
           audioRef: questionInnerAudioRef,
-          onStatus: setCallStatusLine
+          onStatus: setCallStatusLine,
+          onPlayStart: () => {
+            firstQuestionNeedsTapRetryRef.current = false
+          },
+          prebuiltFilename: prebuilt
         },
         () => {
+          if (questionIndexRef.current === 0 && questionTtsPlayingRef.current) {
+            firstQuestionNeedsTapRetryRef.current = true
+            setCallStatusLine('自动读题失败，请点击页面任意位置后重试')
+          }
           const elapsed = Date.now() - ttsStartAt
           const holdMs = Math.max(0, minTtsCoverMs - elapsed)
           const releaseTtsAndResume = () => {
             questionTtsPlayingRef.current = false
-            ignoreRecognizeBeforeTsRef.current = Date.now() + 900
+            // 仅保留极短冷却，避免用户读题结束立即作答时被整段吞掉。
+            ignoreRecognizeBeforeTsRef.current = Date.now() + 180
             setTimeout(() => resumeAnswerAfterQuestionTts(sidInner), 30)
           }
           if (holdMs <= 0) {
@@ -626,6 +664,21 @@ export default function InterviewPage() {
     resumeAfterStop(sid)
   }, [cancelTranscriptRemoteDebounce, scheduleTranscriptRemote, pushTranscriptRemoteNow])
 
+  const handleAnyTapRetryFirstQuestion = useCallback(() => {
+    if (!firstQuestionNeedsTapRetryRef.current) return
+    if (questionIndexRef.current !== 0) {
+      firstQuestionNeedsTapRetryRef.current = false
+      return
+    }
+    const { sid, text } = firstListenGateRef.current
+    if (!sid || !String(text).trim()) return
+    firstQuestionNeedsTapRetryRef.current = false
+    pendingTtsAfterStopRef.current = text
+    pendingUsePrefetchedFirstTtsRef.current = Boolean(firstQuestionPrefetchedFileRef.current)
+    setCallStatusLine('已检测到点击，准备重试语音读题…')
+    void startWechatSiTranscribe(sid, false)
+  }, [startWechatSiTranscribe])
+
   useDidShow(() => {
     visibleRef.current = true
     void (async () => {
@@ -675,10 +728,39 @@ export default function InterviewPage() {
           }
           flowLog('面试页 拉题+startLiveSession', true, `${cleaned.length} 题`)
           if (!transcribingRef.current) {
-            flowLogInfo('面试页', '首题：先停转写队列再语音读题')
-            pendingTtsAfterStopRef.current = cleaned[0]?.text ?? ''
-            setCallStatusLine('准备语音读题…')
-            void startWechatSiTranscribe(sid, true)
+            flowLogInfo('面试页', '首题：需在本页点击后播放读题（微信音频策略）')
+            const q0 = cleaned[0]?.text ?? ''
+            pendingTtsAfterStopRef.current = q0
+            firstListenGateRef.current = { sid, text: q0 }
+            firstQuestionNeedsTapRetryRef.current = false
+            setCallStatusLine('题目已就绪，准备自动语音读题…')
+            firstQuestionPrefetchedFileRef.current = ''
+            pendingUsePrefetchedFirstTtsRef.current = true
+            if (requirePluginFn && String(q0).trim()) {
+              if (firstQuestionPrefetchUiTimerRef.current) {
+                clearTimeout(firstQuestionPrefetchUiTimerRef.current)
+                firstQuestionPrefetchUiTimerRef.current = null
+              }
+              firstQuestionTtsPrefetchingRef.current = true
+              firstQuestionPrefetchUiTimerRef.current = setTimeout(() => {
+                firstQuestionPrefetchUiTimerRef.current = null
+                firstQuestionTtsPrefetchingRef.current = false
+              }, 15000)
+              prefetchInterviewQuestionTtsPath(q0, (name) => requirePluginFn(name), (path) => {
+                if (firstQuestionPrefetchUiTimerRef.current) {
+                  clearTimeout(firstQuestionPrefetchUiTimerRef.current)
+                  firstQuestionPrefetchUiTimerRef.current = null
+                }
+                firstQuestionTtsPrefetchingRef.current = false
+                if (!visibleRef.current) return
+                if (path) {
+                  firstQuestionPrefetchedFileRef.current = path
+                  flowLogInfo('面试页', '首题读题音频已预拉取')
+                }
+              })
+            }
+            // 去掉首题按钮后，题目准备完成即自动进入读题链路。
+            void startWechatSiTranscribe(sid, false)
           }
         } catch (e) {
           dataInitMarkerRef.current = ''
@@ -752,29 +834,26 @@ export default function InterviewPage() {
   const showTrtcPusher = trtcActive && pusher && String(pusher.url || '').length > 0
 
   return (
-    <View className='safe-container interview-page'>
+    <View className='safe-container interview-page' onClick={handleAnyTapRetryFirstQuestion}>
       <View className='interview-hero'>
         <View className='interviewer-stage'>
           <View className='interviewer-bg' />
           <View className='interviewer-figure-layer'>
             <View className='interviewer-avatar-stack'>
               <View className='interviewer-circle-cluster'>
-                <View className='interviewer-orbit interviewer-orbit--b' aria-hidden />
-                <View className='interviewer-orbit interviewer-orbit--a' aria-hidden />
                 <View className='interviewer-circle-frame'>
-                  <Image
-                    className='interviewer-circle-img'
-                    src={AI_INTERVIEWER_IMG_URL}
-                    mode='aspectFill'
+                  <View
+                    className='interviewer-circle-fill'
+                    style={{
+                      backgroundImage: AI_INTERVIEWER_IMG_URL
+                        ? `url(${JSON.stringify(AI_INTERVIEWER_IMG_URL)})`
+                        : 'none'
+                    }}
                   />
                   <View className='interviewer-circle-badge'>
                     <Text className='interviewer-circle-badge-text'>AI 面试官</Text>
                   </View>
                 </View>
-              </View>
-              <View className='interviewer-name-dots'>
-                <View className='interviewer-name-dot interviewer-name-dot--active' />
-                <View className='interviewer-name-dot' />
               </View>
             </View>
           </View>

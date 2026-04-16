@@ -37,23 +37,23 @@ export default function LoginPage() {
     // 后台结构化邀请码为「岗位码-发起人账号-筛查记录 id」（见 server buildStructuredInviteCode），
     // 另支持仅岗位码、历史 INV 前缀等；具体有效性由 /api/candidate/login-invite 校验。
     if (code.length < 4 || code.length > 128) {
-      Taro.showToast({ title: '邀请码长度应在 4～128 个字符', icon: 'none' })
+      Taro.showToast({ title: '邀请码须 4～128 位', icon: 'none' })
       return
     }
     if (!/^[A-Z0-9_.@-]+$/.test(code)) {
-      Taro.showToast({ title: '邀请码仅支持字母、数字与 - _ . @', icon: 'none' })
+      Taro.showToast({ title: '邀请码仅字母数字及 -_.@', icon: 'none' })
       return
     }
     const phoneTrimmed = phone.trim()
     if (!/^1[3-9]\d{9}$/.test(phoneTrimmed)) {
-      Taro.showToast({ title: '请输入正确的11位手机号', icon: 'none' })
+      Taro.showToast({ title: '请输入 11 位手机号', icon: 'none' })
       return
     }
     try {
       setLoading(true)
       const loginRes = await Taro.login()
       if (!loginRes.code) {
-        Taro.showToast({ title: '微信登录失败，请重试', icon: 'none' })
+        Taro.showToast({ title: '微信登录失败', icon: 'none' })
         return
       }
       const data = await loginWithInviteCode({
@@ -99,7 +99,7 @@ export default function LoginPage() {
     <View className='safe-container login-page'>
       <View className='header'>
         <Text className='title'>欢迎参加面试</Text>
-        <Text className='subtitle'>请填写真实信息并输入面试邀请码完成登记</Text>
+        <Text className='subtitle'>真实姓名 · 手机 · 邀请码</Text>
       </View>
 
       <View className='card form-card'>
@@ -110,7 +110,7 @@ export default function LoginPage() {
           <Input
             className='input'
             value={name}
-            placeholder='请输入真实姓名'
+            placeholder='与证件一致'
             onInput={(e) => setName(e.detail.value)}
           />
         </View>
@@ -124,20 +124,20 @@ export default function LoginPage() {
             value={phone}
             type='number'
             maxlength={11}
-            placeholder='请输入11位手机号'
+            placeholder='11 位大陆手机号'
             onInput={(e) => setPhone(e.detail.value)}
           />
-          <Text className='field-tip'>用于面试身份确认与通知联系</Text>
+          <Text className='field-tip'>用于核验身份</Text>
         </View>
 
         <View className='field'>
           <Text className='label'>
-            面试邀请码<Text className='required-star'>*</Text>
+            邀请码<Text className='required-star'>*</Text>
           </Text>
           <Input
             className='input'
             value={inviteCode}
-            placeholder='例如 J001 或 J001-账号-编号'
+            placeholder='HR 提供的岗位码或完整码'
             onInput={(e) => setInviteCode(e.detail.value)}
           />
         </View>
