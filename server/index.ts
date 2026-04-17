@@ -1209,6 +1209,29 @@ async function getSessionInternalId(sessionId: string): Promise<number | null> {
   return rows.length ? rows[0].id : null
 }
 
+/** 候选人提交面试报告成功后，将关联邀请从 pending 标为 accepted（中途退出仍可再次登录，仅提交后失效） */
+async function markInvitationConsumedAfterInterviewSubmit(externalSessionId: string) {
+  const sid = String(externalSessionId || '').trim()
+  if (!sid) return
+  try {
+    const [sessRows] = await mysqlPool.query<any[]>(
+      'SELECT invitation_id FROM interview_sessions WHERE session_id=? AND invitation_id IS NOT NULL LIMIT 1',
+      [sid]
+    )
+    if (!sessRows.length) return
+    const invId = sessRows[0].invitation_id
+    if (invId == null || !Number.isFinite(Number(invId))) return
+    await mysqlPool.query(
+      `UPDATE interview_invitations
+       SET status='accepted', accepted_at=NOW(), updated_at=NOW()
+       WHERE id=? AND status='pending'`,
+      [Number(invId)]
+    )
+  } catch (e) {
+    console.warn('[markInvitationConsumedAfterInterviewSubmit]', e)
+  }
+}
+
 async function upsertSessionBase(params: {
   sessionId: string
   jobId: string
@@ -3105,9 +3128,7 @@ app.post('/api/candidate/invitations/accept', async (req, res) => {
     const inv = invRows[0]
     const [updHeader] = await conn.query<ResultSetHeader>(
       `UPDATE interview_invitations
-       SET status='accepted',
-           accepted_at=NOW(),
-           candidate_user_id=COALESCE(candidate_user_id, ?),
+       SET candidate_user_id=COALESCE(candidate_user_id, ?),
            candidate_openid=COALESCE(NULLIF(candidate_openid, ''), ?),
            updated_at=NOW()
        WHERE id=? AND status='pending'`,
@@ -3243,9 +3264,7 @@ app.post('/api/candidate/login-invite', async (req, res) => {
           rsidRow != null && Number(rsidRow) > 0 ? Math.floor(Number(rsidRow)) : null
         const [updHeader] = await conn.query<ResultSetHeader>(
           `UPDATE interview_invitations
-           SET status='accepted',
-               accepted_at=NOW(),
-               candidate_user_id=COALESCE(candidate_user_id, ?),
+           SET candidate_user_id=COALESCE(candidate_user_id, ?),
                candidate_openid=COALESCE(NULLIF(candidate_openid, ''), ?),
                updated_at=NOW()
            WHERE id=? AND status='pending'`,
@@ -3609,7 +3628,7 @@ app.post('/api/live/session/append-questions', async (req, res) => {
     const sid = await getSessionInternalId(sessionId)
     if (!sid) return res.status(404).json({ message: 'session not found' })
 
-    const [maxRows] = await mysqlPool.query<{ m: number }[]>(
+    const [maxRows] = await mysqlPool.query<any[]>(
       'SELECT COALESCE(MAX(question_no), 0) AS m FROM interview_questions WHERE session_id=?',
       [sid]
     )
@@ -3970,6 +3989,7 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
         answer: String(x.answer || '')
       }))
     })
+    await markInvitationConsumedAfterInterviewSubmit(sessionId)
     return res.json({ data: fallback })
   }
 
@@ -4084,6 +4104,7 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
         behaviorSignals,
         qa: mergedQa
       })
+      await markInvitationConsumedAfterInterviewSubmit(sessionId)
       return res.json({ data: out })
     }
     flowLog('submit-interview AI评分', true, `score=${parsed.score} passed=${parsed.passed}`)
@@ -4110,6 +4131,7 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
       behaviorSignals,
       qa: mergedQa
     })
+    await markInvitationConsumedAfterInterviewSubmit(sessionId)
     return res.json(out)
   } catch (e) {
     flowLog('submit-interview 异常', false, e instanceof Error ? e.message : 'unknown')
@@ -4132,6 +4154,7 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
           answer: String(x.answer || '')
         }))
       })
+      await markInvitationConsumedAfterInterviewSubmit(sessionId)
     } catch (persistErr) {
       flowLog('submit-interview 异常后落库失败', false, persistErr instanceof Error ? persistErr.message : 'unknown')
     }

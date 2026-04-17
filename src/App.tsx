@@ -5169,6 +5169,12 @@ function ApplicationManagementView({
   const highCount = rows.filter((x) => x.score >= 80).length
   const midCount = rows.filter((x) => x.score >= 60 && x.score < 80).length
   const lowCount = rows.filter((x) => x.score < 60).length
+  const dimBadgeClass = (n: number) =>
+    n >= 80
+      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+      : n >= 60
+        ? 'bg-amber-50 text-amber-700 border-amber-200'
+        : 'bg-rose-50 text-rose-700 border-rose-200'
 
   const handleOpenInterviewReport = async (row: { id: string; candidateName: string; jobCode: string }) => {
     setReportLoadingId(row.id)
@@ -5324,8 +5330,33 @@ function ApplicationManagementView({
                         ) : null}
                       </div>
                     </td>
-                    <td className="max-w-[9rem] px-3 py-3 text-xs leading-relaxed text-slate-600 sm:max-w-none sm:px-6 sm:py-4">
-                      技能 {row.skill} / 经验 {row.experience} / 学历 {row.education} / 稳定 {row.stability}
+                    <td className="min-w-[12rem] px-3 py-3 text-xs text-slate-600 sm:min-w-[14rem] sm:px-6 sm:py-4">
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <span
+                          className={`inline-flex items-center justify-between rounded-md border px-2 py-1 ${dimBadgeClass(row.skill)}`}
+                        >
+                          <span>技能</span>
+                          <span className="font-semibold">{row.skill}</span>
+                        </span>
+                        <span
+                          className={`inline-flex items-center justify-between rounded-md border px-2 py-1 ${dimBadgeClass(row.experience)}`}
+                        >
+                          <span>经验</span>
+                          <span className="font-semibold">{row.experience}</span>
+                        </span>
+                        <span
+                          className={`inline-flex items-center justify-between rounded-md border px-2 py-1 ${dimBadgeClass(row.education)}`}
+                        >
+                          <span>学历</span>
+                          <span className="font-semibold">{row.education}</span>
+                        </span>
+                        <span
+                          className={`inline-flex items-center justify-between rounded-md border px-2 py-1 ${dimBadgeClass(row.stability)}`}
+                        >
+                          <span>稳定</span>
+                          <span className="font-semibold">{row.stability}</span>
+                        </span>
+                      </div>
                     </td>
                     <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
                       <span
