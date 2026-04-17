@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS resume_screenings (
   stability_score TINYINT UNSIGNED NOT NULL DEFAULT 0,
   status VARCHAR(64) NOT NULL DEFAULT 'AI分析完成',
   report_summary TEXT NULL,
+  evaluation_json JSON NULL COMMENT '结构化简历评估结果',
   resume_plaintext MEDIUMTEXT NULL,
   file_name VARCHAR(255) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

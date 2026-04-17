@@ -265,10 +265,19 @@ export interface Resume {
   stabilityScore?: number
   /** AI 对简历给出的结论文案（如 AI分析完成、待定） */
   status: string
-  /** 招聘漏斗阶段：简历筛查完成 / 已发邀请 / 初面通过 等 */
+  /** 招聘漏斗阶段：简历筛查完成 / 已发邀请 / AI面试完成 等 */
   flowStage?: string
   uploadTime: string
   reportSummary?: string
+  evaluationJson?: {
+    decision?: string
+    summary?: string
+    strengths?: string[]
+    risks?: Array<string | { risk?: string; interview_question?: string }>
+    dimension_scores?: Record<string, number | { score?: number; evidence?: string[] }>
+  }
+  /** 简历结构化维度分，优先取 evaluation_json.dimension_scores（六维） */
+  resumeDimensionScores?: Record<string, number>
 }
 export interface Application { id: string; name: string; job: string; resumeScore: number; interviewScore: number; aiEval: string; status: string; }
 export interface Dept {
@@ -383,6 +392,13 @@ function activeUsersInDept(users: User[], deptName: string): User[] {
   return users.filter(
     (u) => u.status === '正常' && u.dept && u.dept !== '-' && deptNamesMatch(u.dept, d)
   );
+}
+
+/** 用户「所属部门」是否落在给定部门子树内（按部门名称与树节点 name 匹配） */
+function userDeptInSubtree(userDept: string, subtreeDepts: Dept[]): boolean {
+  const d = String(userDept || '').trim();
+  if (!d || d === '-') return false;
+  return subtreeDepts.some((sd) => deptNamesMatch(d, sd.name));
 }
 
 const CN_MOBILE_LOGIN_USERNAME_RE = /^1[3-9]\d{9}$/;
@@ -2052,7 +2068,9 @@ function ProjectManagementView({
                         </label>
                         <div className="max-h-56 overflow-y-auto rounded-lg border border-indigo-100 bg-white p-2">
                           {projectRecruitmentLeadGroups.length === 0 ? (
-                            <p className="px-2 py-1 text-xs text-slate-500">暂无可选招聘经理，请先在招聘部门创建“招聘经理”角色账号。</p>
+                            <p className="px-2 py-1 text-xs text-slate-500">
+                              暂无可选招聘经理，请先在「部门管理」中维护类型为「招聘」的部门，并在该部门下创建「招聘经理」角色账号。
+                            </p>
                           ) : (
                             projectRecruitmentLeadGroups.map((g) => (
                               <div key={g.dept.id} className="mb-2 last:mb-0 rounded-md border border-slate-100">
@@ -2675,6 +2693,30 @@ function parseRecruitersInput(s: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * 「招聘部门」展示用：根据岗位已选「招聘人员」在用户表中的所属部门聚合（与「所选项目上负责本岗位招聘的成员所在部门」一致）。
+ * 若名单为空或未匹配到用户，返回空串；列表在「未分配招聘专员」时不回落 jobs.department，直接留空。
+ */
+function departmentsFromJobRecruiters(job: Job, users: User[]): string {
+  const tokens = (job.recruiters || [])
+    .map((x) => String(x || '').trim())
+    .filter(Boolean);
+  if (!tokens.length) return '';
+  const depts = new Set<string>();
+  for (const token of tokens) {
+    const lower = token.toLowerCase();
+    const u = users.find((x) => {
+      if (x.status && x.status !== '正常') return false;
+      const name = String(x.name || '').trim().toLowerCase();
+      const un = String(x.username || '').trim().toLowerCase();
+      return name === lower || un === lower;
+    });
+    const d = String(u?.dept || '').trim();
+    if (d && d !== '-') depts.add(d);
+  }
+  return [...depts].sort((a, b) => a.localeCompare(b, 'zh-CN')).join('、');
+}
+
 function recruiterIdentityKeys(profile: AdminLoginProfile | null): string[] {
   const uname = String(profile?.username || '').trim().toLowerCase();
   const name = String(profile?.name || '').trim().toLowerCase();
@@ -2817,12 +2859,6 @@ function useRecruiterScopedJobCodes(currentRole: Role, authProfile: AdminLoginPr
   }, [load]);
 
   return { codes, loading };
-}
-
-function jobAssignmentOwner(job: Job, projectManager: string): string {
-  if (job.recruiters?.length) return job.recruiters.join('、');
-  if (projectManager && projectManager !== '-') return projectManager;
-  return '—';
 }
 
 function deliveryManagersByProjectDept(projectDept: string, users: User[]): string {
@@ -3054,12 +3090,17 @@ function JobEditorModal({
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-500 mb-1">所属部门</label>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">
+                    招聘部门
+                    <span className="block text-[11px] font-normal text-slate-400 mt-0.5 leading-snug">
+                      指<strong>当前所选项目</strong>上负责本岗位招聘的成员所在部门，应与下方所选招聘人员账号的「所属部门」一致。
+                    </span>
+                  </label>
                   <input
                     value={jobForm.department}
                     onChange={(e) => setJobForm((f) => (f ? { ...f, department: e.target.value } : f))}
                     className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
-                    placeholder="例如：技术部"
+                    placeholder="例如：与招聘人员账号所属部门一致"
                   />
                 </div>
                 <div>
@@ -3128,7 +3169,7 @@ function JobEditorModal({
                   <div className="max-h-56 overflow-y-auto rounded-lg border border-indigo-100 bg-white p-2">
                     {jobSingleStaffGroups.length === 0 ? (
                       <p className="px-2 py-1 text-xs text-slate-500">
-                        暂无可选招聘人员，请先在招聘部门创建一线招聘角色账号。
+                        暂无可选招聘人员，请先在「部门管理」中维护类型为「招聘」的部门，并在该部门下创建一线招聘角色账号。
                       </p>
                     ) : (
                       <>
@@ -3209,7 +3250,7 @@ function JobEditorModal({
                   <div className="max-h-56 overflow-y-auto rounded-lg border border-indigo-100 bg-white p-2">
                     {jobRecruiterSpecialistGroups.length === 0 ? (
                       <p className="px-2 py-1 text-xs text-slate-500">
-                        暂无可选招聘专员。请在侧边栏「用户管理」中新建用户，并为其分配「招聘专员」角色（部门需与岗位招聘部门一致）。
+                        暂无可选招聘专员。请在「用户管理」中新建用户并分配「招聘专员」角色，且账号「所属部门」须与本岗位「招聘部门」一致。
                       </p>
                     ) : (
                       jobRecruiterSpecialistGroups.map((g) => (
@@ -3350,6 +3391,8 @@ function JobQueryView({
   const [jobFormUsers, setJobFormUsers] = useState<User[]>([]);
   const [recruiterPickDept, setRecruiterPickDept] = useState('');
   const [recruiterPickUsername, setRecruiterPickUsername] = useState('');
+  /** 岗位列表按所属项目筛选，空为全部 */
+  const [jobQueryProjectFilter, setJobQueryProjectFilter] = useState('');
 
   const loadData = useCallback(() => {
     void fetch('/api/projects')
@@ -3471,6 +3514,24 @@ function JobQueryView({
   }, [currentRole, recruiterPickUsername, recruiterPickDept, jobFormUsers]);
 
   const selectableProjects = projectOptions.filter((p) => !['EMPTY', 'UNASSIGNED'].includes(p.id));
+
+  const jobQueryProjectFilterOptions = useMemo(
+    () => projectOptions.filter((p) => p.id && p.id !== 'EMPTY'),
+    [projectOptions]
+  );
+
+  const filteredJobQueryRows = useMemo(() => {
+    const fid = String(jobQueryProjectFilter || '').trim();
+    if (!fid) return rows;
+    return rows.filter((r) => String(r.job.project_id || '').trim() === fid);
+  }, [rows, jobQueryProjectFilter]);
+
+  useEffect(() => {
+    const fid = String(jobQueryProjectFilter || '').trim();
+    if (!fid) return;
+    const ok = jobQueryProjectFilterOptions.some((p) => p.id === fid);
+    if (!ok) setJobQueryProjectFilter('');
+  }, [jobQueryProjectFilter, jobQueryProjectFilterOptions]);
 
   const canDeleteInJobQuery = currentRole === 'admin' || currentRole === 'delivery_manager';
 
@@ -3661,8 +3722,25 @@ function JobQueryView({
       ) : null}
 
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between gap-4">
-          <h2 className="text-base font-bold text-slate-900">岗位列表</h2>
+        <div className="px-6 py-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div className="flex flex-wrap items-center gap-3 min-w-0">
+            <h2 className="text-base font-bold text-slate-900 shrink-0">岗位列表</h2>
+            <label className="flex items-center gap-2 text-sm text-slate-600 min-w-0">
+              <span className="shrink-0">项目</span>
+              <select
+                value={jobQueryProjectFilter}
+                onChange={(e) => setJobQueryProjectFilter(e.target.value)}
+                className="min-w-[10rem] max-w-[20rem] border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-200"
+              >
+                <option value="">全部</option>
+                {jobQueryProjectFilterOptions.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.id === 'UNASSIGNED' ? '未分配项目岗位' : p.name || p.id}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
           {currentRole !== 'recruiter' ? (
             <button
               type="button"
@@ -3676,22 +3754,24 @@ function JobQueryView({
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm min-w-[960px]">
+          <table className="w-full text-left text-sm min-w-[1040px]">
             <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
               <tr>
-                <th className="px-5 py-3 font-medium whitespace-nowrap">岗位名称</th>
+                <th className="px-5 py-3 font-medium whitespace-nowrap">项目</th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">交付负责人</th>
-                <th className="px-5 py-3 font-medium whitespace-nowrap">招聘负责人</th>
-                <th className="px-5 py-3 font-medium whitespace-nowrap">JD</th>
                 <th
                   className="px-5 py-3 font-medium whitespace-nowrap"
-                  title="筛查记录数 / 需求人数"
+                  title="与当前项目上负责本岗位招聘的成员所在部门一致；已分配招聘人员时按账号所属部门聚合；未分配招聘专员时本列为空（不使用手工填写值顶替）。"
                 >
-                  HC
+                  招聘部门
+                </th>
+                <th className="px-5 py-3 font-medium whitespace-nowrap">岗位名称</th>
+                <th className="px-5 py-3 font-medium whitespace-nowrap" title="需求人数（Headcount）">
+                  招聘人数（HC）
                 </th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">薪资范围</th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">地点</th>
-                <th className="px-5 py-3 font-medium whitespace-nowrap">列表时间</th>
+                <th className="px-5 py-3 font-medium whitespace-nowrap">岗位日期</th>
                 <th className="px-5 py-3 font-medium whitespace-nowrap">项目状态</th>
                 <th className="px-5 py-3 font-medium text-right whitespace-nowrap">操作</th>
               </tr>
@@ -3703,45 +3783,90 @@ function JobQueryView({
                     暂无岗位数据，请点击右上角「+」添加
                   </td>
                 </tr>
+              ) : filteredJobQueryRows.length === 0 ? (
+                <tr>
+                  <td colSpan={10} className="px-5 py-12 text-center text-slate-500">
+                    当前项目筛选下无岗位，请更换「项目」条件或清空筛选
+                  </td>
+                </tr>
               ) : (
-                rows.map(({ job, projectName, projectDept, projectManager, projectStatus }) => {
+                filteredJobQueryRows.map(({ job, projectName, projectDept, projectStatus }) => {
                   const screenN = job.screeningCount ?? 0;
-                  const hc = `${screenN}/${job.demand}`;
-                  const owner = jobAssignmentOwner(job, projectManager);
+                  const hcDemand = job.demand != null && Number.isFinite(Number(job.demand)) ? String(job.demand) : '—';
                   const deliveryOwner = deliveryManagersByProjectDept(projectDept, jobFormUsers);
-                  const when = (job.updatedAt || '').trim() || '—';
+                  const rawWhen = (job.updatedAt || '').trim();
+                  let jobDateLabel = '—';
+                  if (rawWhen) {
+                    const d = new Date(rawWhen);
+                    jobDateLabel = Number.isNaN(d.getTime()) ? rawWhen.slice(0, 10) : d.toLocaleDateString('zh-CN');
+                  }
+                  const recruiterTokens = (job.recruiters || [])
+                    .map((x) => String(x || '').trim())
+                    .filter(Boolean);
+                  const hasAssignedRecruiters = recruiterTokens.length > 0;
+                  const fromRecruiters = departmentsFromJobRecruiters(job, jobFormUsers);
+                  const manualDept =
+                    job.department && String(job.department).trim() && job.department !== '-'
+                      ? String(job.department).trim()
+                      : '';
+                  const recruitDept = !hasAssignedRecruiters
+                    ? ''
+                    : fromRecruiters || manualDept || '—';
+                  const manualAlignsWithStaff =
+                    !fromRecruiters ||
+                    !manualDept ||
+                    fromRecruiters.split('、').some((d) => deptNamesMatch(d, manualDept));
+                  const recruitDeptTitle = !hasAssignedRecruiters
+                    ? '尚未分配招聘专员，招聘部门留空'
+                    : fromRecruiters
+                      ? manualDept && !manualAlignsWithStaff
+                        ? `招聘人员所属部门：${fromRecruiters}；保存字段：${manualDept}`
+                        : `招聘人员所属部门：${fromRecruiters}`
+                      : manualDept
+                        ? `未从招聘人员名单匹配到部门，展示保存值：${manualDept}`
+                        : recruitDept;
                   const ps = projectStatus || '—';
                   const statusMuted = /待归档|已结束|已关闭/.test(ps);
                   return (
                     <tr key={`${job.project_id}-${job.id}`} className="hover:bg-slate-50/80 transition-colors">
-                      <td className="px-5 py-4 align-top">
+                      <td className="px-5 py-4 text-slate-800 align-top max-w-[200px]">
+                        <span className="line-clamp-2 font-medium" title={projectName}>
+                          {projectName}
+                        </span>
+                      </td>
+                      <td className="px-5 py-4 text-slate-700 align-top max-w-[160px]">
+                        <span className="line-clamp-2" title={deliveryOwner}>
+                          {deliveryOwner}
+                        </span>
+                      </td>
+                      <td className="px-5 py-4 text-slate-700 align-top max-w-[140px]">
+                        <span className="line-clamp-2" title={recruitDeptTitle}>
+                          {recruitDept}
+                        </span>
+                      </td>
+                      <td className="px-5 py-4 align-top min-w-[140px]">
                         <p className="font-semibold text-slate-900">{job.title}</p>
                         <p className="text-xs font-mono text-slate-500 mt-0.5" title="岗位码，用于筛查/邀请/报告关联">
                           {job.id}
                         </p>
-                        <p className="text-xs text-slate-500 mt-0.5">{projectName}</p>
                       </td>
-                      <td className="px-5 py-4 text-slate-700 align-top">{deliveryOwner}</td>
-                      <td className="px-5 py-4 text-slate-700 align-top max-w-[140px]">
-                        <span className="line-clamp-2" title={owner}>
-                          {owner}
-                        </span>
+                      <td
+                        className="px-5 py-4 text-slate-800 font-medium tabular-nums align-top whitespace-nowrap"
+                        title={screenN > 0 ? `需求人数；简历筛查记录 ${screenN} 条` : '需求人数'}
+                      >
+                        {hcDemand}
                       </td>
-                      <td className="px-5 py-4 text-slate-700 align-top max-w-[320px]">
-                        <span className="line-clamp-2" title={job.jdText || '—'}>
-                          {job.jdText || '—'}
+                      <td className="px-5 py-4 text-slate-800 align-top whitespace-nowrap">{job.salary}</td>
+                      <td className="px-5 py-4 text-slate-700 align-top max-w-[120px]">
+                        <span className="line-clamp-2" title={job.location}>
+                          {job.location}
                         </span>
                       </td>
                       <td
-                        className="px-5 py-4 text-slate-800 font-medium tabular-nums align-top"
-                        title="左侧：该岗位在简历筛查中的记录条数；右侧：需求人数"
+                        className="px-5 py-4 text-slate-600 tabular-nums align-top whitespace-nowrap text-xs"
+                        title={rawWhen ? `岗位信息最近更新时间：${rawWhen}` : undefined}
                       >
-                        {hc}
-                      </td>
-                      <td className="px-5 py-4 text-slate-800 align-top whitespace-nowrap">{job.salary}</td>
-                      <td className="px-5 py-4 text-slate-700 align-top">{job.location}</td>
-                      <td className="px-5 py-4 text-slate-600 tabular-nums align-top whitespace-nowrap text-xs">
-                        {when}
+                        {jobDateLabel}
                       </td>
                       <td className="px-5 py-4 align-top">
                         <span
@@ -3837,6 +3962,90 @@ function interviewReportDimensionLabelCn(key: string): string {
   return map[k] || k
 }
 
+function resumeEvalDimensionLabelCn(key: string): string {
+  const k = String(key || '').trim()
+  const map: Record<string, string> = {
+    risk_fit: '风险岗位匹配',
+    depth: '专业深度',
+    impact: '业务影响力',
+    data_skill: '数据能力',
+    stability_growth: '稳定与成长',
+    communication_business: '沟通与业务协同',
+    tech_fit: '技术岗位匹配',
+    engineering_depth: '工程深度',
+    code_quality: '代码质量',
+    skill: '技能',
+    experience: '经验',
+    education: '学历',
+    stability: '稳定'
+  }
+  return map[k] || k
+}
+
+function pickResumeDimensionScores(
+  evaluationJson: Resume['evaluationJson'] | undefined,
+  fallback: { skill: number; experience: number; education: number; stability: number }
+): Record<string, number> {
+  const raw = evaluationJson?.dimension_scores
+  const out: Record<string, number> = {}
+  if (raw && typeof raw === 'object') {
+    for (const [k, v] of Object.entries(raw)) {
+      const n = typeof v === 'number' ? Number(v) : Number(v?.score)
+      if (!Number.isFinite(n)) continue
+      out[String(k)] = Math.max(0, Math.min(100, Math.round(n)))
+    }
+  }
+  if (Object.keys(out).length > 0) return out
+  return {
+    skill: fallback.skill,
+    experience: fallback.experience,
+    education: fallback.education,
+    stability: fallback.stability
+  }
+}
+
+function resumeDimensionOrderedEntries(scores: Record<string, number>): Array<[string, number]> {
+  const preferred = [
+    'risk_fit',
+    'depth',
+    'impact',
+    'data_skill',
+    'tech_fit',
+    'engineering_depth',
+    'code_quality',
+    'stability_growth',
+    'communication_business',
+    'skill',
+    'experience',
+    'education',
+    'stability'
+  ]
+  const rank = new Map<string, number>()
+  preferred.forEach((k, i) => rank.set(k, i))
+  return Object.entries(scores || {})
+    .sort((a, b) => {
+      const ra = rank.has(a[0]) ? Number(rank.get(a[0])) : 999
+      const rb = rank.has(b[0]) ? Number(rank.get(b[0])) : 999
+      if (ra !== rb) return ra - rb
+      return a[0].localeCompare(b[0])
+    })
+    .slice(0, 6)
+}
+
+function resumeDimensionEvidenceText(
+  evaluationJson: Resume['evaluationJson'] | undefined,
+  dimKey: string
+): string {
+  const dim = evaluationJson?.dimension_scores?.[dimKey]
+  const ev = typeof dim === 'number' ? undefined : dim?.evidence
+  if (!Array.isArray(ev) || !ev.length) return '暂无评语'
+  return ev
+    .map((x) => String(x || '').trim())
+    .filter(Boolean)
+    .slice(0, 2)
+    .join('；')
+}
+
 /** 流程：AI 筛查 → 发面试邀请 → 候选人答题/面试 → 面试报告；与 pipeline_stage、interview_reports 关联展示 */
 function deriveScreeningFlowLabels(row: Record<string, unknown>): { flowStage: string; aiConclusion: string } {
   const aiConclusion = String(row.status ?? '').trim() || '—'
@@ -3849,13 +4058,10 @@ function deriveScreeningFlowLabels(row: Record<string, unknown>): { flowStage: s
       : null
   const hasInterviewReport = hasUpdated || ivParsed !== null
   if (hasInterviewReport) {
-    const passedN = Number(row.interview_passed)
-    if (passedN === 1) return { flowStage: '初面通过', aiConclusion }
-    if (passedN === 0) return { flowStage: '初面待提升', aiConclusion }
-    return { flowStage: '初面已完成', aiConclusion }
+    return { flowStage: 'AI面试完成', aiConclusion }
   }
   const pip = String(row.pipeline_stage ?? '').trim()
-  if (pip === 'report_done') return { flowStage: '面试报告已出具', aiConclusion }
+  if (pip === 'report_done') return { flowStage: 'AI面试完成', aiConclusion }
   if (pip === 'invited') return { flowStage: '已发面试邀请', aiConclusion }
   return { flowStage: '简历筛查完成', aiConclusion }
 }
@@ -3875,32 +4081,6 @@ function fmtAdminListDateTime(v: unknown): string {
   } catch {
     return ''
   }
-}
-
-/** 初面管理「面试情况」：补充流程阶段与报告之间的业务说明 */
-function deriveInterviewSituation(row: Record<string, unknown>, hasInterviewReport: boolean): string {
-  const pip = String(row.pipeline_stage ?? '').trim()
-  const reportAt = fmtAdminListDateTime(row.interview_report_updated_at)
-  const sessSt = String(row.interview_session_status ?? '').trim()
-  const voip = String(row.interview_session_voip ?? '').trim()
-  const sessParts: string[] = []
-  if (sessSt === 'created') sessParts.push('面试会话已创建')
-  else if (sessSt) sessParts.push(`会话：${sessSt}`)
-  if (voip === 'connected') sessParts.push('音视频曾接通')
-  else if (voip && voip !== 'not_started') sessParts.push(`通话：${voip}`)
-  const sessHint = sessParts.join(' · ')
-
-  if (hasInterviewReport) {
-    const timePart = reportAt ? `报告更新 ${reportAt}` : ''
-    return ['已提交初面并生成面试报告', timePart, sessHint].filter(Boolean).join(' · ')
-  }
-  if (pip === 'report_done') {
-    return '库中标记为已有报告，但当前行未关联到报告（多为面试填写姓名与筛查不一致），请核对姓名与岗位码。'
-  }
-  if (pip === 'invited') {
-    return '已对该筛查记录发起邀请；尚未产生可关联的面试报告。请确认候选人已用邀请码登录并完成答题/面试。'
-  }
-  return '尚未从简历筛查页面对该记录发起邀请，候选人未进入面试流程。'
 }
 
 function dimsFromScreeningDbRow(
@@ -3939,6 +4119,7 @@ function mapScreeningRow(r: {
   interview_passed?: unknown
   interview_report_updated_at?: unknown
   report_summary: string | null
+  evaluation_json?: unknown
   uploader_username?: string | null
   created_at: string | Date
 }): Resume {
@@ -3950,6 +4131,16 @@ function mapScreeningRow(r: {
   const overall = Math.max(0, Math.min(100, Number(r.match_score) || 0))
   const d = dimsFromScreeningDbRow(r, overall)
   const { flowStage, aiConclusion } = deriveScreeningFlowLabels(r as unknown as Record<string, unknown>)
+  const parsedEval = (() => {
+    const raw = r.evaluation_json
+    if (raw == null) return undefined
+    if (typeof raw === 'object') return raw as Resume['evaluationJson']
+    try {
+      return JSON.parse(String(raw)) as Resume['evaluationJson']
+    } catch {
+      return undefined
+    }
+  })()
   return {
     id: String(r.id),
     name: String(r.candidate_name || '候选人'),
@@ -3965,10 +4156,12 @@ function mapScreeningRow(r: {
     experienceScore: d.experience,
     educationScore: d.education,
     stabilityScore: d.stability,
+    resumeDimensionScores: pickResumeDimensionScores(parsedEval, d),
     status: aiConclusion,
     flowStage,
     uploadTime,
-    reportSummary: String(r.report_summary || '')
+    reportSummary: String(r.report_summary || ''),
+    evaluationJson: parsedEval
   }
 }
 
@@ -4119,7 +4312,7 @@ function ResumeScreeningView({
     });
   }, [projectFilterOptions]);
 
-  /** 上传区「目标匹配岗位」：随上方项目筛选只展示该项目下的岗位 */
+  /** 上传区「目标匹配岗位」下拉：随项目筛选展示该项目下岗位，首项为「全部岗位」（仅筛列表；上传须选具体岗位） */
   const jobsForUploadSelect = useMemo(() => {
     const pid = resumeProjectFilter.trim();
     if (!pid) return inviteJobs;
@@ -4161,6 +4354,7 @@ function ResumeScreeningView({
           interview_passed?: unknown
           interview_report_updated_at?: unknown
           report_summary: string | null
+          evaluation_json?: unknown
           created_at: string | Date
         }>
         const mapped = rows.map((row) => mapScreeningRow(row));
@@ -4398,6 +4592,8 @@ function ResumeScreeningView({
     }
     setSelectedJobCode((prev) => {
       if (prev && jobsForUploadSelect.some((j) => j.job_code === prev)) return prev;
+      // 空字符串表示「全部岗位」，用于列表筛选；有可选岗位时保留该选择，不再强制选中第一项
+      if (!prev) return '';
       return jobsForUploadSelect[0].job_code;
     });
   }, [jobsForUploadSelect]);
@@ -4476,7 +4672,7 @@ function ResumeScreeningView({
       setUploadHint(
         jobsForUploadSelect.length === 0 && resumeProjectFilter.trim()
           ? '当前项目下没有可选岗位，请更换项目或为岗位绑定项目后再试。'
-          : '请先选择目标岗位。'
+          : '上传需绑定具体岗位。请先在「目标匹配岗位」中选择某一岗位（当前为「全部岗位」时无法上传）。'
       );
       return;
     }
@@ -4561,16 +4757,19 @@ function ResumeScreeningView({
                   className="w-full border border-slate-200 rounded-lg py-2 px-2.5 focus:ring-2 focus:ring-indigo-500 outline-none text-sm disabled:bg-slate-100"
                 >
                   {!inviteJobs.length ? (
-                  <option value="">暂无可用岗位，请联系管理员在系统中维护岗位信息</option>
+                    <option value="">暂无可用岗位，请联系管理员在系统中维护岗位信息</option>
                   ) : jobsForUploadSelect.length === 0 ? (
                     <option value="">当前项目下暂无岗位，请更换项目或绑定岗位到项目</option>
-                ) : (
-                    jobsForUploadSelect.map((j) => (
-                    <option key={j.job_code} value={j.job_code}>
-                      {j.title} ({j.job_code})
-                    </option>
-                  ))
-                )}
+                  ) : (
+                    <>
+                      <option value="">全部岗位</option>
+                      {jobsForUploadSelect.map((j) => (
+                        <option key={j.job_code} value={j.job_code}>
+                          {j.title} ({j.job_code})
+                        </option>
+                      ))}
+                    </>
+                  )}
               </select>
               </div>
             </div>
@@ -4671,6 +4870,14 @@ function ResumeScreeningView({
                         <span className="text-xs text-slate-500">匹配岗位: {resume.job}</span>
                       </div>
                       <div className="text-sm text-slate-500">上传时间: {resume.uploadTime}</div>
+                      <div className="mt-0.5 text-sm text-slate-600">
+                        简历上传人：
+                        {resume.uploaderUsername ? (
+                          <span className="font-mono text-slate-700 ml-1">{resume.uploaderUsername}</span>
+                        ) : (
+                          <span className="text-slate-400 ml-1">—</span>
+                        )}
+                      </div>
                       <div className="mt-0.5 text-sm text-slate-600">
                         手机：
                         {resume.phone ? resume.phone : <span className="text-slate-400">未识别</span>}
@@ -4932,13 +5139,67 @@ function ResumeScreeningView({
                   ) : null}
                   简历匹配 {reportResume.matchScore} 分 · AI 结论 {reportResume.status}
                 </p>
+                {reportResume.evaluationJson?.decision ? (
+                  <p className="text-xs text-slate-500 mb-2">
+                    结构化结论：
+                    <span className="ml-1 font-medium text-slate-700">{reportResume.evaluationJson.decision}</span>
+                  </p>
+                ) : null}
                 <p className="text-xs text-slate-500 mb-3">
-                  维度：技能 {reportResume.skillScore ?? '—'} / 经验 {reportResume.experienceScore ?? '—'} / 学历{' '}
-                  {reportResume.educationScore ?? '—'} / 稳定 {reportResume.stabilityScore ?? '—'}
+                  维度：
+                  {Object.entries(reportResume.resumeDimensionScores || {}).length
+                    ? resumeDimensionOrderedEntries(reportResume.resumeDimensionScores || {})
+                        .map(([k, v]) => `${resumeEvalDimensionLabelCn(k)} ${v}`)
+                        .join(' / ')
+                    : `技能 ${reportResume.skillScore ?? '—'} / 经验 ${reportResume.experienceScore ?? '—'} / 学历 ${
+                        reportResume.educationScore ?? '—'
+                      } / 稳定 ${reportResume.stabilityScore ?? '—'}`}
                 </p>
+                {Object.entries(reportResume.resumeDimensionScores || {}).length ? (
+                  <div className="mb-3 grid grid-cols-1 gap-2">
+                    {resumeDimensionOrderedEntries(reportResume.resumeDimensionScores || {}).map(([k, v]) => (
+                      <div key={`eval-dim-${k}`} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <p className="text-xs font-semibold text-slate-700">
+                          {resumeEvalDimensionLabelCn(k)} · <span className="tabular-nums">{Number(v) || 0}</span>
+                        </p>
+                        <p className="mt-1 text-xs leading-relaxed text-slate-600">
+                          {resumeDimensionEvidenceText(reportResume.evaluationJson, k)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">
                   {reportResume.reportSummary?.trim() || '暂无报告正文。'}
                 </div>
+                {Array.isArray(reportResume.evaluationJson?.strengths) && reportResume.evaluationJson.strengths.length ? (
+                  <div className="mt-4">
+                    <h4 className="text-sm font-semibold text-slate-800 mb-1.5">结构化优势</h4>
+                    <ul className="text-sm text-slate-700 space-y-1">
+                      {reportResume.evaluationJson.strengths.slice(0, 5).map((x, idx) => (
+                        <li key={idx}>- {x}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+                {Array.isArray(reportResume.evaluationJson?.risks) && reportResume.evaluationJson.risks.length ? (
+                  <div className="mt-4">
+                    <h4 className="text-sm font-semibold text-slate-800 mb-1.5">结构化风险与核验问题</h4>
+                    <ul className="text-sm text-slate-700 space-y-1.5">
+                      {reportResume.evaluationJson.risks.slice(0, 5).map((r, idx) => (
+                        <li key={idx}>
+                          -{' '}
+                          {typeof r === 'string'
+                            ? String(r || '未描述风险')
+                            : String(r?.risk || r?.interview_question || '未描述风险')}
+                          {(typeof r === 'object' && r?.interview_question) ? (
+                            <span className="text-slate-500">（面试核验：{String(r.interview_question)}）</span>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
               </div>
               <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 rounded-b-xl flex justify-end">
                 <button
@@ -4970,18 +5231,17 @@ function ApplicationManagementView({
     jobCode: string
     jobTitle: string
     projectName: string
-    /** 列表主分数：有面试报告用面试综合分，否则用简历 match_score */
+    /** 筛选用：有面试分用面试分，否则用简历分 */
     score: number
     resumeMatchScore: number
+    /** 面试综合分，无报告时为 null */
+    interviewScore: number | null
     hasInterviewReport: boolean
-    skill: number
-    experience: number
-    education: number
-    stability: number
-    /** 流程阶段：简历筛查完成 / 已发邀请 / 初面通过 … */
+    resumeDimensionScores: Record<string, number>
+    /** 流程阶段：简历筛查完成 / 已发邀请 / AI面试完成 … */
     status: string
-    /** 面试进度说明（邀请/报告/会话等） */
-    interviewSituation: string
+    /** 岗位配置的招聘人员（姓名列表） */
+    recruitersLabel: string
   }>>([])
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
@@ -5038,20 +5298,31 @@ function ApplicationManagementView({
               : null
           const hasInterviewReport = hasUpdated || ivParsed !== null
           const { flowStage } = deriveScreeningFlowLabels(row as Record<string, unknown>)
+          const interviewScore = ivParsed
+          const scoreForFilter =
+            hasInterviewReport && interviewScore !== null ? interviewScore : resumeMatch
+          const parsedEval = (() => {
+            const raw = row.evaluation_json
+            if (raw == null) return undefined
+            if (typeof raw === 'object') return raw as Resume['evaluationJson']
+            try {
+              return JSON.parse(String(raw)) as Resume['evaluationJson']
+            } catch {
+              return undefined
+            }
+          })()
           return {
             id: String(row.id ?? ''),
             candidateName: String(row.candidate_name ?? '候选人'),
             jobCode: String(row.job_code ?? ''),
             jobTitle: String(row.matched_job_title ?? row.job_code ?? ''),
-            score: hasInterviewReport ? (ivParsed !== null ? ivParsed : 0) : resumeMatch,
+            score: scoreForFilter,
             resumeMatchScore: resumeMatch,
+            interviewScore,
             hasInterviewReport,
-            skill: d.skill,
-            experience: d.experience,
-            education: d.education,
-            stability: d.stability,
+            resumeDimensionScores: pickResumeDimensionScores(parsedEval, d),
             status: flowStage,
-            interviewSituation: deriveInterviewSituation(row as Record<string, unknown>, hasInterviewReport)
+            recruitersLabel: '—'
           }
         })
         const projectsPayload = projectsRes.ok
@@ -5059,18 +5330,28 @@ function ApplicationManagementView({
           : []
         const allProjects: Project[] = Array.isArray(projectsPayload) ? projectsPayload : []
         const jobCodeToProjectName = new Map<string, string>()
+        const jobCodeToRecruiters = new Map<string, string>()
         for (const p of allProjects) {
           if (!p.id || p.id === 'EMPTY' || p.id === 'UNASSIGNED') continue
           const pname = String(p.name || p.id || '').trim() || String(p.id)
           for (const job of p.jobs || []) {
             const jc = String(job.id || '').trim()
-            if (jc && !jobCodeToProjectName.has(jc)) jobCodeToProjectName.set(jc, pname)
+            if (!jc) continue
+            if (!jobCodeToProjectName.has(jc)) jobCodeToProjectName.set(jc, pname)
+            if (!jobCodeToRecruiters.has(jc)) {
+              const rs = (job.recruiters || []).map((x) => String(x || '').trim()).filter(Boolean)
+              jobCodeToRecruiters.set(jc, rs.length ? rs.join('、') : '—')
+            }
           }
         }
-        const withProject = mapped.map((r) => ({
-          ...r,
-          projectName: jobCodeToProjectName.get(String(r.jobCode || '').trim()) || '—'
-        }))
+        const withProject = mapped.map((r) => {
+          const jc = String(r.jobCode || '').trim()
+          return {
+            ...r,
+            projectName: jobCodeToProjectName.get(jc) || '—',
+            recruitersLabel: jobCodeToRecruiters.get(jc) || '—'
+          }
+        })
         if (isAdminRole) {
           setRows(withProject)
           return
@@ -5141,7 +5422,8 @@ function ApplicationManagementView({
         row.candidateName.toLowerCase().includes(kw) ||
         row.jobTitle.toLowerCase().includes(kw) ||
         row.jobCode.toLowerCase().includes(kw) ||
-        row.projectName.toLowerCase().includes(kw)
+        row.projectName.toLowerCase().includes(kw) ||
+        row.recruitersLabel.toLowerCase().includes(kw)
       if (!hit) return false
     }
     if (statusFilter && row.status !== statusFilter) return false
@@ -5166,9 +5448,6 @@ function ApplicationManagementView({
   }, [filteredRows.length, appPageSize])
 
   const statusOptions = Array.from(new Set(rows.map((x) => x.status).filter(Boolean)))
-  const highCount = rows.filter((x) => x.score >= 80).length
-  const midCount = rows.filter((x) => x.score >= 60 && x.score < 80).length
-  const lowCount = rows.filter((x) => x.score < 60).length
   const dimBadgeClass = (n: number) =>
     n >= 80
       ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
@@ -5203,6 +5482,81 @@ function ApplicationManagementView({
     }
   }
 
+  const downloadInterviewReport = useCallback(() => {
+    if (!reportModal) return;
+    const esc = (s: string) =>
+      String(s || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    const dims = Object.entries(reportModal.dimensionScores || {})
+      .map(([k, v]) => `<li>${esc(interviewReportDimensionLabelCn(k))}：${Number(v) || 0}</li>`)
+      .join('');
+    const suggestions =
+      (reportModal.suggestions || []).length > 0
+        ? reportModal.suggestions.map((x) => `<li>${esc(x)}</li>`).join('')
+        : '<li>无</li>';
+    const risks =
+      (reportModal.riskPoints || []).length > 0
+        ? reportModal.riskPoints.map((x) => `<li>${esc(x)}</li>`).join('')
+        : '<li>无</li>';
+    const qa =
+      (reportModal.qa || []).length > 0
+        ? reportModal.qa
+            .map(
+              (item, idx) =>
+                `<div style="margin: 0 0 12px 0; padding: 8px; border: 1px solid #e5e7eb; border-radius: 6px;">
+                  <p style="margin: 0 0 6px 0;"><strong>Q${idx + 1}：</strong>${esc(String(item.question || '—'))}</p>
+                  <p style="margin: 0;"><strong>A：</strong>${esc(String(item.answer || '（无作答）')).replace(/\n/g, '<br/>')}</p>
+                </div>`
+            )
+            .join('')
+        : '<p>暂无答题明细</p>';
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>面试报告</title>
+</head>
+<body style="font-family: 'Microsoft YaHei', Arial, sans-serif; color: #111827; line-height: 1.6;">
+  <h2 style="margin: 0 0 12px 0;">AI-Recruit 面试报告</h2>
+  <p style="margin: 0 0 4px 0;"><strong>候选人：</strong>${esc(reportModal.candidateName)}</p>
+  <p style="margin: 0 0 4px 0;"><strong>岗位：</strong>${esc(reportModal.jobCode)}</p>
+  <p style="margin: 0 0 12px 0;"><strong>更新时间：</strong>${esc(reportModal.updatedAt || '—')}</p>
+
+  <h3 style="margin: 14px 0 8px 0;">综合结果</h3>
+  <p style="margin: 0 0 4px 0;"><strong>综合评分：</strong>${reportModal.score}</p>
+  <p style="margin: 0 0 8px 0;"><strong>结果：</strong>${reportModal.passed ? '通过' : '待提升'}</p>
+  <p style="margin: 0; white-space: pre-wrap;">${esc(reportModal.overallFeedback || '暂无综合结论')}</p>
+
+  <h3 style="margin: 14px 0 8px 0;">维度评分</h3>
+  <ul style="margin: 0 0 8px 18px; padding: 0;">${dims || '<li>无</li>'}</ul>
+
+  <h3 style="margin: 14px 0 8px 0;">改进建议</h3>
+  <ul style="margin: 0 0 8px 18px; padding: 0;">${suggestions}</ul>
+
+  <h3 style="margin: 14px 0 8px 0;">风险点</h3>
+  <ul style="margin: 0 0 8px 18px; padding: 0;">${risks}</ul>
+
+  <h3 style="margin: 14px 0 8px 0;">答题明细</h3>
+  ${qa}
+</body>
+</html>`;
+    const safeName = `${reportModal.candidateName || '候选人'}-${reportModal.jobCode || '岗位'}-面试报告`
+      .replace(/[\\/:*?"<>|]/g, '_')
+      .slice(0, 120);
+    const blob = new Blob(['\uFEFF', html], { type: 'application/msword;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${safeName}.doc`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, [reportModal]);
+
   return (
     <div className="space-y-6">
       {!isAdminRole && !deptScoped ? (
@@ -5223,24 +5577,6 @@ function ApplicationManagementView({
             >
               刷新
             </button>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-            <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2">
-              <p className="text-xs text-emerald-700">列表综合分 80+</p>
-              <p className="text-lg font-bold text-emerald-900">{highCount}</p>
-            </div>
-            <div className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2">
-              <p className="text-xs text-amber-700">列表综合分 60–79</p>
-              <p className="text-lg font-bold text-amber-900">{midCount}</p>
-            </div>
-            <div className="rounded-lg border border-rose-100 bg-rose-50 px-3 py-2">
-              <p className="text-xs text-rose-700">列表综合分 &lt;60</p>
-              <p className="text-lg font-bold text-rose-900">{lowCount}</p>
-            </div>
-            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-              <p className="text-xs text-slate-500">当前筛选结果</p>
-              <p className="text-lg font-bold text-slate-900">{filteredRows.length}</p>
-            </div>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
             <input
@@ -5264,12 +5600,13 @@ function ApplicationManagementView({
             <select
               value={scoreFilter}
               onChange={(e) => setScoreFilter(e.target.value as 'all' | 'high' | 'mid' | 'low')}
+              title="按列表分筛选：已有面试报告时用面试分，否则用简历分"
               className="border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
             >
-              <option value="all">全部分段</option>
-              <option value="high">综合分 80+</option>
-              <option value="mid">综合分 60–79</option>
-              <option value="low">综合分 &lt;60</option>
+              <option value="all">列表分（全部）</option>
+              <option value="high">列表分 80+</option>
+              <option value="mid">列表分 60–79</option>
+              <option value="low">列表分 &lt;60</option>
             </select>
           </div>
         </div>
@@ -5277,31 +5614,30 @@ function ApplicationManagementView({
           <div className="border-b border-slate-100 px-4 py-3 text-sm text-red-600 sm:px-6">{err}</div>
         ) : null}
         <div className="overflow-x-auto overscroll-x-contain">
-          <table className="w-full min-w-[56rem] text-left text-sm">
+          <table className="w-full min-w-[72rem] text-left text-sm">
             <thead className="border-b border-slate-200 bg-white text-slate-600">
               <tr>
                 <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">候选人</th>
-                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">项目名称</th>
-                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">岗位</th>
-                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">综合分</th>
+                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">项目</th>
+                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">岗位名称</th>
+                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">简历分</th>
                 <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">简历维度</th>
-                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">流程阶段</th>
-                <th className="min-w-[11rem] px-3 py-3 text-xs font-medium sm:min-w-[12.5rem] sm:px-6 sm:py-4 sm:text-sm">
-                  面试情况
-                </th>
-                <th className="px-3 py-3 text-right text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">操作</th>
+                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">面试分</th>
+                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">阶段</th>
+                <th className="min-w-[7rem] px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">招聘人员</th>
+                <th className="px-3 py-3 text-right text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">面试报告</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
                 <tr>
-                  <td className="px-3 py-8 text-slate-500 sm:px-6" colSpan={8}>
+                  <td className="px-3 py-8 text-slate-500 sm:px-6" colSpan={9}>
                     加载中...
                   </td>
                 </tr>
               ) : filteredRows.length === 0 ? (
                 <tr>
-                  <td className="px-3 py-8 text-slate-500 sm:px-6" colSpan={8}>
+                  <td className="px-3 py-8 text-slate-500 sm:px-6" colSpan={9}>
                     暂无数据，请先在简历筛查上传简历
                   </td>
                 </tr>
@@ -5314,69 +5650,60 @@ function ApplicationManagementView({
                     <td className="max-w-[10rem] px-3 py-3 text-slate-600 sm:max-w-[12.5rem] sm:px-6 sm:py-4" title={row.projectName}>
                       <span className="line-clamp-2">{row.projectName}</span>
                     </td>
-                    <td className="max-w-[11rem] px-3 py-3 text-slate-600 sm:max-w-none sm:px-6 sm:py-4">
-                      {row.jobTitle}（{row.jobCode}）
+                    <td className="max-w-[12rem] px-3 py-3 text-slate-600 sm:max-w-none sm:px-6 sm:py-4">
+                      <span className="font-medium text-slate-800">{row.jobTitle}</span>
+                      <p className="mt-0.5 font-mono text-[11px] text-slate-400" title="岗位编码">
+                        {row.jobCode}
+                      </p>
                     </td>
-                    <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
-                      <div className="flex flex-col items-start gap-0.5">
-                        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 font-medium text-slate-700">
-                          <BrainCircuit className="h-3.5 w-3.5" /> {row.score}
-                          <span className="text-[10px] font-normal text-slate-500">
-                            {row.hasInterviewReport ? '面试' : '简历'}
-                          </span>
-                        </span>
-                        {row.hasInterviewReport ? (
-                          <span className="text-[11px] text-slate-400">简历匹配 {row.resumeMatchScore}</span>
-                        ) : null}
-                      </div>
+                    <td className="whitespace-nowrap tabular-nums px-3 py-3 sm:px-6 sm:py-4">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2 py-1 font-semibold text-sky-900">
+                        {row.resumeMatchScore}
+                      </span>
                     </td>
                     <td className="min-w-[12rem] px-3 py-3 text-xs text-slate-600 sm:min-w-[14rem] sm:px-6 sm:py-4">
                       <div className="grid grid-cols-2 gap-1.5">
-                        <span
-                          className={`inline-flex items-center justify-between rounded-md border px-2 py-1 ${dimBadgeClass(row.skill)}`}
-                        >
-                          <span>技能</span>
-                          <span className="font-semibold">{row.skill}</span>
-                        </span>
-                        <span
-                          className={`inline-flex items-center justify-between rounded-md border px-2 py-1 ${dimBadgeClass(row.experience)}`}
-                        >
-                          <span>经验</span>
-                          <span className="font-semibold">{row.experience}</span>
-                        </span>
-                        <span
-                          className={`inline-flex items-center justify-between rounded-md border px-2 py-1 ${dimBadgeClass(row.education)}`}
-                        >
-                          <span>学历</span>
-                          <span className="font-semibold">{row.education}</span>
-                        </span>
-                        <span
-                          className={`inline-flex items-center justify-between rounded-md border px-2 py-1 ${dimBadgeClass(row.stability)}`}
-                        >
-                          <span>稳定</span>
-                          <span className="font-semibold">{row.stability}</span>
-                        </span>
+                        {resumeDimensionOrderedEntries(row.resumeDimensionScores || {})
+                          .map(([k, v]) => (
+                            <span
+                              key={`${row.id}-${k}`}
+                              className={`inline-flex items-center justify-between rounded-md border px-2 py-1 ${dimBadgeClass(
+                                Number(v) || 0
+                              )}`}
+                            >
+                              <span>{resumeEvalDimensionLabelCn(k)}</span>
+                              <span className="font-semibold">{Number(v) || 0}</span>
+                            </span>
+                          ))}
                       </div>
+                    </td>
+                    <td className="whitespace-nowrap tabular-nums px-3 py-3 sm:px-6 sm:py-4">
+                      {row.interviewScore !== null ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-1 font-semibold text-violet-900">
+                          {row.interviewScore}
+                        </span>
+                      ) : (
+                        <span className="text-slate-400">—</span>
+                      )}
                     </td>
                     <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
                       <span
                         className={`inline-block rounded px-2 py-1 text-xs font-medium ${
-                          row.status === '初面通过'
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : row.status === '初面待提升'
-                              ? 'bg-rose-100 text-rose-800'
-                              : row.status === '初面已完成' || row.status === '面试报告已出具'
-                                ? 'bg-violet-100 text-violet-800'
-                                : row.status === '已发面试邀请'
-                                  ? 'bg-amber-100 text-amber-900'
-                                  : 'bg-sky-100 text-sky-800'
+                          row.status === 'AI面试完成'
+                            ? 'bg-violet-100 text-violet-800'
+                            : row.status === '已发面试邀请'
+                              ? 'bg-amber-100 text-amber-900'
+                              : 'bg-sky-100 text-sky-800'
                         }`}
                       >
                         {row.status}
                       </span>
                     </td>
-                    <td className="max-w-[12rem] px-3 py-3 text-xs leading-relaxed text-slate-600 sm:max-w-xs sm:px-6 sm:py-4">
-                      {row.interviewSituation}
+                    <td
+                      className="max-w-[10rem] truncate px-3 py-3 text-slate-600 sm:max-w-[12rem] sm:px-6 sm:py-4"
+                      title={row.recruitersLabel}
+                    >
+                      {row.recruitersLabel}
                     </td>
                     <td className="whitespace-nowrap px-3 py-3 text-right sm:px-6 sm:py-4">
                       <button
@@ -5396,8 +5723,8 @@ function ApplicationManagementView({
                         {reportLoadingId === row.id && row.hasInterviewReport
                           ? '加载中…'
                           : row.hasInterviewReport
-                            ? '面试报告'
-                            : '暂无报告'}
+                            ? '查看'
+                            : '暂无'}
                       </button>
                     </td>
                   </tr>
@@ -5502,7 +5829,14 @@ function ApplicationManagementView({
                   </div>
                 </div>
               </div>
-              <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 rounded-b-xl flex justify-end">
+              <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 rounded-b-xl flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => downloadInterviewReport()}
+                  className="px-4 py-2 text-sm font-medium text-indigo-700 bg-indigo-50 rounded-lg hover:bg-indigo-100 transition-colors"
+                >
+                  下载报告
+                </button>
                 <button
                   type="button"
                   onClick={() => setReportModal(null)}
@@ -5705,6 +6039,9 @@ function SystemDeptView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState('');
+  const [deptListPage, setDeptListPage] = useState(1);
+  const [deptPageSize, setDeptPageSize] = useState(10);
+  const [collapsedDeptIds, setCollapsedDeptIds] = useState<Set<string>>(new Set());
   const [dialog, setDialog] = useState<
     null | { mode: 'create' | 'edit' | 'child'; parent?: Dept; record?: Dept }
   >(null);
@@ -5733,17 +6070,62 @@ function SystemDeptView() {
     });
   }, [hrUsers]);
 
+  const childCountByDeptId = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const d of depts) {
+      const pid = String(d.parentId || '').trim();
+      if (!pid) continue;
+      m.set(pid, (m.get(pid) || 0) + 1);
+    }
+    return m;
+  }, [depts]);
+
   const displayRows = useMemo(() => {
     const flat = flattenDeptTree(depts);
     const qq = q.trim().toLowerCase();
-    if (!qq) return flat;
-    return flat.filter(
-      ({ dept }) =>
-        String(dept.name || '').toLowerCase().includes(qq) ||
-        String(dept.manager || '').toLowerCase().includes(qq) ||
-        String(dept.id || '').toLowerCase().includes(qq)
-    );
-  }, [depts, q]);
+    const filtered = !qq
+      ? flat
+      : flat.filter(
+          ({ dept }) =>
+            String(dept.name || '').toLowerCase().includes(qq) ||
+            String(dept.manager || '').toLowerCase().includes(qq)
+        );
+    if (qq) return filtered;
+    const out: { dept: Dept; depth: number }[] = [];
+    let hiddenDepth: number | null = null;
+    for (const row of filtered) {
+      if (hiddenDepth !== null) {
+        if (row.depth > hiddenDepth) continue;
+        hiddenDepth = null;
+      }
+      out.push(row);
+      if (collapsedDeptIds.has(row.dept.id)) hiddenDepth = row.depth;
+    }
+    return out;
+  }, [depts, q, collapsedDeptIds]);
+
+  const pagedRows = useMemo(() => {
+    const start = (deptListPage - 1) * deptPageSize;
+    return displayRows.slice(start, start + deptPageSize);
+  }, [displayRows, deptListPage, deptPageSize]);
+
+  useEffect(() => {
+    setDeptListPage(1);
+  }, [q]);
+
+  useEffect(() => {
+    const tp = Math.max(1, Math.ceil(displayRows.length / deptPageSize) || 1);
+    setDeptListPage((p) => Math.min(Math.max(1, p), tp));
+  }, [displayRows.length, deptPageSize]);
+
+  const toggleCollapseDept = (deptId: string) => {
+    setCollapsedDeptIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(deptId)) next.delete(deptId);
+      else next.add(deptId);
+      return next;
+    });
+  };
 
   const openCreate = () => {
     setDialog({ mode: 'create' });
@@ -5882,7 +6264,7 @@ function SystemDeptView() {
             type="text"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="搜索部门、负责人或编号…"
+            placeholder="搜索部门或负责人…"
             className="pl-10 pr-4 py-2 border border-slate-200 rounded-lg w-80 max-w-full focus:ring-2 focus:ring-indigo-500 outline-none"
           />
         </div>
@@ -5910,26 +6292,41 @@ function SystemDeptView() {
         ) : displayRows.length === 0 ? (
           <div className="py-16 text-center text-slate-500 text-sm">{q.trim() ? '无匹配部门' : '暂无部门数据'}</div>
         ) : (
+          <>
           <table className="w-full text-left text-sm">
             <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
               <tr>
                 <th className="px-6 py-4 font-medium">部门名称</th>
-                <th className="px-6 py-4 font-medium">类型</th>
-                <th className="px-6 py-4 font-medium">部门编号</th>
+                <th className="px-6 py-4 font-medium">部门类型</th>
                 <th className="px-6 py-4 font-medium">负责人</th>
                 <th className="px-6 py-4 font-medium">成员数量</th>
                 <th className="px-6 py-4 font-medium text-right">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {displayRows.map(({ dept, depth }) => (
+              {pagedRows.map(({ dept, depth }) => (
                 <tr key={dept.id} className="hover:bg-slate-50 transition-colors">
                   <td
                     className="px-6 py-4 font-medium text-slate-900"
                     style={{ paddingLeft: `${depth * 1.5 + 1.5}rem` }}
                   >
                     <div className="flex items-center gap-2">
-                      {depth > 0 ? <span className="text-slate-300 select-none">└</span> : null}
+                      {childCountByDeptId.get(dept.id) ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleCollapseDept(dept.id)}
+                          className="inline-flex items-center justify-center rounded border border-slate-200 bg-white p-0.5 text-slate-500 hover:text-slate-700 hover:bg-slate-50"
+                          title={collapsedDeptIds.has(dept.id) ? '展开子部门' : '折叠子部门'}
+                        >
+                          {collapsedDeptIds.has(dept.id) ? (
+                            <ChevronRight className="h-3.5 w-3.5" />
+                          ) : (
+                            <ChevronDown className="h-3.5 w-3.5" />
+                          )}
+                        </button>
+                      ) : (
+                        <span className="w-4" />
+                      )}
                       <Network className="w-4 h-4 text-indigo-400 shrink-0" />
                       <span>{dept.name}</span>
                       <span className="text-xs font-normal text-slate-400">L{dept.level}</span>
@@ -5952,7 +6349,6 @@ function SystemDeptView() {
                       <span className="text-slate-400">—</span>
                     )}
                   </td>
-                  <td className="px-6 py-4 font-mono text-xs text-slate-500">{dept.id}</td>
                   <td className="px-6 py-4 text-slate-600">{dept.manager}</td>
                   <td className="px-6 py-4 text-slate-600">{dept.count} 人</td>
                   <td className="px-6 py-4 text-right space-x-2 whitespace-nowrap">
@@ -5982,6 +6378,17 @@ function SystemDeptView() {
               ))}
             </tbody>
           </table>
+          <ListPaginationBar
+            page={deptListPage}
+            pageSize={deptPageSize}
+            total={displayRows.length}
+            onPageChange={setDeptListPage}
+            onPageSizeChange={(n) => {
+              setDeptPageSize(n);
+              setDeptListPage(1);
+            }}
+          />
+          </>
         )}
       </div>
 
@@ -6099,12 +6506,15 @@ function SystemUserView({
   authProfile: AdminLoginProfile | null;
 }) {
   const [users, setUsers] = useState<User[]>([]);
+  const [deptTree, setDeptTree] = useState<Dept[]>([]);
   const [deptNames, setDeptNames] = useState<string[]>([]);
   const [roleOptions, setRoleOptions] = useState<SysRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState('');
   const [deptFilter, setDeptFilter] = useState('');
+  const [userListPage, setUserListPage] = useState(1);
+  const [userPageSize, setUserPageSize] = useState(10);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [userDialog, setUserDialog] = useState<null | { mode: 'create' | 'edit'; user?: User }>(null);
   const [saving, setSaving] = useState(false);
@@ -6131,19 +6541,29 @@ function SystemUserView({
         adminFetchJson<Array<Record<string, unknown>>>('/api/roles')
       ]);
       const deptRows = Array.isArray(deptRowsRaw) ? deptRowsRaw.map(mapDeptRow) : [];
+      setDeptTree(deptRows);
       const ud = String(authProfile?.dept || '').trim();
       const udOk = Boolean(ud && ud !== '-');
       const showAll = currentRole === 'admin';
+      const subtreeForAccount = udOk && !showAll ? deliveryManagerDeptSubtree(deptRows, ud) : [];
       const scopedUsers = showAll
         ? userRows
         : udOk
-          ? userRows.filter((u) => deptNamesMatch(ud, String(u.dept || '')))
+          ? userRows.filter((u) => userDeptInSubtree(String(u.dept || ''), subtreeForAccount))
           : [];
       setUsers(scopedUsers);
       const names = [...new Set(deptRows.map((d) => String(d.name || '')).filter(Boolean))].sort((a, b) =>
         a.localeCompare(b, 'zh-CN')
       );
-      const formDeptNames = showAll ? names : udOk ? names.filter((n) => deptNamesMatch(ud, n)) : names;
+      const formDeptNames = showAll
+        ? names
+        : udOk
+          ? [
+              ...new Set(
+                subtreeForAccount.map((d) => String(d.name || '').trim()).filter(Boolean)
+              )
+            ].sort((a, b) => a.localeCompare(b, 'zh-CN'))
+          : names;
       setDeptNames(udOk && !showAll && formDeptNames.length === 0 && ud ? [ud] : formDeptNames);
       setRoleOptions(
         roleRows.map((r) => ({
@@ -6156,6 +6576,7 @@ function SystemUserView({
     } catch (e) {
       setError(e instanceof Error ? e.message : '加载失败');
       setUsers([]);
+      setDeptTree([]);
       setDeptNames([]);
       setRoleOptions([]);
     } finally {
@@ -6170,6 +6591,21 @@ function SystemUserView({
   useEffect(() => {
     if (!listAllUsers) setDeptFilter('');
   }, [listAllUsers]);
+
+  const adminDeptSubtree = useMemo(() => {
+    if (!listAllUsers || !deptFilter.trim()) return null;
+    return deliveryManagerDeptSubtree(deptTree, deptFilter);
+  }, [listAllUsers, deptFilter, deptTree]);
+
+  /** 非管理员可维护的用户部门范围：本人部门及其组织子树 */
+  const editableSubtreeForMe = useMemo(() => {
+    if (listAllUsers || !myDeptOk) return null;
+    return deliveryManagerDeptSubtree(deptTree, myDept);
+  }, [listAllUsers, myDeptOk, deptTree, myDept]);
+
+  useEffect(() => {
+    setUserListPage(1);
+  }, [q, deptFilter]);
 
   const userDialogRoleSelectOptions = useMemo(() => {
     const base = roleOptions.filter((r) => roleNameAllowedInUserDialogForCreator(currentRole, r.name));
@@ -6244,8 +6680,8 @@ function SystemUserView({
       }
       return;
     }
-    if (!listAllUsers && myDeptOk && !deptNamesMatch(myDept, dept)) {
-      setError('仅能维护与本人「所属部门」一致的用户');
+    if (!listAllUsers && myDeptOk && editableSubtreeForMe && !userDeptInSubtree(dept, editableSubtreeForMe)) {
+      setError('仅能维护本部门及下级组织内的用户');
       return;
     }
     if (!ufDept.trim()) {
@@ -6353,17 +6789,32 @@ function SystemUserView({
     }
   };
 
-  const filtered = users.filter((u) => {
-    if (deptFilter && String(u.dept || '') !== deptFilter) return false;
-    if (!q.trim()) return true;
-    const s = q.trim().toLowerCase();
-    return (
-      String(u.name || '').toLowerCase().includes(s) ||
-      String(u.username || '').toLowerCase().includes(s) ||
-      String(u.dept || '').toLowerCase().includes(s) ||
-      String(u.role || '').toLowerCase().includes(s)
-    );
-  });
+  const filtered = useMemo(() => {
+    return users.filter((u) => {
+      if (deptFilter && listAllUsers) {
+        const sub = adminDeptSubtree;
+        if (sub && sub.length && !userDeptInSubtree(String(u.dept || ''), sub)) return false;
+      }
+      if (!q.trim()) return true;
+      const s = q.trim().toLowerCase();
+      return (
+        String(u.name || '').toLowerCase().includes(s) ||
+        String(u.username || '').toLowerCase().includes(s) ||
+        String(u.dept || '').toLowerCase().includes(s) ||
+        String(u.role || '').toLowerCase().includes(s)
+      );
+    });
+  }, [users, deptFilter, listAllUsers, adminDeptSubtree, q]);
+
+  const pagedUsers = useMemo(() => {
+    const start = (userListPage - 1) * userPageSize;
+    return filtered.slice(start, start + userPageSize);
+  }, [filtered, userListPage, userPageSize]);
+
+  useEffect(() => {
+    const tp = Math.max(1, Math.ceil(filtered.length / userPageSize) || 1);
+    setUserListPage((p) => Math.min(Math.max(1, p), tp));
+  }, [filtered.length, userPageSize]);
 
   const initial = (name: string) => {
     const t = String(name || '').trim();
@@ -6393,18 +6844,19 @@ function SystemUserView({
             />
           </div>
           {listAllUsers ? (
-          <select
-            value={deptFilter}
-            onChange={(e) => setDeptFilter(e.target.value)}
-            className="w-full min-w-0 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 outline-none sm:w-auto sm:min-w-[10rem]"
-          >
-            <option value="">全部部门</option>
-            {deptNames.map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </select>
+            <select
+              value={deptFilter}
+              onChange={(e) => setDeptFilter(e.target.value)}
+              title="按组织树筛选：选中部门时包含该部门及全部下级部门内的人员"
+              className="w-full min-w-0 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 outline-none sm:w-auto sm:min-w-[10rem]"
+            >
+              <option value="">全部部门</option>
+              {deptNames.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
           ) : null}
         </div>
         <button
@@ -6436,90 +6888,102 @@ function SystemUserView({
               : listAllUsers
                 ? '暂无用户数据'
                 : myDeptOk
-                  ? '本部门暂无用户'
+                  ? '本部门及下级组织暂无用户'
                   : '暂无用户数据'}
           </div>
         ) : (
-          <div className="overflow-x-auto overscroll-x-contain">
-            <table className="w-full min-w-[36rem] text-left text-sm">
-              <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
-                <tr>
-                  <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">姓名</th>
-                  <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">手机号（登录）</th>
-                  <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">所属部门</th>
-                  <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">角色</th>
-                  <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">状态</th>
-                  <th className="px-3 py-3 text-right text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">操作</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {filtered.map((user) => {
-                  const busy = updatingId === user.id;
-                  const active = user.status === '正常';
-                  return (
-                    <tr key={user.id} className="transition-colors hover:bg-slate-50">
-                      <td className="px-3 py-3 font-bold text-slate-900 sm:px-6 sm:py-4">
-                        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-xs font-bold text-indigo-700">
-                            {initial(user.name)}
+          <>
+            <div className="overflow-x-auto overscroll-x-contain">
+              <table className="w-full min-w-[36rem] text-left text-sm">
+                <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                  <tr>
+                    <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">姓名</th>
+                    <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">手机号（登录）</th>
+                    <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">所属部门</th>
+                    <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">角色</th>
+                    <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">状态</th>
+                    <th className="px-3 py-3 text-right text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">操作</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {pagedUsers.map((user) => {
+                    const busy = updatingId === user.id;
+                    const active = user.status === '正常';
+                    return (
+                      <tr key={user.id} className="transition-colors hover:bg-slate-50">
+                        <td className="px-3 py-3 font-bold text-slate-900 sm:px-6 sm:py-4">
+                          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+                            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-xs font-bold text-indigo-700">
+                              {initial(user.name)}
+                            </div>
+                            <span className="min-w-0 truncate">{user.name}</span>
                           </div>
-                          <span className="min-w-0 truncate">{user.name}</span>
-                        </div>
-                      </td>
-                      <td className="max-w-[9rem] truncate px-3 py-3 font-mono text-xs text-slate-600 sm:max-w-none sm:px-6 sm:py-4">
-                        {user.username}
-                      </td>
-                      <td className="max-w-[8rem] truncate px-3 py-3 text-slate-600 sm:max-w-none sm:px-6 sm:py-4">{user.dept}</td>
-                      <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
-                        <span className="rounded-md border border-indigo-100 bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700">
-                          {user.role}
-                        </span>
-                      </td>
-                      <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
-                        {active ? (
-                          <span className="flex items-center gap-1.5 font-medium text-emerald-600">
-                            <span className="h-2 w-2 rounded-full bg-emerald-500" /> 正常
+                        </td>
+                        <td className="max-w-[9rem] truncate px-3 py-3 font-mono text-xs text-slate-600 sm:max-w-none sm:px-6 sm:py-4">
+                          {user.username}
+                        </td>
+                        <td className="max-w-[8rem] truncate px-3 py-3 text-slate-600 sm:max-w-none sm:px-6 sm:py-4">{user.dept}</td>
+                        <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                          <span className="rounded-md border border-indigo-100 bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700">
+                            {user.role}
                           </span>
-                        ) : (
-                          <span className="flex items-center gap-1.5 font-medium text-slate-500">
-                            <span className="h-2 w-2 rounded-full bg-slate-400" /> 停用
-                          </span>
-                        )}
-                      </td>
-                      <td className="space-x-2 whitespace-nowrap px-3 py-3 text-right sm:px-6 sm:py-4">
-                        <button
-                          type="button"
-                          onClick={() => openUserEdit(user)}
-                          className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
-                        >
-                          编辑
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => void toggleStatus(user)}
-                          className={
-                            active
-                              ? 'text-xs font-medium text-amber-700 hover:text-amber-900 disabled:opacity-50'
-                              : 'text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50'
-                          }
-                        >
-                          {busy ? '…' : active ? '停用' : '启用'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void deleteUser(user)}
-                          className="text-xs font-medium text-red-600 hover:text-red-800"
-                        >
-                          删除
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                          {active ? (
+                            <span className="flex items-center gap-1.5 font-medium text-emerald-600">
+                              <span className="h-2 w-2 rounded-full bg-emerald-500" /> 正常
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1.5 font-medium text-slate-500">
+                              <span className="h-2 w-2 rounded-full bg-slate-400" /> 停用
+                            </span>
+                          )}
+                        </td>
+                        <td className="space-x-2 whitespace-nowrap px-3 py-3 text-right sm:px-6 sm:py-4">
+                          <button
+                            type="button"
+                            onClick={() => openUserEdit(user)}
+                            className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
+                          >
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => void toggleStatus(user)}
+                            className={
+                              active
+                                ? 'text-xs font-medium text-amber-700 hover:text-amber-900 disabled:opacity-50'
+                                : 'text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50'
+                            }
+                          >
+                            {busy ? '…' : active ? '停用' : '启用'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void deleteUser(user)}
+                            className="text-xs font-medium text-red-600 hover:text-red-800"
+                          >
+                            删除
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <ListPaginationBar
+              page={userListPage}
+              pageSize={userPageSize}
+              total={filtered.length}
+              onPageChange={setUserListPage}
+              onPageSizeChange={(n) => {
+                setUserPageSize(n);
+                setUserListPage(1);
+              }}
+            />
+          </>
         )}
       </div>
 
@@ -7050,6 +7514,8 @@ function SystemMenuView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState('');
+  const [menuListPage, setMenuListPage] = useState(1);
+  const [menuPageSize, setMenuPageSize] = useState(10);
   const [dialog, setDialog] = useState<null | { mode: 'create' | 'edit' | 'child'; parent?: Menu; record?: Menu }>(
     null
   );
@@ -7082,6 +7548,19 @@ function SystemMenuView() {
     () => flattenMenuTreeForDisplay(filterMenusForSearchTree(menus, q)),
     [menus, q]
   );
+  const pagedMenuRows = useMemo(() => {
+    const start = (menuListPage - 1) * menuPageSize;
+    return menuDisplayRows.slice(start, start + menuPageSize);
+  }, [menuDisplayRows, menuListPage, menuPageSize]);
+
+  useEffect(() => {
+    setMenuListPage(1);
+  }, [q]);
+
+  useEffect(() => {
+    const tp = Math.max(1, Math.ceil(menuDisplayRows.length / menuPageSize) || 1);
+    setMenuListPage((p) => Math.min(Math.max(1, p), tp));
+  }, [menuDisplayRows.length, menuPageSize]);
 
   const getIcon = (name: string) => {
     switch (name) {
@@ -7246,66 +7725,78 @@ function SystemMenuView() {
         ) : menuDisplayRows.length === 0 ? (
           <div className="py-16 text-center text-slate-500 text-sm">{q.trim() ? '无匹配菜单' : '暂无菜单数据'}</div>
         ) : (
-          <table className="w-full text-left text-sm">
-            <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
-              <tr>
-                <th className="px-6 py-4 font-medium">菜单名称</th>
-                <th className="px-6 py-4 font-medium">图标</th>
-                <th className="px-6 py-4 font-medium">类型</th>
-                <th className="px-6 py-4 font-medium">路由路径</th>
-                <th className="px-6 py-4 font-medium text-right">操作</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {menuDisplayRows.map(({ menu, depth }) => (
-                <tr key={menu.id} className="hover:bg-slate-50 transition-colors">
-                  <td
-                    className="px-6 py-4 font-medium text-slate-900"
-                    style={{ paddingLeft: `${depth * 2 + 1.5}rem` }}
-                  >
-                    <div className="flex items-center gap-2">
-                      {depth > 0 ? <span className="w-4 h-px bg-slate-300 inline-block mr-1"></span> : null}
-                      {menu.name}
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 text-slate-500">{getIcon(menu.icon)}</td>
-                  <td className="px-6 py-4">
-                    <span
-                      className={`px-2 py-1 rounded text-xs font-medium ${
-                        menu.type === '目录' ? 'bg-slate-100 text-slate-700' : 'bg-blue-50 text-blue-700'
-                      }`}
-                    >
-                      {menu.type}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 font-mono text-slate-500 text-xs">{menu.path}</td>
-                  <td className="px-6 py-4 text-right space-x-2 whitespace-nowrap">
-                    <button
-                      type="button"
-                      onClick={() => openChild(menu)}
-                      className="text-indigo-600 hover:text-indigo-800 font-medium text-xs"
-                    >
-                      下级
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => openEdit(menu)}
-                      className="text-indigo-600 hover:text-indigo-800 font-medium text-xs"
-                    >
-                      编辑
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void deleteMenu(menu)}
-                      className="text-red-600 hover:text-red-800 font-medium text-xs"
-                    >
-                      删除
-                    </button>
-                  </td>
+          <>
+            <table className="w-full text-left text-sm">
+              <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                <tr>
+                  <th className="px-6 py-4 font-medium">菜单名称</th>
+                  <th className="px-6 py-4 font-medium">图标</th>
+                  <th className="px-6 py-4 font-medium">类型</th>
+                  <th className="px-6 py-4 font-medium">路由路径</th>
+                  <th className="px-6 py-4 font-medium text-right">操作</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {pagedMenuRows.map(({ menu, depth }) => (
+                  <tr key={menu.id} className="hover:bg-slate-50 transition-colors">
+                    <td
+                      className="px-6 py-4 font-medium text-slate-900"
+                      style={{ paddingLeft: `${depth * 2 + 1.5}rem` }}
+                    >
+                      <div className="flex items-center gap-2">
+                        {depth > 0 ? <span className="w-4 h-px bg-slate-300 inline-block mr-1"></span> : null}
+                        {menu.name}
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 text-slate-500">{getIcon(menu.icon)}</td>
+                    <td className="px-6 py-4">
+                      <span
+                        className={`px-2 py-1 rounded text-xs font-medium ${
+                          menu.type === '目录' ? 'bg-slate-100 text-slate-700' : 'bg-blue-50 text-blue-700'
+                        }`}
+                      >
+                        {menu.type}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 font-mono text-slate-500 text-xs">{menu.path}</td>
+                    <td className="px-6 py-4 text-right space-x-2 whitespace-nowrap">
+                      <button
+                        type="button"
+                        onClick={() => openChild(menu)}
+                        className="text-indigo-600 hover:text-indigo-800 font-medium text-xs"
+                      >
+                        下级
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openEdit(menu)}
+                        className="text-indigo-600 hover:text-indigo-800 font-medium text-xs"
+                      >
+                        编辑
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void deleteMenu(menu)}
+                        className="text-red-600 hover:text-red-800 font-medium text-xs"
+                      >
+                        删除
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <ListPaginationBar
+              page={menuListPage}
+              pageSize={menuPageSize}
+              total={menuDisplayRows.length}
+              onPageChange={setMenuListPage}
+              onPageSizeChange={(n) => {
+                setMenuPageSize(n);
+                setMenuListPage(1);
+              }}
+            />
+          </>
         )}
       </div>
 

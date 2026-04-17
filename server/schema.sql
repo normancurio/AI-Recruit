@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS resume_screenings (
   status VARCHAR(64) NOT NULL DEFAULT 'AI分析完成',
   pipeline_stage VARCHAR(32) NOT NULL DEFAULT 'resume_done',
   report_summary TEXT NULL,
+  evaluation_json JSON NULL COMMENT '结构化简历评估结果',
   resume_plaintext MEDIUMTEXT NULL,
   file_name VARCHAR(255) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -215,6 +216,7 @@ CREATE TABLE IF NOT EXISTS interview_reports (
   session_id VARCHAR(128) NOT NULL,
   job_code VARCHAR(32) NOT NULL,
   candidate_name VARCHAR(128) NOT NULL DEFAULT '',
+  candidate_phone VARCHAR(32) NULL,
   candidate_openid VARCHAR(128) NULL,
   overall_score TINYINT UNSIGNED NOT NULL DEFAULT 0,
   passed TINYINT(1) NOT NULL DEFAULT 0,
@@ -229,6 +231,7 @@ CREATE TABLE IF NOT EXISTS interview_reports (
   PRIMARY KEY (id),
   UNIQUE KEY uk_report_session (session_id),
   KEY idx_report_job_candidate (job_code, candidate_name),
+  KEY idx_report_job_phone (job_code, candidate_phone),
   KEY idx_report_updated (updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

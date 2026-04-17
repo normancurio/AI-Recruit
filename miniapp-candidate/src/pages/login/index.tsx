@@ -34,6 +34,11 @@ export default function LoginPage() {
 
   const handleNext = async () => {
     const code = inviteCode.trim().toUpperCase()
+    const trimmedName = name.trim()
+    if (trimmedName.length < 2) {
+      Taro.showToast({ title: '请输入真实姓名（至少2个字）', icon: 'none' })
+      return
+    }
     // 后台结构化邀请码为「岗位码-发起人账号-筛查记录 id」（见 server buildStructuredInviteCode），
     // 另支持仅岗位码、历史 INV 前缀等；具体有效性由 /api/candidate/login-invite 校验。
     if (code.length < 4 || code.length > 128) {
@@ -44,9 +49,9 @@ export default function LoginPage() {
       Taro.showToast({ title: '邀请码仅字母数字及 -_.@', icon: 'none' })
       return
     }
-    const phoneTrimmed = phone.trim()
+    const phoneTrimmed = phone.replace(/\D/g, '').trim()
     if (!/^1[3-9]\d{9}$/.test(phoneTrimmed)) {
-      Taro.showToast({ title: '请输入 11 位手机号', icon: 'none' })
+      Taro.showToast({ title: '请输入本人11位手机号（用于匹配面试报告）', icon: 'none' })
       return
     }
     try {
@@ -59,7 +64,7 @@ export default function LoginPage() {
       const data = await loginWithInviteCode({
         code: loginRes.code,
         inviteCode: code,
-        name: name.trim(),
+        name: trimmedName,
         phone: phoneTrimmed
       })
       Taro.setStorageSync('wx_openid', data.openid)
@@ -99,7 +104,7 @@ export default function LoginPage() {
     <View className='safe-container login-page'>
       <View className='header'>
         <Text className='title'>欢迎参加面试</Text>
-        <Text className='subtitle'>真实姓名 · 手机 · 邀请码</Text>
+        <Text className='subtitle'>请填写与投递简历一致的姓名和手机号</Text>
       </View>
 
       <View className='card form-card'>
@@ -110,9 +115,10 @@ export default function LoginPage() {
           <Input
             className='input'
             value={name}
-            placeholder='与证件一致'
+            placeholder='请输入真实姓名'
             onInput={(e) => setName(e.detail.value)}
           />
+          <Text className='field-tip'>姓名错误会影响后台定位，请务必与简历保持一致</Text>
         </View>
 
         <View className='field'>
@@ -124,10 +130,10 @@ export default function LoginPage() {
             value={phone}
             type='number'
             maxlength={11}
-            placeholder='11 位大陆手机号'
-            onInput={(e) => setPhone(e.detail.value)}
+            placeholder='请输入手机号'
+            onInput={(e) => setPhone(String(e.detail.value || '').replace(/\D/g, '').slice(0, 11))}
           />
-          <Text className='field-tip'>用于核验身份</Text>
+          <Text className='field-tip'>用于唯一匹配面试报告，建议与简历手机号一致</Text>
         </View>
 
         <View className='field'>

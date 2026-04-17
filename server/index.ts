@@ -518,6 +518,7 @@ type InterviewReportPayload = {
   sessionId: string
   jobCode: string
   candidateName: string
+  candidatePhone?: string
   candidateOpenId?: string
   score: number
   passed: boolean
@@ -538,11 +539,24 @@ function ensureInterviewReportSessionId(jobId: string, sessionId: string): strin
   return `SUBMIT-${jc}-${rand}`.slice(0, 128)
 }
 
-async function markResumeScreeningPipelineReportDone(jobCode: string, candidateName: string) {
+async function markResumeScreeningPipelineReportDone(
+  jobCode: string,
+  candidateName: string,
+  candidatePhone?: string
+) {
   const jc = String(jobCode || '').trim()
   const cn = String(candidateName || '').trim()
-  if (!jc || !cn) return
+  const cp = normalizeCnMobile(String(candidatePhone || '').trim())
+  if (!jc || (!cn && !cp)) return
   try {
+    if (cp) {
+      await mysqlPool.query(
+        `UPDATE resume_screenings SET pipeline_stage = 'report_done'
+         WHERE UPPER(TRIM(job_code)) = UPPER(?) AND TRIM(candidate_phone) = TRIM(?)`,
+        [jc, cp]
+      )
+      return
+    }
     await mysqlPool.query(
       `UPDATE resume_screenings SET pipeline_stage = 'report_done'
        WHERE UPPER(TRIM(job_code)) = UPPER(?) AND TRIM(candidate_name) = TRIM(?)`,
@@ -564,41 +578,88 @@ async function markResumeScreeningPipelineReportDone(jobCode: string, candidateN
 
 async function upsertInterviewReport(payload: InterviewReportPayload) {
   if (!payload.sessionId || !payload.jobCode || !payload.candidateName) return
-  await mysqlPool.query(
-    `INSERT INTO interview_reports (
-       session_id, job_code, candidate_name, candidate_openid,
-       overall_score, passed, overall_feedback,
-       dimension_scores, suggestions, risk_points, behavior_signals, qa_json
-     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-     ON DUPLICATE KEY UPDATE
-       job_code=VALUES(job_code),
-       candidate_name=VALUES(candidate_name),
-       candidate_openid=VALUES(candidate_openid),
-       overall_score=VALUES(overall_score),
-       passed=VALUES(passed),
-       overall_feedback=VALUES(overall_feedback),
-       dimension_scores=VALUES(dimension_scores),
-       suggestions=VALUES(suggestions),
-       risk_points=VALUES(risk_points),
-       behavior_signals=VALUES(behavior_signals),
-       qa_json=VALUES(qa_json),
-       updated_at=NOW()`,
-    [
-      payload.sessionId,
-      payload.jobCode,
-      payload.candidateName,
-      payload.candidateOpenId || null,
-      payload.score,
-      payload.passed ? 1 : 0,
-      payload.overallFeedback,
-      JSON.stringify(payload.dimensionScores || {}),
-      JSON.stringify(payload.suggestions || []),
-      JSON.stringify(payload.riskPoints || []),
-      JSON.stringify(payload.behaviorSignals || {}),
-      JSON.stringify(payload.qa || [])
-    ]
-  )
-  await markResumeScreeningPipelineReportDone(payload.jobCode, payload.candidateName)
+  const normalizedPhone = normalizeCnMobile(String(payload.candidatePhone || '').trim())
+  try {
+    await mysqlPool.query(
+      `INSERT INTO interview_reports (
+         session_id, job_code, candidate_name, candidate_phone, candidate_openid,
+         overall_score, passed, overall_feedback,
+         dimension_scores, suggestions, risk_points, behavior_signals, qa_json
+       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE
+         job_code=VALUES(job_code),
+         candidate_name=VALUES(candidate_name),
+         candidate_phone=VALUES(candidate_phone),
+         candidate_openid=VALUES(candidate_openid),
+         overall_score=VALUES(overall_score),
+         passed=VALUES(passed),
+         overall_feedback=VALUES(overall_feedback),
+         dimension_scores=VALUES(dimension_scores),
+         suggestions=VALUES(suggestions),
+         risk_points=VALUES(risk_points),
+         behavior_signals=VALUES(behavior_signals),
+         qa_json=VALUES(qa_json),
+         updated_at=NOW()`,
+      [
+        payload.sessionId,
+        payload.jobCode,
+        payload.candidateName,
+        normalizedPhone || null,
+        payload.candidateOpenId || null,
+        payload.score,
+        payload.passed ? 1 : 0,
+        payload.overallFeedback,
+        JSON.stringify(payload.dimensionScores || {}),
+        JSON.stringify(payload.suggestions || []),
+        JSON.stringify(payload.riskPoints || []),
+        JSON.stringify(payload.behaviorSignals || {}),
+        JSON.stringify(payload.qa || [])
+      ]
+    )
+  } catch (e: unknown) {
+    const err = e as { errno?: number; code?: string; sqlMessage?: string }
+    const missingPhoneColumn =
+      err.errno === 1054 ||
+      err.code === 'ER_BAD_FIELD_ERROR' ||
+      (String(err.sqlMessage || '').includes('Unknown column') &&
+        String(err.sqlMessage || '').includes('candidate_phone'))
+    if (!missingPhoneColumn) throw e
+    await mysqlPool.query(
+      `INSERT INTO interview_reports (
+         session_id, job_code, candidate_name, candidate_openid,
+         overall_score, passed, overall_feedback,
+         dimension_scores, suggestions, risk_points, behavior_signals, qa_json
+       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE
+         job_code=VALUES(job_code),
+         candidate_name=VALUES(candidate_name),
+         candidate_openid=VALUES(candidate_openid),
+         overall_score=VALUES(overall_score),
+         passed=VALUES(passed),
+         overall_feedback=VALUES(overall_feedback),
+         dimension_scores=VALUES(dimension_scores),
+         suggestions=VALUES(suggestions),
+         risk_points=VALUES(risk_points),
+         behavior_signals=VALUES(behavior_signals),
+         qa_json=VALUES(qa_json),
+         updated_at=NOW()`,
+      [
+        payload.sessionId,
+        payload.jobCode,
+        payload.candidateName,
+        payload.candidateOpenId || null,
+        payload.score,
+        payload.passed ? 1 : 0,
+        payload.overallFeedback,
+        JSON.stringify(payload.dimensionScores || {}),
+        JSON.stringify(payload.suggestions || []),
+        JSON.stringify(payload.riskPoints || []),
+        JSON.stringify(payload.behaviorSignals || {}),
+        JSON.stringify(payload.qa || [])
+      ]
+    )
+  }
+  await markResumeScreeningPipelineReportDone(payload.jobCode, payload.candidateName, normalizedPhone || undefined)
 }
 
 type ResumeScreeningAiResult = {
@@ -612,6 +673,8 @@ type ResumeScreeningAiResult = {
   experienceScore: number
   educationScore: number
   stabilityScore: number
+  /** 结构化评估结果 JSON（字符串） */
+  evaluationJson?: string
 }
 
 function clampResumeScore(n: number): number {
@@ -699,6 +762,138 @@ function parseResumeScreeningAiJson(raw: string): ResumeScreeningAiResult | null
       experienceScore,
       educationScore,
       stabilityScore
+    }
+  } catch {
+    return null
+  }
+}
+
+function buildResumeEvalPromptForServer(params: {
+  jobTitle: string
+  department: string
+  jdText: string
+  resumeText: string
+}): { userPrompt: string; systemPrompt: string } {
+  const clipResume = params.resumeText.replace(/\s+/g, ' ').slice(0, 14000)
+  const clipJd = (params.jdText || '').replace(/\s+/g, ' ').slice(0, 8000)
+  const isRisk = /风控|反欺诈|信用|催收|合规|授信|风险/.test(
+    `${params.jobTitle} ${params.department} ${params.jdText}`
+  )
+  const userPrompt = [
+    `岗位名称：${params.jobTitle}`,
+    `部门：${params.department || '—'}`,
+    `JD：${clipJd || '（无正文）'}`,
+    `简历全文（节选）：${clipResume}`
+  ].join('\n')
+  const riskDimKeys = 'risk_fit,depth,impact,data_skill,stability_growth,communication_business'
+  const engDimKeys = 'tech_fit,engineering_depth,impact,code_quality,stability_growth,communication_business'
+  const dimKeys = isRisk ? riskDimKeys : engDimKeys
+  const systemPrompt =
+    (isRisk
+      ? '你是资深招聘评估专家。根据岗位JD与简历文本进行风控运营岗位评估。'
+      : '你是资深招聘评估专家。根据岗位JD与简历文本进行研发岗位评估。') +
+    '只输出 JSON 对象，不要 markdown，不要多余文本。' +
+    '必须输出字段：schema_version,job_type,hard_gate,dimension_scores,total_score,strengths,risks,decision,summary。' +
+    `dimension_scores 必须包含：${dimKeys}。` +
+    '关键：dimension_scores 的每个维度都必须是对象，格式为 {"score":0-100数字,"evidence":["证据点：...｜摘录：..."]}，evidence 至少 1 条。' +
+    '不要把维度写成纯数字。' +
+    'risks 必须是对象数组，格式为 {"risk":"...","interview_question":"..."}。' +
+    'decision 仅允许：建议进入面试 / 建议备选 / 不建议推进。'
+  return { userPrompt, systemPrompt }
+}
+
+function normalizeResumeEvalDimension(
+  value: unknown,
+  dimName: string
+): { score: number; evidence: string[] } {
+  if (typeof value === 'number') {
+    return {
+      score: clampResumeScore(value),
+      evidence: [`模型未返回该维度证据，请结合简历原文与JD人工复核（${dimName}）`]
+    }
+  }
+  const o = (value || {}) as { score?: unknown; evidence?: unknown }
+  const score = clampResumeScore(o.score)
+  const evidence = Array.isArray(o.evidence)
+    ? o.evidence.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 3)
+    : []
+  return {
+    score,
+    evidence:
+      evidence.length > 0 ? evidence : [`模型未返回该维度证据，请结合简历原文与JD人工复核（${dimName}）`]
+  }
+}
+
+function parseResumeEvalToScreeningResult(raw: string): ResumeScreeningAiResult | null {
+  try {
+    const cleaned = String(raw || '')
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```\s*$/i, '')
+    const parsed = JSON.parse(cleaned) as Record<string, unknown>
+    const totalScore = clampResumeScore(parsed.total_score)
+    if (!Number.isFinite(totalScore)) return null
+    const rawDim = (parsed.dimension_scores || {}) as Record<string, unknown>
+    const dim: Record<string, { score: number; evidence: string[] }> = {}
+    for (const [k, v] of Object.entries(rawDim)) {
+      dim[String(k)] = normalizeResumeEvalDimension(v, String(k))
+    }
+    const fallback = deriveResumeDimensionScores(totalScore)
+    const skillScore = clampResumeScore(
+      firstFiniteNumber(dim.data_skill?.score, dim.code_quality?.score) ?? fallback.skillScore
+    )
+    const experienceScore = clampResumeScore(
+      firstFiniteNumber(dim.depth?.score, dim.engineering_depth?.score) ?? fallback.experienceScore
+    )
+    const educationScore = clampResumeScore(
+      firstFiniteNumber(dim.communication_business?.score) ?? fallback.educationScore
+    )
+    const stabilityScore = clampResumeScore(
+      firstFiniteNumber(dim.stability_growth?.score) ?? fallback.stabilityScore
+    )
+    const summary = String(parsed.summary || '').trim()
+    const decision = String(parsed.decision || '建议备选').trim()
+    const strengths = Array.isArray(parsed.strengths)
+      ? parsed.strengths.map((x) => String(x || '').trim()).filter(Boolean)
+      : []
+    const risks = Array.isArray(parsed.risks)
+      ? parsed.risks
+          .map((r) => {
+            if (typeof r === 'string') {
+              const s = String(r || '').trim()
+              return s ? { risk: s, interview_question: '' } : null
+            }
+            const o = (r || {}) as { risk?: unknown; interview_question?: unknown }
+            const risk = String(o.risk || '').trim()
+            const interviewQuestion = String(o.interview_question || '').trim()
+            if (!risk && !interviewQuestion) return null
+            return { risk, interview_question: interviewQuestion }
+          })
+          .filter(Boolean) as Array<{ risk: string; interview_question: string }>
+      : []
+    const mergedSummary = [
+      summary || '暂无总结',
+      strengths.length ? `优势：${strengths.slice(0, 3).join('；')}` : '',
+      risks.length ? `风险：${risks.slice(0, 3).map((x) => x.risk).join('；')}` : '',
+      `结论：${decision || '建议备选'}`
+    ]
+      .filter(Boolean)
+      .join(' | ')
+    const normalizedEval = {
+      ...parsed,
+      dimension_scores: dim,
+      risks
+    }
+    return {
+      candidateName: '',
+      matchScore: totalScore,
+      status: 'AI分析完成',
+      summary: mergedSummary,
+      skillScore,
+      experienceScore,
+      educationScore,
+      stabilityScore,
+      evaluationJson: JSON.stringify(normalizedEval)
     }
   } catch {
     return null
@@ -809,28 +1004,22 @@ async function runResumeScreeningWithAi(params: {
     process.env.QWEN_RESUME_MODEL?.trim() ||
     process.env.QWEN_QUESTION_MODEL?.trim() ||
     'qwen-turbo'
-  const clipResume = params.resumeText.replace(/\s+/g, ' ').slice(0, 14000)
-  const clipJd = (params.jdText || '').replace(/\s+/g, ' ').slice(0, 8000)
-  const userPrompt = [
-    `岗位名称：${params.jobTitle}`,
-    `部门：${params.department || '—'}`,
-    `JD：${clipJd || '（无正文）'}`,
-    `简历全文（节选）：${clipResume}`
-  ].join('\n')
+  const { userPrompt, systemPrompt } = buildResumeEvalPromptForServer(params)
   const data = await dashScopeChatCompletions({
     model,
-    temperature: 0.3,
+    temperature: 0.2,
     messages: [
       {
         role: 'system',
-        content:
-          '你是资深招聘顾问。根据「岗位 JD」与「简历文本」评估匹配度。只输出一个 JSON 对象，不要 markdown 代码块，不要其它文字。字段：candidateName（从简历推断的中文姓名或合理称呼）、candidatePhone（可选，若简历中出现中国大陆 11 位手机号则填纯数字如 13812345678，没有则省略该字段）、matchScore（0～100 整数，综合匹配分）、skillScore、experienceScore、educationScore、stabilityScore（均为 0～100 整数，分别表示技能匹配、岗位经验、学历与资质、职业稳定性）、status（如 AI分析完成 / 不匹配 等简短状态）、summary（3～6 句中文，说明匹配点、风险与是否建议推进）。示例：{"candidateName":"张三","candidatePhone":"13812345678","matchScore":82,"skillScore":85,"experienceScore":78,"educationScore":88,"stabilityScore":72,"status":"AI分析完成","summary":"…"}'
+        content: systemPrompt
       },
       { role: 'user', content: userPrompt }
     ]
   })
   const raw = data?.choices?.[0]?.message?.content
   const text = typeof raw === 'string' ? raw : ''
+  const next = parseResumeEvalToScreeningResult(text)
+  if (next) return next
   return parseResumeScreeningAiJson(text)
 }
 
@@ -2238,7 +2427,7 @@ function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: bo
   // 标量子查询取最新报告；CONVERT+COLLATE 避免表间 utf8mb4_unicode_ci / utf8mb4_0900_ai_ci 混用报错
   const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
-              s.status, ${ps}s.report_summary, s.file_name, s.uploader_username, s.created_at,
+              s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username, s.created_at,
               lr.overall_score AS interview_overall_score,
               lr.passed AS interview_passed,
               lr.updated_at AS interview_report_updated_at,
@@ -2251,8 +2440,17 @@ function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: bo
          FROM interview_reports ir
          WHERE CONVERT(TRIM(ir.job_code) USING utf8mb4) COLLATE utf8mb4_unicode_ci =
                CONVERT(TRIM(s.job_code) USING utf8mb4) COLLATE utf8mb4_unicode_ci
-           AND CONVERT(TRIM(ir.candidate_name) USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+           AND (
+             (
+               TRIM(COALESCE(ir.candidate_phone, '')) <> ''
+               AND TRIM(COALESCE(s.candidate_phone, '')) <> ''
+               AND TRIM(ir.candidate_phone) = TRIM(s.candidate_phone)
+             )
+             OR (
+               CONVERT(TRIM(ir.candidate_name) USING utf8mb4) COLLATE utf8mb4_unicode_ci =
                CONVERT(TRIM(s.candidate_name) USING utf8mb4) COLLATE utf8mb4_unicode_ci
+             )
+           )
          ORDER BY ir.updated_at DESC, ir.id DESC
          LIMIT 1
        )
@@ -2267,7 +2465,7 @@ function resumeScreeningsPlainSql(withPipelineStage: boolean, projectId: string 
   const { fragment: jobJoin, params: jobParams } = resumeScreeningsJobFilterJoinSql(projectId)
   const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
-              s.status, ${ps}s.report_summary, s.file_name, s.uploader_username, s.created_at
+              s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username, s.created_at
        FROM resume_screenings s
        ${jobJoin}
        ORDER BY s.id DESC
@@ -2598,19 +2796,32 @@ app.get('/api/admin/interview-report', async (req, res) => {
   }
   try {
     const [screenRows] = await mysqlPool.query<any[]>(
-      'SELECT job_code, candidate_name FROM resume_screenings WHERE id=? LIMIT 1',
+      'SELECT job_code, candidate_name, candidate_phone FROM resume_screenings WHERE id=? LIMIT 1',
       [screeningId]
     )
     if (!screenRows.length) return res.status(404).json({ message: '筛查记录不存在' })
-    const screen = screenRows[0] as { job_code: string; candidate_name: string }
+    const screen = screenRows[0] as { job_code: string; candidate_name: string; candidate_phone?: string | null }
+    const normalizedPhone = normalizeCnMobile(String(screen.candidate_phone || '').trim())
     const [repRows] = await mysqlPool.query<any[]>(
-      `SELECT session_id, job_code, candidate_name, overall_score, passed, overall_feedback,
+      `SELECT session_id, job_code, candidate_name, candidate_phone, overall_score, passed, overall_feedback,
               dimension_scores, suggestions, risk_points, behavior_signals, qa_json, updated_at
        FROM interview_reports
-       WHERE job_code=? AND candidate_name=?
-       ORDER BY updated_at DESC
+       WHERE UPPER(TRIM(job_code)) = UPPER(?)
+         AND (
+           (TRIM(COALESCE(candidate_phone, '')) <> '' AND TRIM(candidate_phone) = TRIM(?))
+           OR (
+             CONVERT(TRIM(candidate_name) USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+             CONVERT(TRIM(?) USING utf8mb4) COLLATE utf8mb4_unicode_ci
+           )
+         )
+       ORDER BY
+         CASE
+           WHEN TRIM(COALESCE(candidate_phone, '')) <> '' AND TRIM(candidate_phone) = TRIM(?) THEN 0
+           ELSE 1
+         END,
+         updated_at DESC
        LIMIT 1`,
-      [String(screen.job_code || '').trim().toUpperCase(), String(screen.candidate_name || '').trim()]
+      [String(screen.job_code || '').trim().toUpperCase(), normalizedPhone, String(screen.candidate_name || '').trim(), normalizedPhone]
     )
     if (!repRows.length) return res.status(404).json({ message: '暂无面试报告（候选人可能尚未完成答题）' })
     const row = repRows[0] as Record<string, unknown>
@@ -2697,68 +2908,127 @@ app.post(
       }
 
       const plainStore = plain.slice(0, RESUME_PLAINTEXT_MAX_SAVE)
-      const candidateName = result.candidateName
+      const candidateName = String(result.candidateName || '').trim() || guessCandidateNameFromResume(plain)
       const phoneFromResult = normalizeCnMobile(String(result.candidatePhone || ''))
       const phoneFromText = extractPhoneFromResumeText(plain)
       const candidatePhone: string | null = phoneFromResult || phoneFromText || null
-      const insertRow = async (withPhone: boolean): Promise<ResultSetHeader> => {
+      const insertRow = async (withPhone: boolean, withEvaluationJson: boolean): Promise<ResultSetHeader> => {
+        const evalJson = String(result.evaluationJson || '').trim() || null
         if (withPhone) {
-          const [h] = await mysqlPool.query<ResultSetHeader>(
-            `INSERT INTO resume_screenings (
-               job_code, candidate_name, candidate_phone, matched_job_title, match_score,
-               skill_score, experience_score, education_score, stability_score,
-               status, report_summary, resume_plaintext, file_name, uploader_username
-             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-            [
-              jobCode,
-              candidateName,
-              candidatePhone,
-              String(job.title || ''),
-              result.matchScore,
-              result.skillScore,
-              result.experienceScore,
-              result.educationScore,
-              result.stabilityScore,
-              result.status,
-              result.summary,
-              plainStore,
-              String(req.file.originalname || '').slice(0, 255),
-              uploaderUsername
-            ]
-          )
+          const [h] = withEvaluationJson
+            ? await mysqlPool.query<ResultSetHeader>(
+                `INSERT INTO resume_screenings (
+                   job_code, candidate_name, candidate_phone, matched_job_title, match_score,
+                   skill_score, experience_score, education_score, stability_score,
+                   status, report_summary, evaluation_json, resume_plaintext, file_name, uploader_username
+                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+                [
+                  jobCode,
+                  candidateName,
+                  candidatePhone,
+                  String(job.title || ''),
+                  result.matchScore,
+                  result.skillScore,
+                  result.experienceScore,
+                  result.educationScore,
+                  result.stabilityScore,
+                  result.status,
+                  result.summary,
+                  evalJson,
+                  plainStore,
+                  String(req.file.originalname || '').slice(0, 255),
+                  uploaderUsername
+                ]
+              )
+            : await mysqlPool.query<ResultSetHeader>(
+                `INSERT INTO resume_screenings (
+                   job_code, candidate_name, candidate_phone, matched_job_title, match_score,
+                   skill_score, experience_score, education_score, stability_score,
+                   status, report_summary, resume_plaintext, file_name, uploader_username
+                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+                [
+                  jobCode,
+                  candidateName,
+                  candidatePhone,
+                  String(job.title || ''),
+                  result.matchScore,
+                  result.skillScore,
+                  result.experienceScore,
+                  result.educationScore,
+                  result.stabilityScore,
+                  result.status,
+                  result.summary,
+                  plainStore,
+                  String(req.file.originalname || '').slice(0, 255),
+                  uploaderUsername
+                ]
+              )
           return h
         }
-        const [h] = await mysqlPool.query<ResultSetHeader>(
-          `INSERT INTO resume_screenings (
-             job_code, candidate_name, matched_job_title, match_score,
-             skill_score, experience_score, education_score, stability_score,
-             status, report_summary, resume_plaintext, file_name, uploader_username
-           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [
-            jobCode,
-            candidateName,
-            String(job.title || ''),
-            result.matchScore,
-            result.skillScore,
-            result.experienceScore,
-            result.educationScore,
-            result.stabilityScore,
-            result.status,
-            result.summary,
-            plainStore,
-            String(req.file.originalname || '').slice(0, 255),
-            uploaderUsername
-          ]
-        )
+        const [h] = withEvaluationJson
+          ? await mysqlPool.query<ResultSetHeader>(
+              `INSERT INTO resume_screenings (
+                 job_code, candidate_name, matched_job_title, match_score,
+                 skill_score, experience_score, education_score, stability_score,
+                 status, report_summary, evaluation_json, resume_plaintext, file_name, uploader_username
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+              [
+                jobCode,
+                candidateName,
+                String(job.title || ''),
+                result.matchScore,
+                result.skillScore,
+                result.experienceScore,
+                result.educationScore,
+                result.stabilityScore,
+                result.status,
+                result.summary,
+                evalJson,
+                plainStore,
+                String(req.file.originalname || '').slice(0, 255),
+                uploaderUsername
+              ]
+            )
+          : await mysqlPool.query<ResultSetHeader>(
+              `INSERT INTO resume_screenings (
+                 job_code, candidate_name, matched_job_title, match_score,
+                 skill_score, experience_score, education_score, stability_score,
+                 status, report_summary, resume_plaintext, file_name, uploader_username
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+              [
+                jobCode,
+                candidateName,
+                String(job.title || ''),
+                result.matchScore,
+                result.skillScore,
+                result.experienceScore,
+                result.educationScore,
+                result.stabilityScore,
+                result.status,
+                result.summary,
+                plainStore,
+                String(req.file.originalname || '').slice(0, 255),
+                uploaderUsername
+              ]
+            )
         return h
       }
       let ins: ResultSetHeader
       try {
-        ins = await insertRow(true)
+        ins = await insertRow(true, true)
       } catch (insErr: unknown) {
         const ie = insErr as { errno?: number; code?: string }
         if (ie.errno === 1054 || ie.code === 'ER_BAD_FIELD_ERROR') {
-          ins = await insertRow(false)
+          try {
+            ins = await insertRow(true, false)
+          } catch (insErr2: unknown) {
+            const ie2 = insErr2 as { errno?: number; code?: string }
+            if (ie2.errno === 1054 || ie2.code === 'ER_BAD_FIELD_ERROR') {
+              ins = await insertRow(false, false)
+            } else {
+              throw insErr2
+            }
+          }
         } else {
           throw insErr
         }
@@ -3975,6 +4245,7 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
       sessionId: reportSessionId,
       jobCode: jobId,
       candidateName: String(profile.name || '候选人'),
+      candidatePhone: String(profile.phone || ''),
       candidateOpenId: String(profile.openid || ''),
       score: fallback.score,
       passed: fallback.passed,
@@ -4094,6 +4365,7 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
         sessionId: reportSessionId,
         jobCode: jobId,
         candidateName: String(profile.name || '候选人'),
+        candidatePhone: String(profile.phone || ''),
         candidateOpenId: String(profile.openid || ''),
         score: out.score,
         passed: out.passed,
@@ -4121,6 +4393,7 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
       sessionId: reportSessionId,
       jobCode: jobId,
       candidateName: String(profile.name || '候选人'),
+      candidatePhone: String(profile.phone || ''),
       candidateOpenId: String(profile.openid || ''),
       score: parsed.score,
       passed: parsed.passed,
@@ -4140,6 +4413,7 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
         sessionId: reportSessionId,
         jobCode: jobId,
         candidateName: String(profile.name || '候选人'),
+        candidatePhone: String(profile.phone || ''),
         candidateOpenId: String(profile.openid || ''),
         score: fallback.score,
         passed: fallback.passed,
