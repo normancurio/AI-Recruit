@@ -9,6 +9,13 @@ import multer from 'multer'
 import Redis from 'ioredis'
 import { PDFParse } from 'pdf-parse'
 import mammoth from 'mammoth'
+import {
+  normalizeJobLevel,
+  normalizeJobTitle,
+  jobLevelValidationMessage,
+  jobTitleValidationMessage,
+  normalizeExtractedJobTitleForDisplay
+} from '../shared/jobTaxonomy'
 
 const requireCjs = createRequire(import.meta.url)
 
@@ -33,6 +40,23 @@ const uploadResumeMemory = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 12 * 1024 * 1024 }
 })
+
+/**
+ * Multer/busboy 常将 UTF-8 文件名按 latin1 逐字节解码，导致中文乱码。
+ * 若串中码点均 ≤255，则按字节重解为 UTF-8；已是正常 Unicode 的文件名不改动。
+ */
+function normalizeMultipartFilename(name: string | undefined | null): string {
+  const raw = name == null ? '' : String(name)
+  if (!raw) return ''
+  if (![...raw].every((ch) => ch.charCodeAt(0) <= 255)) return raw
+  try {
+    const fixed = Buffer.from(raw, 'latin1').toString('utf8')
+    if (fixed.includes('\uFFFD')) return raw
+    return fixed
+  } catch {
+    return raw
+  }
+}
 
 const mysqlPool = mysql.createPool({
   host: process.env.MYSQL_HOST || '127.0.0.1',
@@ -711,7 +735,7 @@ function parseResumeScreeningAiJson(raw: string): ResumeScreeningAiResult | null
       .replace(/^```(?:json)?\s*/i, '')
       .replace(/\s*```\s*$/i, '')
     const parsed = JSON.parse(cleaned) as Record<string, unknown>
-    const candidateName = String(parsed?.candidateName || '').trim()
+    const candidateName = sanitizeCandidateName(parsed?.candidateName)
     const matchScore = Number(parsed?.matchScore)
     const status = String(parsed?.status || 'AI分析完成').trim() || 'AI分析完成'
     const summary = String(parsed?.summary || '').trim()
@@ -793,13 +817,109 @@ function buildResumeEvalPromptForServer(params: {
       ? '你是资深招聘评估专家。根据岗位JD与简历文本进行风控运营岗位评估。'
       : '你是资深招聘评估专家。根据岗位JD与简历文本进行研发岗位评估。') +
     '只输出 JSON 对象，不要 markdown，不要多余文本。' +
-    '必须输出字段：schema_version,job_type,hard_gate,dimension_scores,total_score,strengths,risks,decision,summary。' +
+    '必须输出字段：schema_version,job_type,hard_gate,dimension_scores,total_score,strengths,risks,decision,summary,candidate_profile,candidate_name。' +
+    'candidate_name：从简历中识别的候选人真实姓名（2～30 个字符）；能识别则必填，无法识别时填空字符串 ""（不要用「未知」「候选人」等占位）。' +
+    'candidate_profile 为对象，从简历原文抽取候选人静态信息（无依据填 null；字符串可填空串）；其中可含 name 或「姓名」键，与 candidate_name 一致即可。' +
+    'gender（男|女|未知）、age（整数|null）、work_experience_years（工作年限年数|null）、major、education、current_position（现任或最近职位名称，勿含公司名）、' +
+    'has_degree、is_unified_enrollment、expected_salary、verifiable、recruitment_channel、resume_uploaded（布尔，无依据 null）。' +
+    '禁止编造：无法从简历判断的字段必须为 null。' +
     `dimension_scores 必须包含：${dimKeys}。` +
     '关键：dimension_scores 的每个维度都必须是对象，格式为 {"score":0-100数字,"evidence":["证据点：...｜摘录：..."]}，evidence 至少 1 条。' +
     '不要把维度写成纯数字。' +
     'risks 必须是对象数组，格式为 {"risk":"...","interview_question":"..."}。' +
     'decision 仅允许：建议进入面试 / 建议备选 / 不建议推进。'
   return { userPrompt, systemPrompt }
+}
+
+function pickProfileStr(v: unknown): string {
+  return String(v ?? '')
+    .trim()
+    .replace(/\u00a0/g, ' ')
+}
+
+function pickProfileBool(v: unknown): boolean | null {
+  if (v === true || v === false) return v
+  if (v === 1 || v === '1' || v === 'true' || v === '是') return true
+  if (v === 0 || v === '0' || v === 'false' || v === '否') return false
+  return null
+}
+
+function pickProfileInt(v: unknown): number | null {
+  const n = Number(v)
+  return Number.isFinite(n) ? Math.round(n) : null
+}
+
+/** 简历结构化字段：写入 evaluation_json.candidate_profile，供管理端表格展示 */
+function sanitizeCandidateProfile(raw: unknown): Record<string, unknown> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const p = raw as Record<string, unknown>
+  const gender = pickProfileStr(p.gender ?? p['性别']) || null
+  const major = pickProfileStr(p.major ?? p['专业']) || null
+  const education = pickProfileStr(p.education ?? p['学历']) || null
+  const personName = pickProfileStr(p.name ?? p['姓名'] ?? p.candidate_name) || null
+  const posRaw = pickProfileStr(p.current_position ?? p.position ?? p['职位'] ?? p.current_job)
+  const current_position = posRaw ? normalizeExtractedJobTitleForDisplay(posRaw) : null
+  const recruitment_channel = pickProfileStr(p.recruitment_channel ?? p['招聘渠道']) || null
+  const expected_salary = pickProfileStr(p.expected_salary ?? p['期望薪资']) || null
+  const out: Record<string, unknown> = {
+    ...(personName ? { name: personName } : {}),
+    gender,
+    age: pickProfileInt(p.age ?? p['年龄']),
+    work_experience_years: pickProfileInt(p.work_experience_years ?? p.workYears ?? p['工作经验']),
+    major,
+    education,
+    current_position,
+    has_degree: pickProfileBool(p.has_degree ?? p['是否有学位']),
+    is_unified_enrollment: pickProfileBool(p.is_unified_enrollment ?? p['是否统招']),
+    expected_salary: expected_salary || null,
+    verifiable: pickProfileBool(p.verifiable ?? p['是否可查']),
+    recruitment_channel: recruitment_channel || null,
+    resume_uploaded: pickProfileBool(p.resume_uploaded ?? p['是否上传简历'])
+  }
+  const hasAny = Object.values(out).some((x) => x !== null && x !== undefined && x !== '')
+  return hasAny ? out : undefined
+}
+
+const PLACEHOLDER_NAMES = new Set(
+  ['未知', '无', '未提供', '不详', '候选人', '未识别', '暂无', '姓名', '名字', 'n/a', 'na', 'null', 'none']
+)
+
+function isPlaceholderCandidateName(s: string): boolean {
+  const t = s.trim().toLowerCase()
+  if (!t) return true
+  if (PLACEHOLDER_NAMES.has(s.trim())) return true
+  if (PLACEHOLDER_NAMES.has(t)) return true
+  return false
+}
+
+/** 候选人姓名清洗：过滤明显非姓名文本（句子、职责片段、占位词等）。 */
+function sanitizeCandidateName(raw: unknown): string {
+  const n = String(raw ?? '')
+    .trim()
+    .replace(/^[`"'“”‘’\s]+|[`"'“”‘’\s]+$/g, '')
+    .replace(/[,，.。;；、]+$/g, '')
+    .replace(/\s+/g, ' ')
+  if (!n || isPlaceholderCandidateName(n)) return ''
+  if (n.length < 2 || n.length > 30) return ''
+  // 姓名不应包含明显句子标点、长数字、邮箱/链接等噪音。
+  if (/[，。；;：:！？!?、]/.test(n)) return ''
+  if (/\d{4,}/.test(n)) return ''
+  if (/[@/\\#]/.test(n)) return ''
+  // 允许中文姓名（含中点）或英文姓名（空格/点/连字符）。
+  const zhName = /^[\u4e00-\u9fa5·•．]{2,16}$/.test(n)
+  const enName = /^[A-Za-z][A-Za-z\s.'-]{1,29}$/.test(n)
+  return zhName || enName ? n.slice(0, 64) : ''
+}
+
+function extractCandidateNameFromEvalParsed(parsed: Record<string, unknown>, rawProfile: unknown): string {
+  const top = sanitizeCandidateName(parsed.candidate_name ?? parsed.candidateName)
+  if (top) return top
+  if (rawProfile && typeof rawProfile === 'object' && !Array.isArray(rawProfile)) {
+    const rp = rawProfile as Record<string, unknown>
+    const fromProf = sanitizeCandidateName(pickProfileStr(rp.name ?? rp['姓名'] ?? rp.candidate_name))
+    if (fromProf) return fromProf
+  }
+  return ''
 }
 
 function normalizeResumeEvalDimension(
@@ -813,7 +933,7 @@ function normalizeResumeEvalDimension(
     }
   }
   const o = (value || {}) as { score?: unknown; evidence?: unknown }
-  const score = clampResumeScore(o.score)
+  const score = clampResumeScore(Number(o.score))
   const evidence = Array.isArray(o.evidence)
     ? o.evidence.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 3)
     : []
@@ -831,7 +951,7 @@ function parseResumeEvalToScreeningResult(raw: string): ResumeScreeningAiResult 
       .replace(/^```(?:json)?\s*/i, '')
       .replace(/\s*```\s*$/i, '')
     const parsed = JSON.parse(cleaned) as Record<string, unknown>
-    const totalScore = clampResumeScore(parsed.total_score)
+    const totalScore = clampResumeScore(Number(parsed.total_score))
     if (!Number.isFinite(totalScore)) return null
     const rawDim = (parsed.dimension_scores || {}) as Record<string, unknown>
     const dim: Record<string, { score: number; evidence: string[] }> = {}
@@ -879,13 +999,20 @@ function parseResumeEvalToScreeningResult(raw: string): ResumeScreeningAiResult 
     ]
       .filter(Boolean)
       .join(' | ')
+    const { candidate_profile: rawProfile, ...parsedRest } = parsed as Record<string, unknown> & {
+      candidate_profile?: unknown
+    }
+    const profile = sanitizeCandidateProfile(rawProfile)
+    const candidateNameAi = extractCandidateNameFromEvalParsed(parsed, rawProfile)
     const normalizedEval = {
-      ...parsed,
+      ...parsedRest,
       dimension_scores: dim,
-      risks
+      risks,
+      ...(profile ? { candidate_profile: profile } : {}),
+      ...(candidateNameAi ? { candidate_name: candidateNameAi } : {})
     }
     return {
-      candidateName: '',
+      candidateName: candidateNameAi,
       matchScore: totalScore,
       status: 'AI分析完成',
       summary: mergedSummary,
@@ -932,13 +1059,38 @@ function extractPhoneFromResumeText(text: string): string | null {
 }
 
 function guessCandidateNameFromResume(text: string): string {
-  const t = text.replace(/\r\n/g, '\n').slice(0, 8000)
-  const m =
-    t.match(/(?:姓名|名字)[:：\s]*([^\s\n，,]{2,20})/) ||
-    t.match(/Name[:：\s]*([A-Za-z\u4e00-\u9fa5][^\n]{1,30})/i)
-  if (m?.[1]) return String(m[1]).trim().replace(/[,，.。]/g, '')
-  const line = t.split('\n').find((l) => l.trim().length >= 2 && l.trim().length <= 24)
-  return line?.trim().slice(0, 20) || '候选人'
+  const t = text.replace(/\r\n/g, '\n').slice(0, 12000)
+  const patterns: RegExp[] = [
+    /(?:姓\s*名|姓名|名字)[:：\s\u3000]*([^\s\n，,；;、]{2,30})/,
+    /(?:申请人|求职者|应聘人|候选人姓名)[:：\s\u3000]*([^\s\n，,；;]{2,30})/,
+    /Name\s*[:：\s]*([A-Za-z][A-Za-z\s.'-]{1,40})/i
+  ]
+  for (const re of patterns) {
+    const m = t.match(re)
+    if (m?.[1]) {
+      let n = String(m[1])
+        .trim()
+        .replace(/[,，.。;；、]+$/g, '')
+        .replace(/\s+/g, ' ')
+      if (/^\d+$/.test(n)) continue
+      if (isPlaceholderCandidateName(n)) continue
+      if (n.length >= 2 && n.length <= 32) return n.slice(0, 64)
+    }
+  }
+  const skipLine =
+    /^(简历|个人简历|curriculum\s*vitae|resume|cv|个人简介|自我评价|求职意向|联系方式|教育背景|工作经历|项目经验|专业技能|电话|手机|邮箱|e-mail|@\d)/i
+  const lines = t.split('\n').map((l) => l.trim()).filter(Boolean)
+  for (const line of lines.slice(0, 25)) {
+    if (line.length < 2 || line.length > 28) continue
+    if (skipLine.test(line)) continue
+    const digits = line.replace(/\D/g, '')
+    if (digits.length >= 11 && /1[3-9]\d{9}/.test(digits)) continue
+    if (/[@#]/.test(line) && line.length > 14) continue
+    if (/^[0-9\s\-—–:+（）()]+$/.test(line)) continue
+    if (/^[\u4e00-\u9fa5·•．\s]{2,8}$/.test(line)) return line.slice(0, 64)
+    if (/^[A-Za-z][a-z]{1,12}(\s+[A-Za-z]+){0,2}$/.test(line)) return line.slice(0, 64)
+  }
+  return '候选人'
 }
 
 function fallbackResumeScreening(resumeText: string, jdText: string, jobTitle: string): ResumeScreeningAiResult {
@@ -958,6 +1110,16 @@ function fallbackResumeScreening(resumeText: string, jdText: string, jobTitle: s
   const matchScore = Math.min(100, Math.max(35, Math.round(42 + ratio * 58)))
   const dims = deriveResumeDimensionScores(matchScore)
   const phoneFound = extractPhoneFromResumeText(resumeText)
+  const fallbackEval = {
+    schema_version: 1,
+    job_type: 'fallback',
+    hard_gate: { passed: true, reasons: [] as string[] },
+    decision: '建议备选',
+    summary: '关键词回退：无大模型结构化简历字段。',
+    candidate_profile: {} as Record<string, unknown>,
+    note:
+      '未调用大模型或调用失败：仅根据岗位 JD 与简历文本的关键词重叠度估算分数；无 candidate_profile 抽取。配置 DASHSCOPE_API_KEY 并重启 dev:api 后可获得完整结构化。'
+  }
   return {
     candidateName,
     ...(phoneFound ? { candidatePhone: phoneFound } : {}),
@@ -967,7 +1129,8 @@ function fallbackResumeScreening(resumeText: string, jdText: string, jobTitle: s
       `（未调用大模型或调用失败：仅根据岗位 JD 与简历文本的关键词重叠度估算分数，仅供参考。）\n` +
       `目标岗位：${jobTitle || '—'}\n` +
       `若要结构化 AI 评估：在根目录 .env.local 配置 DASHSCOPE_API_KEY（阿里云百炼），可选 QWEN_RESUME_MODEL，重启 npm run dev:api 后重新筛查。`,
-    ...dims
+    ...dims,
+    evaluationJson: JSON.stringify(fallbackEval)
   }
 }
 
@@ -2251,9 +2414,13 @@ app.get('/api/admin/projects', async (req, res) => {
 
 app.post('/api/admin/jobs', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
-  const title = String(req.body?.title || '').trim()
+  const titleNorm = normalizeJobTitle(String(req.body?.title || ''))
   let jobCode = String(req.body?.jobCode || '').trim().toUpperCase()
-  if (!title) return res.status(400).json({ message: 'title required' })
+  if (!titleNorm) {
+    return res.status(400).json({
+      message: String(req.body?.title || '').trim() ? jobTitleValidationMessage() : 'title required'
+    })
+  }
   if (!jobCode) {
     jobCode = `J${Date.now().toString(36).toUpperCase().slice(-8)}`
   }
@@ -2268,7 +2435,10 @@ app.post('/api/admin/jobs', async (req, res) => {
   const demand = Number.isFinite(rawDemand) && rawDemand > 0 ? Math.min(Math.floor(rawDemand), 99999) : 1
   const location = String(req.body?.location ?? '').trim()
   const skills = String(req.body?.skills ?? '').trim()
-  const level = String(req.body?.level ?? '').trim()
+  const levelRaw = String(req.body?.level ?? '').trim()
+  if (!levelRaw) return res.status(400).json({ message: 'level required' })
+  const levelNorm = normalizeJobLevel(levelRaw)
+  if (!levelNorm) return res.status(400).json({ message: jobLevelValidationMessage() })
   const salary = String(req.body?.salary ?? '').trim()
   const recruitersJson = normalizeRecruitersForDb(req.body?.recruiters)
   try {
@@ -2278,13 +2448,13 @@ app.post('/api/admin/jobs', async (req, res) => {
       [
         projectId,
         jobCode,
-        title,
+        titleNorm,
         department,
         jdText,
         demand,
         location || null,
         skills || null,
-        level || null,
+        levelNorm,
         salary || null,
         recruitersJson
       ]
@@ -2303,7 +2473,12 @@ app.patch('/api/admin/jobs/:jobCode', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const jobCode = String(req.params.jobCode || '').trim().toUpperCase()
   if (!jobCode) return res.status(400).json({ message: 'jobCode required' })
-  const title = req.body?.title !== undefined ? String(req.body.title).trim() : null
+  const titleIn = req.body?.title !== undefined
+  const titleNorm = titleIn ? normalizeJobTitle(String(req.body.title)) : undefined
+  if (titleIn) {
+    if (!String(req.body.title ?? '').trim()) return res.status(400).json({ message: 'title required' })
+    if (!titleNorm) return res.status(400).json({ message: jobTitleValidationMessage() })
+  }
   const department = req.body?.department !== undefined ? String(req.body.department).trim() : null
   const jdText = req.body?.jdText !== undefined ? String(req.body.jdText) : null
   const projectId =
@@ -2321,16 +2496,24 @@ app.patch('/api/admin/jobs/:jobCode', async (req, res) => {
       : undefined
   const location = req.body?.location !== undefined ? String(req.body.location).trim() : undefined
   const skills = req.body?.skills !== undefined ? String(req.body.skills).trim() : undefined
-  const level = req.body?.level !== undefined ? String(req.body.level).trim() : undefined
+  const levelIn = req.body?.level !== undefined
+  let levelNorm: string | undefined
+  if (levelIn) {
+    const raw = String(req.body.level ?? '').trim()
+    if (!raw) return res.status(400).json({ message: 'level required' })
+    const ln = normalizeJobLevel(raw)
+    if (!ln) return res.status(400).json({ message: jobLevelValidationMessage() })
+    levelNorm = ln
+  }
   const salary = req.body?.salary !== undefined ? String(req.body.salary).trim() : undefined
   const recruiters =
     req.body?.recruiters !== undefined ? normalizeRecruitersForDb(req.body.recruiters) : undefined
   try {
     const fields: string[] = []
     const vals: any[] = []
-    if (title !== null) {
+    if (titleIn && titleNorm) {
       fields.push('title=?')
-      vals.push(title)
+      vals.push(titleNorm)
     }
     if (department !== null) {
       fields.push('department=?')
@@ -2356,9 +2539,9 @@ app.patch('/api/admin/jobs/:jobCode', async (req, res) => {
       fields.push('skills=?')
       vals.push(skills || null)
     }
-    if (level !== undefined) {
+    if (levelIn && levelNorm) {
       fields.push('level=?')
-      vals.push(level || null)
+      vals.push(levelNorm)
     }
     if (salary !== undefined) {
       fields.push('salary=?')
@@ -2428,6 +2611,7 @@ function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: bo
   const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username, s.created_at,
+              SUBSTRING(COALESCE(s.resume_plaintext,''), 1, 12000) AS resume_plaintext,
               lr.overall_score AS interview_overall_score,
               lr.passed AS interview_passed,
               lr.updated_at AS interview_report_updated_at,
@@ -2465,7 +2649,8 @@ function resumeScreeningsPlainSql(withPipelineStage: boolean, projectId: string 
   const { fragment: jobJoin, params: jobParams } = resumeScreeningsJobFilterJoinSql(projectId)
   const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
-              s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username, s.created_at
+              s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username, s.created_at,
+              SUBSTRING(COALESCE(s.resume_plaintext,''), 1, 12000) AS resume_plaintext
        FROM resume_screenings s
        ${jobJoin}
        ORDER BY s.id DESC
@@ -2527,7 +2712,14 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
   const projectId = rawPid.length ? rawPid : null
   try {
     const rows = await queryResumeScreeningsJoinedRows(projectId)
-    res.json({ data: rows })
+    const data = (rows || []).map((r) => ({
+      ...r,
+      file_name:
+        r?.file_name != null && String(r.file_name).trim()
+          ? normalizeMultipartFilename(String(r.file_name)).slice(0, 255)
+          : r.file_name
+    }))
+    res.json({ data })
   } catch (e: unknown) {
     const code = (e as { code?: string })?.code
     if (code === 'ER_NO_SUCH_TABLE') {
@@ -2547,6 +2739,10 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
         }
         const patched = (rows || []).map((r) => ({
           ...r,
+          file_name:
+            r?.file_name != null && String(r.file_name).trim()
+              ? normalizeMultipartFilename(String(r.file_name)).slice(0, 255)
+              : r.file_name,
           interview_overall_score: null,
           interview_passed: null,
           interview_report_updated_at: null,
@@ -2578,9 +2774,22 @@ app.patch('/api/admin/resume-screenings/:id', async (req, res) => {
   if (!Number.isFinite(idNum) || idNum <= 0) {
     return res.status(400).json({ message: 'invalid id' })
   }
+  const hasName = req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'candidateName')
   const hasPhone = req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'candidatePhone')
-  if (!hasPhone) {
-    return res.status(400).json({ message: '请提供 candidatePhone' })
+  if (!hasName && !hasPhone) {
+    return res.status(400).json({ message: '请提供 candidateName 或 candidatePhone' })
+  }
+  let candidateName: string | undefined
+  if (hasName) {
+    const raw = String(req.body.candidateName ?? '').trim()
+    if (!raw) candidateName = '候选人'
+    else {
+      const normalized = sanitizeCandidateName(raw)
+      if (!normalized) {
+        return res.status(400).json({ message: '候选人姓名格式不正确，请填写 2-30 位中英文姓名' })
+      }
+      candidateName = normalized
+    }
   }
   let candidatePhone: string | null | undefined
   if (hasPhone) {
@@ -2595,7 +2804,7 @@ app.patch('/api/admin/resume-screenings/:id', async (req, res) => {
     const token = extractAdminRequestToken(req)
     const actor = await loadAdminSessionActor(token)
     if (!actor?.username) {
-      return res.status(403).json({ message: '当前登录方式无法识别上传人，不能修改手机号' })
+      return res.status(403).json({ message: '当前登录方式无法识别上传人，不能修改候选人信息' })
     }
     const [srows] = await mysqlPool.query<RowDataPacket[]>(
       'SELECT id, job_code, uploader_username FROM resume_screenings WHERE id = ? LIMIT 1',
@@ -2611,10 +2820,14 @@ app.patch('/api/admin/resume-screenings/:id', async (req, res) => {
       return res.status(403).json({ message: '该记录缺少上传人信息，无法校验修改权限' })
     }
     if (!actorUsername || actorUsername !== uploader) {
-      return res.status(403).json({ message: '仅上传该简历的账号可修改手机号' })
+      return res.status(403).json({ message: '仅上传该简历的账号可修改姓名和手机号' })
     }
     const fields: string[] = []
     const vals: unknown[] = []
+    if (candidateName !== undefined) {
+      fields.push('candidate_name = ?')
+      vals.push(candidateName)
+    }
     if (candidatePhone !== undefined) {
       fields.push('candidate_phone = ?')
       vals.push(candidatePhone)
@@ -2868,6 +3081,7 @@ app.post(
     if (!jobCode) return res.status(400).json({ message: 'jobCode required' })
     if (!req.file?.buffer?.length) return res.status(400).json({ message: 'file required' })
     try {
+      const uploadFileName = normalizeMultipartFilename(req.file.originalname).slice(0, 255)
       const actorToken = extractAdminRequestToken(req)
       const uploaderUsername = (await resolveAdminDbUsernameFromToken(actorToken)) || ''
       if (!uploaderUsername) {
@@ -2881,12 +3095,37 @@ app.post(
       const job = jobRows[0] as { title: string; department: string | null; jd_text: string | null }
       let plain: string
       try {
-        plain = await extractResumePlainText(req.file.buffer, req.file.originalname, req.file.mimetype || '')
+        plain = await extractResumePlainText(req.file.buffer, uploadFileName, req.file.mimetype || '')
       } catch (ex) {
         const msg = ex instanceof Error ? ex.message : 'parse failed'
         return res.status(415).json({ message: msg })
       }
       if (!plain.trim()) return res.status(422).json({ message: '未能从文件中提取可读文本' })
+
+      const plainStore = plain.slice(0, RESUME_PLAINTEXT_MAX_SAVE)
+      const resumePlainHash = crypto
+        .createHash('sha256')
+        .update(Buffer.from(plainStore, 'utf8'))
+        .digest('hex')
+        .toLowerCase()
+      try {
+        const [dupByContent] = await mysqlPool.query<RowDataPacket[]>(
+          `SELECT id FROM resume_screenings
+           WHERE job_code = ?
+             AND resume_plaintext IS NOT NULL AND CHAR_LENGTH(TRIM(resume_plaintext)) > 0
+             AND LOWER(SHA2(resume_plaintext, 256)) = ?
+           LIMIT 1`,
+          [jobCode, resumePlainHash]
+        )
+        if (Array.isArray(dupByContent) && dupByContent.length) {
+          return res.status(409).json({
+            message: '该岗位下已存在正文完全相同的简历筛查记录，请勿重复上传。',
+            existingId: Number((dupByContent[0] as { id?: unknown }).id)
+          })
+        }
+      } catch (dupErr) {
+        console.warn('[resume-screen] duplicate body check skipped:', dupErr)
+      }
 
       let result: ResumeScreeningAiResult
       try {
@@ -2907,8 +3146,7 @@ app.post(
         result = fallbackResumeScreening(plain, String(job.jd_text || ''), String(job.title || ''))
       }
 
-      const plainStore = plain.slice(0, RESUME_PLAINTEXT_MAX_SAVE)
-      const candidateName = String(result.candidateName || '').trim() || guessCandidateNameFromResume(plain)
+      const candidateName = sanitizeCandidateName(result.candidateName) || guessCandidateNameFromResume(plain)
       const phoneFromResult = normalizeCnMobile(String(result.candidatePhone || ''))
       const phoneFromText = extractPhoneFromResumeText(plain)
       const candidatePhone: string | null = phoneFromResult || phoneFromText || null
@@ -2936,7 +3174,7 @@ app.post(
                   result.summary,
                   evalJson,
                   plainStore,
-                  String(req.file.originalname || '').slice(0, 255),
+                  uploadFileName,
                   uploaderUsername
                 ]
               )
@@ -2959,7 +3197,7 @@ app.post(
                   result.status,
                   result.summary,
                   plainStore,
-                  String(req.file.originalname || '').slice(0, 255),
+                  uploadFileName,
                   uploaderUsername
                 ]
               )
@@ -2985,7 +3223,7 @@ app.post(
                 result.summary,
                 evalJson,
                 plainStore,
-                String(req.file.originalname || '').slice(0, 255),
+                uploadFileName,
                 uploaderUsername
               ]
             )
@@ -3007,7 +3245,7 @@ app.post(
                 result.status,
                 result.summary,
                 plainStore,
-                String(req.file.originalname || '').slice(0, 255),
+                uploadFileName,
                 uploaderUsername
               ]
             )

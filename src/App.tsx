@@ -11,6 +11,16 @@ import {
   subscribeAdminSession,
   type AdminLoginProfile
 } from './adminSession';
+import {
+  STANDARD_JOB_LEVELS,
+  STANDARD_JOB_ROLE_BASES,
+  normalizeJobLevel,
+  normalizeJobTitle,
+  matchRoleBaseFromJobTitle,
+  composeStandardJobTitle,
+  jobLevelValidationMessage,
+  jobRoleBaseValidationMessage
+} from '../shared/jobTaxonomy';
 import { 
   Building2, Briefcase, Users, FileText, UserCheck, 
   Settings, Network, UserCog, Shield, Menu as MenuIcon,
@@ -269,6 +279,10 @@ export interface Resume {
   flowStage?: string
   uploadTime: string
   reportSummary?: string
+  /** 原始上传文件名 */
+  fileName?: string
+  /** 简历正文截取（接口返回库中正文前段；列表中不展开，在「查看简历」弹框中阅读） */
+  resumePlainPreview?: string
   evaluationJson?: {
     decision?: string
     summary?: string
@@ -1587,7 +1601,7 @@ function ProjectManagementView({
       submitting: false,
       error: '',
       jobCode: '',
-      title: '',
+      roleBase: '',
       projectId,
       department: '',
       demand: '1',
@@ -1610,13 +1624,13 @@ function ProjectManagementView({
       submitting: false,
       error: '',
       jobCode: job.id,
-      title: job.title,
+      roleBase: matchRoleBaseFromJobTitle(job.title, job.level) ?? '',
       projectId: pid,
       department: job.department && job.department !== '-' ? job.department : '',
       demand: String(job.demand ?? 1),
       location: job.location && job.location !== '-' ? job.location : '',
       skills: job.skills && job.skills !== '见 JD' ? job.skills : '',
-      level: job.level && job.level !== '待评估' ? job.level : '',
+      level: normalizeJobLevel(job.level) ?? '',
       salary: job.salary && job.salary !== '面议' ? job.salary : '',
       recruiters: job.recruiters?.length ? job.recruiters.join('、') : '',
       jdText: job.jdText || ''
@@ -1626,21 +1640,32 @@ function ProjectManagementView({
   const submitProjectJobForm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!projectJobForm) return;
-    const title = projectJobForm.title.trim();
-    if (!title) {
-      setProjectJobForm((f) => (f ? { ...f, error: '请填写岗位名称' } : f));
+    const levelNorm = normalizeJobLevel(projectJobForm.level);
+    if (!levelNorm) {
+      setProjectJobForm((f) =>
+        f ? { ...f, error: projectJobForm.level.trim() ? jobLevelValidationMessage() : '请选择级别' } : f
+      );
       return;
     }
+    const roleBaseNorm = normalizeJobTitle(projectJobForm.roleBase);
+    if (!roleBaseNorm || !composeStandardJobTitle(levelNorm, roleBaseNorm)) {
+      setProjectJobForm((f) =>
+        f
+          ? {
+              ...f,
+              error: projectJobForm.roleBase.trim() ? jobRoleBaseValidationMessage() : '请选择岗位'
+            }
+          : f
+      );
+      return;
+    }
+    const composedTitle = composeStandardJobTitle(levelNorm, roleBaseNorm)!;
     if (!projectJobForm.location.trim()) {
       setProjectJobForm((f) => (f ? { ...f, error: '请填写工作地点' } : f));
       return;
     }
     if (!projectJobForm.salary.trim()) {
       setProjectJobForm((f) => (f ? { ...f, error: '请填写薪资范围' } : f));
-      return;
-    }
-    if (!projectJobForm.level.trim()) {
-      setProjectJobForm((f) => (f ? { ...f, error: '请填写级别' } : f));
       return;
     }
     const rawPid = String(projectJobLockId || projectJobForm.projectId.trim() || '').trim();
@@ -1653,13 +1678,13 @@ function ProjectManagementView({
     const projectId = rawPid;
     /** 项目管理里维护岗位：交付经理/管理员不维护岗位「招聘人员」，由招聘经理在岗位分配中配置 */
     const payload: Record<string, unknown> = {
-      title,
+      title: composedTitle,
       projectId,
       department: projectJobForm.department.trim() || null,
       demand,
       location: projectJobForm.location.trim() || null,
       skills: projectJobForm.skills.trim() || null,
-      level: projectJobForm.level.trim() || null,
+      level: levelNorm,
       salary: projectJobForm.salary.trim() || null,
       jdText: projectJobForm.jdText.trim() || null
     };
@@ -1884,7 +1909,7 @@ function ProjectManagementView({
                           project.jobs.map((job) => (
                             <div
                               key={job.id}
-                              className="bg-white border border-slate-200 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                              className="bg-white border border-slate-200 rounded-lg p-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3"
                             >
                               <div className="min-w-0 flex-1">
                                 <div className="flex flex-wrap items-center gap-2 mb-1">
@@ -1902,7 +1927,7 @@ function ProjectManagementView({
                                   <span>地点 {job.location}</span>
                                 </div>
                               </div>
-                              <div className="flex flex-col sm:flex-row sm:items-start gap-3 shrink-0">
+                              <div className="flex flex-col sm:flex-row sm:items-start gap-3 lg:shrink-0 lg:max-w-[52%]">
                                 {canManage ? (
                                   <div className="flex items-center gap-1 order-first sm:order-none">
                                     <button
@@ -1923,13 +1948,14 @@ function ProjectManagementView({
                                     </button>
                                   </div>
                                 ) : null}
-                                <div className="text-left sm:text-right">
+                                <div className="min-w-0 text-left sm:text-right">
                                   <div className="text-xs text-slate-500 mb-1">可见招聘人员</div>
                                   <div className="flex flex-wrap gap-1 sm:justify-end">
                                     {(job.recruiters || []).map((r) => (
                                       <span
                                         key={r}
-                                        className="px-2 py-0.5 bg-indigo-50 text-indigo-700 text-xs rounded-md border border-indigo-100"
+                                        className="max-w-full truncate px-2 py-0.5 bg-indigo-50 text-indigo-700 text-xs rounded-md border border-indigo-100"
+                                        title={r}
                                       >
                                         {r}
                                       </span>
@@ -2884,7 +2910,8 @@ type JobFormState = {
   submitting: boolean;
   error: string;
   jobCode: string;
-  title: string;
+  /** 标准岗位序列（不含级别），与下拉选项 value 一致；提交时与 level 拼成 title */
+  roleBase: string;
   projectId: string;
   department: string;
   demand: string;
@@ -2938,9 +2965,11 @@ function JobEditorModal({
 
   const handleAiGenerateJd = async () => {
     if (!jobForm) return;
-    const title = jobForm.title.trim();
-    const level = jobForm.level.trim();
-    if (!title || !level) return;
+    const levelNorm = normalizeJobLevel(jobForm.level);
+    const roleBaseNorm = normalizeJobTitle(jobForm.roleBase);
+    const fullTitle =
+      levelNorm && roleBaseNorm ? composeStandardJobTitle(levelNorm, roleBaseNorm) : null;
+    if (!fullTitle || !levelNorm) return;
     setJdGenerating(true);
     setJobForm((f) => (f ? { ...f, error: '' } : f));
     try {
@@ -2948,8 +2977,8 @@ function JobEditorModal({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          title,
-          level,
+          title: fullTitle,
+          level: levelNorm,
           location: jobForm.location.trim(),
           salary: jobForm.salary.trim()
         })
@@ -3006,7 +3035,9 @@ function JobEditorModal({
   if (typeof document === 'undefined') return null;
   if (!jobForm) return null;
   const rfMode = recruiterFieldMode ?? 'none';
-  const canAiJd = Boolean(jobForm.title.trim() && jobForm.level.trim());
+  const jdLevel = normalizeJobLevel(jobForm.level);
+  const jdRoleBase = normalizeJobTitle(jobForm.roleBase);
+  const canAiJd = Boolean(jdLevel && jdRoleBase && composeStandardJobTitle(jdLevel, jdRoleBase));
   return createPortal(
     <AnimatePresence>
       <motion.div
@@ -3078,15 +3109,31 @@ function JobEditorModal({
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-500 mb-1">
-                  岗位名称 <span className="text-red-500">*</span>
+                  岗位 <span className="text-red-500">*</span>
                 </label>
-                <input
-                  value={jobForm.title}
-                  onChange={(e) => setJobForm((f) => (f ? { ...f, title: e.target.value } : f))}
+                <p className="text-[11px] text-slate-400 mb-1 leading-snug">
+                  展示名将保存为「所选级别 + 所选岗位」；列表与招聘系统岗位下拉对齐。
+                </p>
+                <select
+                  value={jobForm.roleBase}
+                  onChange={(e) => setJobForm((f) => (f ? { ...f, roleBase: e.target.value } : f))}
                   required
-                  className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
-                  placeholder="例如：高级前端工程师"
-                />
+                  className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm bg-white"
+                >
+                  <option value="" disabled>
+                    请选择岗位
+                  </option>
+                  {STANDARD_JOB_ROLE_BASES.map((b) => (
+                    <option key={b} value={b}>
+                      {b}
+                    </option>
+                  ))}
+                </select>
+                {jobForm.mode === 'edit' && !jobForm.roleBase ? (
+                  <p className="text-[11px] text-amber-700 mt-1 leading-snug">
+                    当前记录的岗位名称未能匹配标准列表，请重新选择岗位后保存（将按级别与岗位生成新的展示名称）。
+                  </p>
+                ) : null}
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
@@ -3145,13 +3192,21 @@ function JobEditorModal({
                   <label className="block text-xs font-medium text-slate-500 mb-1">
                     级别 <span className="text-red-500">*</span>
                   </label>
-                  <input
+                  <select
                     value={jobForm.level}
                     onChange={(e) => setJobForm((f) => (f ? { ...f, level: e.target.value } : f))}
                     required
-                    className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
-                    placeholder="例如：高级"
-                  />
+                    className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm bg-white"
+                  >
+                    <option value="" disabled>
+                      请选择级别
+                    </option>
+                    {STANDARD_JOB_LEVELS.map((lv) => (
+                      <option key={lv} value={lv}>
+                        {lv}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-500 mb-1">技能关键词</label>
@@ -3558,7 +3613,7 @@ function JobQueryView({
       submitting: false,
       error: '',
       jobCode: '',
-      title: '',
+      roleBase: '',
       projectId: first?.id ?? '',
       department: '',
       demand: '1',
@@ -3592,13 +3647,13 @@ function JobQueryView({
       submitting: false,
       error: '',
       jobCode: job.id,
-      title: job.title,
+      roleBase: matchRoleBaseFromJobTitle(job.title, job.level) ?? '',
       projectId: pid,
       department: job.department && job.department !== '-' ? job.department : '',
       demand: String(job.demand ?? 1),
       location: job.location && job.location !== '-' ? job.location : '',
       skills: job.skills && job.skills !== '见 JD' ? job.skills : '',
-      level: job.level && job.level !== '待评估' ? job.level : '',
+      level: normalizeJobLevel(job.level) ?? '',
       salary: job.salary && job.salary !== '面议' ? job.salary : '',
       recruiters: job.recruiters?.length ? job.recruiters.join('、') : '',
       jdText: job.jdText || ''
@@ -3608,21 +3663,27 @@ function JobQueryView({
   const submitJobForm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!jobForm) return;
-    const title = jobForm.title.trim();
-    if (!title) {
-      setJobForm((f) => (f ? { ...f, error: '请填写岗位名称' } : f));
+    const levelNorm = normalizeJobLevel(jobForm.level);
+    if (!levelNorm) {
+      setJobForm((f) =>
+        f ? { ...f, error: jobForm.level.trim() ? jobLevelValidationMessage() : '请选择级别' } : f
+      );
       return;
     }
+    const roleBaseNorm = normalizeJobTitle(jobForm.roleBase);
+    if (!roleBaseNorm || !composeStandardJobTitle(levelNorm, roleBaseNorm)) {
+      setJobForm((f) =>
+        f ? { ...f, error: jobForm.roleBase.trim() ? jobRoleBaseValidationMessage() : '请选择岗位' } : f
+      );
+      return;
+    }
+    const composedTitle = composeStandardJobTitle(levelNorm, roleBaseNorm)!;
     if (!jobForm.location.trim()) {
       setJobForm((f) => (f ? { ...f, error: '请填写工作地点' } : f));
       return;
     }
     if (!jobForm.salary.trim()) {
       setJobForm((f) => (f ? { ...f, error: '请填写薪资范围' } : f));
-      return;
-    }
-    if (!jobForm.level.trim()) {
-      setJobForm((f) => (f ? { ...f, error: '请填写级别' } : f));
       return;
     }
     if (selectableProjects.length === 0) {
@@ -3640,13 +3701,13 @@ function JobQueryView({
     const projectId = pidTrim;
     const isRm = currentRole === 'recruiting_manager';
     const basePayload: Record<string, unknown> = {
-      title,
+      title: composedTitle,
       projectId,
       department: jobForm.department.trim() || null,
       demand,
       location: jobForm.location.trim() || null,
       skills: jobForm.skills.trim() || null,
-      level: jobForm.level.trim() || null,
+      level: levelNorm,
       salary: jobForm.salary.trim() || null,
       jdText: jobForm.jdText.trim() || null
     };
@@ -4102,6 +4163,55 @@ function dimsFromScreeningDbRow(
   return { skill, experience, education, stability }
 }
 
+function uploaderDisplayFromUsers(username: string | undefined, users: User[]): string {
+  const key = String(username || '').trim().toLowerCase()
+  if (!key) return '—'
+  const u = users.find((x) => String(x.username || '').trim().toLowerCase() === key)
+  if (u) {
+    const nm = String(u.name || '').trim()
+    if (nm) return nm
+  }
+  return String(username || '').trim()
+}
+
+/** 列表接口中 created_at 多为 ISO（UTC）字符串，按中国时区展示避免与本地观感差 8 小时 */
+function formatScreeningUploadTime(created: string | Date | null | undefined): string {
+  if (created == null) return ''
+  if (created instanceof Date) {
+    if (Number.isNaN(created.getTime())) return ''
+    return created.toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })
+  }
+  const s = String(created).trim()
+  if (!s) return ''
+  const d = new Date(s)
+  if (Number.isNaN(d.getTime())) return s
+  return d.toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })
+}
+
+function isLikelyCandidateDisplayName(raw: unknown): boolean {
+  const n = String(raw ?? '').trim()
+  if (!n || n.length < 2 || n.length > 30) return false
+  if (/[，。；;：:！？!?、]/.test(n)) return false
+  if (/\d{4,}/.test(n)) return false
+  if (/[@/\\#]/.test(n)) return false
+  return /^[\u4e00-\u9fa5·•．]{2,16}$/.test(n) || /^[A-Za-z][A-Za-z\s.'-]{1,29}$/.test(n)
+}
+
+function pickCandidateDisplayName(dbName: string, evalJson: Resume['evaluationJson'] | undefined): string {
+  const direct = String(dbName || '').trim()
+  if (isLikelyCandidateDisplayName(direct)) return direct
+  const profileName =
+    evalJson && typeof evalJson === 'object' && !Array.isArray(evalJson)
+      ? String(
+          ((evalJson as Record<string, unknown>).candidate_profile as Record<string, unknown> | undefined)?.name ||
+            (evalJson as Record<string, unknown>).candidate_name ||
+            ''
+        ).trim()
+      : ''
+  if (isLikelyCandidateDisplayName(profileName)) return profileName
+  return '候选人'
+}
+
 function mapScreeningRow(r: {
   id: number | string
   job_code: string
@@ -4120,14 +4230,13 @@ function mapScreeningRow(r: {
   interview_report_updated_at?: unknown
   report_summary: string | null
   evaluation_json?: unknown
+  file_name?: string | null
+  resume_plaintext?: string | null
   uploader_username?: string | null
   created_at: string | Date
 }): Resume {
   const created = r.created_at
-  const uploadTime =
-    created instanceof Date
-      ? created.toLocaleString('zh-CN', { hour12: false })
-      : String(created || '')
+  const uploadTime = formatScreeningUploadTime(created)
   const overall = Math.max(0, Math.min(100, Number(r.match_score) || 0))
   const d = dimsFromScreeningDbRow(r, overall)
   const { flowStage, aiConclusion } = deriveScreeningFlowLabels(r as unknown as Record<string, unknown>)
@@ -4143,7 +4252,7 @@ function mapScreeningRow(r: {
   })()
   return {
     id: String(r.id),
-    name: String(r.candidate_name || '候选人'),
+    name: pickCandidateDisplayName(String(r.candidate_name || ''), parsedEval),
     phone: r.candidate_phone != null && String(r.candidate_phone).trim() ? String(r.candidate_phone).trim() : undefined,
     uploaderUsername:
       r.uploader_username != null && String(r.uploader_username).trim()
@@ -4161,7 +4270,13 @@ function mapScreeningRow(r: {
     flowStage,
     uploadTime,
     reportSummary: String(r.report_summary || ''),
-    evaluationJson: parsedEval
+    evaluationJson: parsedEval,
+    fileName:
+      r.file_name != null && String(r.file_name).trim() ? String(r.file_name).trim().slice(0, 255) : undefined,
+    resumePlainPreview:
+      r.resume_plaintext != null && String(r.resume_plaintext).trim()
+        ? String(r.resume_plaintext).trim()
+        : undefined
   }
 }
 
@@ -4263,11 +4378,14 @@ function ResumeScreeningView({
   const [screenListPage, setScreenListPage] = useState(1);
   const [screenPageSize, setScreenPageSize] = useState(10);
   const [reportResume, setReportResume] = useState<Resume | null>(null);
-  const [contactEditId, setContactEditId] = useState<string | null>(null);
-  const [contactDraft, setContactDraft] = useState({ phone: '' });
+  const [contactEditResume, setContactEditResume] = useState<Resume | null>(null);
+  const [contactDraft, setContactDraft] = useState({ name: '', phone: '' });
   const [contactSaving, setContactSaving] = useState(false);
   const [contactEditError, setContactEditError] = useState('');
+  /** 弹框查看简历正文（列表接口返回截取，与库内正文前缀一致） */
+  const [plainModalResume, setPlainModalResume] = useState<Resume | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [screeningHrUsers, setScreeningHrUsers] = useState<User[]>([]);
   const { codes: recruiterJobCodes, loading: recruiterScopeLoading } = useRecruiterScopedJobCodes(
     currentRole,
     authProfile
@@ -4355,6 +4473,9 @@ function ResumeScreeningView({
           interview_report_updated_at?: unknown
           report_summary: string | null
           evaluation_json?: unknown
+          file_name?: string | null
+          resume_plaintext?: string | null
+          uploader_username?: string | null
           created_at: string | Date
         }>
         const mapped = rows.map((row) => mapScreeningRow(row));
@@ -4394,6 +4515,17 @@ function ResumeScreeningView({
   }, [loadScreenings]);
 
   useEffect(() => {
+    if (!apiBase || !hasToken) {
+      setScreeningHrUsers([]);
+      return;
+    }
+    void fetch('/api/users')
+      .then((r) => r.json())
+      .then((data: unknown) => setScreeningHrUsers(usersFromApiPayload(data)))
+      .catch(() => setScreeningHrUsers([]));
+  }, [apiBase, hasToken, sessRev]);
+
+  useEffect(() => {
     setScreenListPage(1);
   }, [resumeProjectFilter, selectedJobCode]);
 
@@ -4425,34 +4557,42 @@ function ResumeScreeningView({
     setScreenListPage((p) => Math.min(Math.max(1, p), tp));
   }, [filteredResumes.length, screenPageSize]);
 
+  const openContactEditModal = useCallback((resume: Resume) => {
+    setContactEditError('');
+    setContactDraft({ name: resume.name || '', phone: resume.phone || '' });
+    setContactEditResume(resume);
+  }, []);
+
   const saveScreeningContact = useCallback(async () => {
-    if (!contactEditId || !apiBase || !hasToken) return;
+    if (!contactEditResume || !apiBase || !hasToken) return;
     setContactSaving(true);
     setContactEditError('');
     try {
-      const r = await miniappApiFetch(`/api/admin/resume-screenings/${encodeURIComponent(contactEditId)}`, {
+      const r = await miniappApiFetch(`/api/admin/resume-screenings/${encodeURIComponent(contactEditResume.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          candidateName: contactDraft.name.trim(),
           candidatePhone: contactDraft.phone.trim()
         })
       });
       const j = (await r.json().catch(() => ({}))) as { message?: string };
       if (!r.ok) throw new Error(j.message || `保存失败 ${r.status}`);
+      const nameNext = contactDraft.name.trim() || '候选人';
       const phoneNext = contactDraft.phone.trim();
       setReportResume((prev) =>
-        prev && prev.id === contactEditId
-          ? { ...prev, phone: phoneNext || undefined }
+        prev && prev.id === contactEditResume.id
+          ? { ...prev, name: nameNext, phone: phoneNext || undefined }
           : prev
       );
-      setContactEditId(null);
+      setContactEditResume(null);
       loadScreenings();
     } catch (e) {
       setContactEditError(e instanceof Error ? e.message : '保存失败');
     } finally {
       setContactSaving(false);
     }
-  }, [contactEditId, contactDraft, apiBase, hasToken, loadScreenings]);
+  }, [contactEditResume, contactDraft, apiBase, hasToken, loadScreenings]);
 
   useEffect(() => {
     if (!apiBase || !hasToken) {
@@ -4830,7 +4970,7 @@ function ResumeScreeningView({
               <h3 className="font-bold text-slate-900">AI 筛查结果</h3>
               <span className="shrink-0 text-xs text-slate-500 sm:text-sm">当前列表 {filteredResumes.length} 条</span>
             </div>
-            <div className="flex-1 space-y-3 overflow-auto p-3 sm:space-y-4 sm:p-6">
+            <div className="flex-1 space-y-3 overflow-auto p-2 sm:p-4">
               {screenListError ? (
                 <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">{screenListError}</div>
               ) : null}
@@ -4846,162 +4986,144 @@ function ResumeScreeningView({
                     : '暂无筛查记录。请从左侧上传简历；若长期无数据，请联系管理员确认系统是否正常。'}
                 </p>
               ) : null}
-              {pagedResumes.map((resume) => {
-                const currentUser = String(authProfile?.username || '').trim().toLowerCase();
-                const uploader = String(resume.uploaderUsername || '').trim().toLowerCase();
-                const canEditPhone = Boolean(currentUser && uploader && currentUser === uploader);
-                return (
-                <div
-                  key={resume.id}
-                  className="flex flex-col gap-4 rounded-lg border border-slate-200 p-3 transition-colors hover:border-indigo-300 sm:flex-row sm:items-center sm:gap-5 sm:p-4"
-                >
-                  <div className="flex min-w-0 flex-1 items-start gap-3 sm:items-center">
-                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-slate-100">
-                      <FileText className="h-6 w-6 text-slate-500" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="mb-1 flex flex-wrap items-center gap-2 sm:gap-3">
-                        <h4 className="text-base font-bold text-slate-900 sm:text-lg">{resume.name}</h4>
-                        {resume.flowStage ? (
-                          <span className="rounded-md bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-800">
-                            {resume.flowStage}
-                          </span>
-                        ) : null}
-                        <span className="text-xs text-slate-500">匹配岗位: {resume.job}</span>
-                      </div>
-                      <div className="text-sm text-slate-500">上传时间: {resume.uploadTime}</div>
-                      <div className="mt-0.5 text-sm text-slate-600">
-                        简历上传人：
-                        {resume.uploaderUsername ? (
-                          <span className="font-mono text-slate-700 ml-1">{resume.uploaderUsername}</span>
-                        ) : (
-                          <span className="text-slate-400 ml-1">—</span>
-                        )}
-                      </div>
-                      <div className="mt-0.5 text-sm text-slate-600">
-                        手机：
-                        {resume.phone ? resume.phone : <span className="text-slate-400">未识别</span>}
-                      </div>
-                      <div className="mt-1 text-[11px] text-slate-400">AI 简历结论：{resume.status}</div>
-                      {apiBase && hasToken && canEditPhone ? (
-                        <div className="mt-3 rounded-lg border border-slate-100 bg-slate-50/90 px-3 py-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setContactEditError('');
-                              if (contactEditId === resume.id) {
-                                setContactEditId(null);
-                              } else {
-                                setContactEditId(resume.id);
-                                setContactDraft({ phone: resume.phone || '' });
-                              }
-                            }}
-                            className="inline-flex items-center gap-1.5 text-xs font-medium text-indigo-700 hover:text-indigo-900"
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                            {contactEditId === resume.id ? '收起' : '修正手机号'}
-                          </button>
-                          {contactEditId === resume.id ? (
-                            <div className="mt-2 space-y-2">
-                              <p className="text-[11px] leading-snug text-slate-500">
-                                联系方式识别有误时可手动改正；留空表示清空手机号。
-                              </p>
-                              <div>
-                                <label className="mb-0.5 block text-[11px] font-medium text-slate-600">
-                                  手机（选填，11 位大陆号会自动规范化）
-                                </label>
-                                <input
-                                  type="tel"
-                                  inputMode="numeric"
-                                  value={contactDraft.phone}
-                                  onChange={(e) => setContactDraft((d) => ({ ...d, phone: e.target.value }))}
-                                  className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
-                                  placeholder="可留空"
-                                  disabled={contactSaving}
-                                />
-                              </div>
-                              {contactEditError ? (
-                                <p className="text-xs text-red-600">{contactEditError}</p>
-                              ) : null}
-                              <div className="flex flex-wrap gap-2">
-                                <button
-                                  type="button"
-                                  disabled={contactSaving}
-                                  onClick={() => void saveScreeningContact()}
-                                  className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+              {pagedResumes.length > 0 ? (
+                <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+                  <table className="min-w-[900px] w-full text-left text-sm text-slate-800">
+                    <thead className="bg-slate-50/95 text-slate-600 border-b border-slate-200 text-xs sticky top-0 z-10">
+                      <tr>
+                        <th className="px-3 py-3 font-medium whitespace-nowrap min-w-[12rem]">候选人</th>
+                        <th className="px-3 py-3 font-medium whitespace-nowrap min-w-[8rem]">手机</th>
+                        <th className="px-3 py-3 font-medium min-w-[8rem]">匹配岗位</th>
+                        <th className="px-3 py-3 font-medium whitespace-nowrap text-center min-w-[4.5rem]">匹配分</th>
+                        <th className="px-3 py-3 font-medium min-w-[7rem]">AI 结论</th>
+                        <th className="px-3 py-3 font-medium whitespace-nowrap min-w-[6.5rem]">流程</th>
+                        <th className="px-3 py-3 font-medium whitespace-nowrap min-w-[5rem]">上传人</th>
+                        <th className="px-3 py-3 font-medium whitespace-nowrap min-w-[9rem]">上传时间</th>
+                        <th className="px-3 py-3 font-medium whitespace-nowrap text-right min-w-[11rem]">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {pagedResumes.map((resume, idx) => {
+                        const currentUser = String(authProfile?.username || '').trim().toLowerCase();
+                        const uploader = String(resume.uploaderUsername || '').trim().toLowerCase();
+                        const canEditContact = Boolean(currentUser && uploader && currentUser === uploader);
+                        const uploaderLabel = uploaderDisplayFromUsers(resume.uploaderUsername, screeningHrUsers);
+                        return (
+                          <React.Fragment key={resume.id}>
+                            <tr className={`align-top transition-colors hover:bg-indigo-50/40 ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}`}>
+                              <td className="px-3 py-3">
+                                <div className="flex items-start gap-2.5">
+                                  <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[11px] font-semibold text-indigo-700">
+                                    {String(resume.name || '候').trim().slice(0, 1)}
+                                  </span>
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-1.5">
+                                      <div className="font-semibold text-slate-900 leading-tight truncate max-w-[10rem]">{resume.name}</div>
+                                      {canEditContact ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => openContactEditModal(resume)}
+                                          className="inline-flex h-5 w-5 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-indigo-600"
+                                          title="修改姓名和手机号"
+                                          aria-label="修改姓名和手机号"
+                                        >
+                                          <Pencil className="h-3.5 w-3.5" />
+                                        </button>
+                                      ) : null}
+                                    </div>
+                                {resume.fileName ? (
+                                  <div
+                                    className="text-[11px] text-slate-500 truncate max-w-[12rem] mt-1"
+                                    title={resume.fileName}
+                                  >
+                                    文件：{resume.fileName}
+                                  </div>
+                                ) : null}
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-3 py-3 font-mono text-xs whitespace-nowrap text-slate-700">
+                                <div className="inline-flex items-center gap-1.5">
+                                  <span>{resume.phone || <span className="text-slate-400">—</span>}</span>
+                                  {canEditContact ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => openContactEditModal(resume)}
+                                      className="inline-flex h-5 w-5 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-indigo-600"
+                                      title="修改姓名和手机号"
+                                      aria-label="修改姓名和手机号"
+                                    >
+                                      <Pencil className="h-3.5 w-3.5" />
+                                    </button>
+                                  ) : null}
+                                </div>
+                              </td>
+                              <td className="px-3 py-3 text-xs text-slate-700 max-w-[11rem] leading-snug">{resume.job}</td>
+                              <td className="px-3 py-3 tabular-nums text-center">
+                                <span
+                                  className={`inline-flex min-w-10 justify-center rounded-md px-2 py-1 text-xs font-semibold ${
+                                    resume.matchScore >= 80
+                                      ? 'bg-emerald-50 text-emerald-700'
+                                      : resume.matchScore >= 60
+                                        ? 'bg-amber-50 text-amber-700'
+                                        : 'bg-rose-50 text-rose-700'
+                                  }`}
                                 >
-                                  {contactSaving ? '保存中…' : '保存'}
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={contactSaving}
-                                  onClick={() => {
-                                    setContactEditId(null);
-                                    setContactEditError('');
-                                  }}
-                                  className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                                >
-                                  取消
-                                </button>
-                              </div>
-                            </div>
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
-                  <div className="w-full shrink-0 sm:w-48">
-                    <div className="mb-1 flex justify-between text-sm">
-                      <span className="flex items-center gap-1 font-medium text-slate-600">
-                        <BrainCircuit className="h-4 w-4 text-indigo-500" /> AI 匹配度
-                      </span>
-                      <span
-                        className={`font-bold ${
-                          resume.matchScore >= 80
-                            ? 'text-emerald-600'
-                            : resume.matchScore >= 60
-                              ? 'text-orange-500'
-                              : 'text-red-500'
-                        }`}
-                      >
-                        {resume.matchScore}分
-                      </span>
-                    </div>
-                    <div className="h-2 w-full rounded-full bg-slate-100">
-                      <div
-                        className={`h-2 rounded-full ${
-                          resume.matchScore >= 80
-                            ? 'bg-emerald-500'
-                            : resume.matchScore >= 60
-                              ? 'bg-orange-400'
-                              : 'bg-red-400'
-                        }`}
-                        style={{ width: `${resume.matchScore}%` }}
-                      />
-                    </div>
-                  </div>
-                  <div className="flex w-full shrink-0 flex-col gap-2 sm:w-auto sm:flex-row sm:justify-end">
-                    <button
-                      type="button"
-                      onClick={() => setReportResume(resume)}
-                      className="rounded-lg bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-100 sm:py-1.5"
-                    >
-                      查看报告
-                    </button>
-                    {resume.matchScore >= 60 ? (
-                      <button
-                        type="button"
-                        onClick={() => handleInviteFromResume(resume)}
-                        disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
-                        className="rounded-lg bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-40 sm:py-1.5"
-                      >
-                        发起面试
-                      </button>
-                    ) : null}
-                  </div>
+                                  {resume.matchScore}
+                                </span>
+                              </td>
+                              <td className="px-3 py-3 text-xs text-slate-600 max-w-[9rem] leading-snug">
+                                <span className="inline-flex rounded-md bg-slate-100 px-2 py-1 text-slate-700">{resume.status}</span>
+                              </td>
+                              <td className="px-3 py-3 text-xs whitespace-nowrap">
+                                {resume.flowStage ? (
+                                  <span className="inline-flex rounded-md bg-indigo-50 px-2 py-1 font-medium text-indigo-700">
+                                    {resume.flowStage}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400">—</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-3 text-sm text-slate-900 font-medium">{uploaderLabel}</td>
+                              <td className="px-3 py-3 text-xs text-slate-500 whitespace-nowrap tabular-nums">
+                                {resume.uploadTime}
+                              </td>
+                              <td className="px-3 py-3 text-right whitespace-nowrap">
+                                <div className="inline-flex flex-wrap justify-end gap-1.5 max-w-[190px]">
+                                  <button
+                                    type="button"
+                                    onClick={() => setPlainModalResume(resume)}
+                                    className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 shadow-[0_1px_0_0_rgba(15,23,42,0.03)] hover:bg-slate-50"
+                                  >
+                                    查看简历
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setReportResume(resume)}
+                                    className="rounded-md bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+                                  >
+                                    查看报告
+                                  </button>
+                                  {resume.matchScore >= 60 ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleInviteFromResume(resume)}
+                                      disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
+                                      className="rounded-md bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"
+                                    >
+                                      发起面试
+                                    </button>
+                                  ) : null}
+                                </div>
+                              </td>
+                            </tr>
+                          </React.Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
-              );
-              })}
+              ) : null}
             </div>
             {apiBase && hasToken && filteredResumes.length > 0 ? (
               <ListPaginationBar
@@ -5018,6 +5140,96 @@ function ResumeScreeningView({
           </div>
         </div>
       </div>
+
+      <AnimatePresence>
+        {contactEditResume ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[62] flex items-center justify-center p-4 bg-slate-900/50"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="contact-edit-modal-title"
+            onClick={() => !contactSaving && setContactEditResume(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              transition={{ duration: 0.2 }}
+              className="bg-white rounded-xl shadow-xl border border-slate-200 w-full max-w-md flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-4 px-6 py-4 border-b border-slate-100">
+                <div>
+                  <h3 id="contact-edit-modal-title" className="text-lg font-bold text-slate-900">修改姓名与手机号</h3>
+                  <p className="mt-0.5 text-xs text-slate-500">{contactEditResume.job || '—'}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => !contactSaving && setContactEditResume(null)}
+                  className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                  aria-label="关闭"
+                  disabled={contactSaving}
+                >
+                  <XCircle className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="px-6 py-4 space-y-3">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-600">姓名</label>
+                  <input
+                    type="text"
+                    value={contactDraft.name}
+                    onChange={(e) => setContactDraft((d) => ({ ...d, name: e.target.value }))}
+                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                    placeholder="请输入候选人姓名"
+                    disabled={contactSaving}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-600">手机号</label>
+                  <input
+                    type="tel"
+                    inputMode="numeric"
+                    value={contactDraft.phone}
+                    onChange={(e) => setContactDraft((d) => ({ ...d, phone: e.target.value }))}
+                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                    placeholder="可留空"
+                    disabled={contactSaving}
+                  />
+                  <p className="mt-1 text-[11px] text-slate-500">11 位大陆手机号会自动规范化，留空表示清空。</p>
+                </div>
+                {contactEditError ? <p className="text-xs text-red-600">{contactEditError}</p> : null}
+              </div>
+              <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 rounded-b-xl flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!contactSaving) {
+                      setContactEditResume(null);
+                      setContactEditError('');
+                    }
+                  }}
+                  className={btnSecondarySm}
+                  disabled={contactSaving}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void saveScreeningContact()}
+                  className={btnSaveSm}
+                  disabled={contactSaving}
+                >
+                  {contactSaving ? '保存中…' : '保存'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
 
       <AnimatePresence>
         {inviteModal ? (
@@ -5086,6 +5298,69 @@ function ResumeScreeningView({
                   className={btnSaveSm}
                 >
                   知道了
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {plainModalResume ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[55] flex items-center justify-center p-4 bg-slate-900/50"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="resume-plain-modal-title"
+            onClick={() => setPlainModalResume(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              transition={{ duration: 0.2 }}
+              className="bg-white rounded-xl shadow-xl border border-slate-200 w-full max-w-3xl max-h-[min(88vh,720px)] flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-slate-100 shrink-0">
+                <div className="min-w-0">
+                  <h3 id="resume-plain-modal-title" className="text-lg font-bold text-slate-900 truncate">
+                    简历正文 · {plainModalResume.name}
+                  </h3>
+                  <p className="mt-0.5 text-xs text-slate-500 truncate">
+                    {plainModalResume.job}
+                    {plainModalResume.fileName ? ` · ${plainModalResume.fileName}` : ''}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPlainModalResume(null)}
+                  className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors shrink-0"
+                  aria-label="关闭"
+                >
+                  <XCircle className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="px-5 py-2 border-b border-slate-50 shrink-0">
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  以下为解析后的纯文本（列表接口最多返回约前 1.2 万字符，与库内正文开头一致）。更长内容请在数据库或后续导出中查看。
+                </p>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4">
+                <pre className="whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-800 font-sans">
+                  {plainModalResume.resumePlainPreview?.trim() || '（无正文或未入库）'}
+                </pre>
+              </div>
+              <div className="px-5 py-3 border-t border-slate-100 bg-slate-50/80 rounded-b-xl flex justify-end shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setPlainModalResume(null)}
+                  className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors"
+                >
+                  关闭
                 </button>
               </div>
             </motion.div>

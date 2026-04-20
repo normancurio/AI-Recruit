@@ -9,6 +9,12 @@ import { URL } from 'node:url';
 import dotenv from 'dotenv';
 import mysql from 'mysql2/promise';
 import type { ResultSetHeader, RowDataPacket } from 'mysql2/promise';
+import {
+  normalizeJobLevel,
+  normalizeJobTitle,
+  jobLevelValidationMessage,
+  jobTitleValidationMessage
+} from './shared/jobTaxonomy';
 
 const envLocalPath = path.resolve(process.cwd(), '.env.local');
 if (fs.existsSync(envLocalPath)) {
@@ -706,15 +712,21 @@ async function startServer() {
   app.post('/api/jobs/generate-jd', async (req, res) => {
     try {
       const body = req.body as Record<string, unknown> | null;
-      const title = String(body?.title || '').trim();
-      const level = String(body?.level || '').trim();
-      if (!title || !level) {
+      const titleNorm = normalizeJobTitle(String(body?.title || ''));
+      const levelNorm = normalizeJobLevel(String(body?.level || ''));
+      if (!String(body?.title || '').trim() || !String(body?.level || '').trim()) {
         res.status(400).json({ message: '请填写岗位名称与级别后再生成 JD' });
+        return;
+      }
+      if (!titleNorm || !levelNorm) {
+        res
+          .status(400)
+          .json({ message: !titleNorm ? jobTitleValidationMessage() : jobLevelValidationMessage() });
         return;
       }
       const location = String(body?.location || '').trim();
       const salary = String(body?.salary || '').trim();
-      const jdText = await generateJobJdDashScope({ title, level, location, salary });
+      const jdText = await generateJobJdDashScope({ title: titleNorm, level: levelNorm, location, salary });
       res.json({ jdText });
     } catch (e) {
       console.error('[POST /api/jobs/generate-jd]', e);
@@ -725,10 +737,12 @@ async function startServer() {
   app.post('/api/jobs', async (req, res) => {
     try {
       const body = req.body as Record<string, unknown> | null;
-      const title = String(body?.title || '').trim();
+      const titleNorm = normalizeJobTitle(String(body?.title || ''));
       let jobCode = String(body?.jobCode || '').trim().toUpperCase();
-      if (!title) {
-        res.status(400).json({ message: '岗位名称必填' });
+      if (!titleNorm) {
+        res.status(400).json({
+          message: String(body?.title || '').trim() ? jobTitleValidationMessage() : '岗位名称必填'
+        });
         return;
       }
       const locationReq = String(body?.location ?? '').trim();
@@ -738,8 +752,13 @@ async function startServer() {
         res.status(400).json({ message: '工作地点必填' });
         return;
       }
-      if (!levelReq) {
+      if (!levelReq.trim()) {
         res.status(400).json({ message: '级别必填' });
+        return;
+      }
+      const levelNorm = normalizeJobLevel(levelReq);
+      if (!levelNorm) {
+        res.status(400).json({ message: jobLevelValidationMessage() });
         return;
       }
       if (!salaryReq) {
@@ -765,7 +784,7 @@ async function startServer() {
         Number.isFinite(rawDemand) && rawDemand > 0 ? Math.min(Math.floor(rawDemand), 99999) : 1;
       const location = locationReq || null;
       const skills = String(body?.skills ?? '').trim() || null;
-      const level = levelReq || null;
+      const level = levelNorm;
       const salary = salaryReq || null;
       const recruitersJson = normalizeRecruitersForDb(body?.recruiters);
       const hasClaim = await jobsHaveClaimedBy(bizPool);
@@ -777,7 +796,7 @@ async function startServer() {
           [
             projectId,
             jobCode,
-            title,
+            titleNorm,
             department,
             jdText,
             demand,
@@ -796,7 +815,7 @@ async function startServer() {
           [
             projectId,
             jobCode,
-            title,
+            titleNorm,
             department,
             jdText,
             demand,
@@ -832,9 +851,11 @@ async function startServer() {
         return;
       }
       const body = req.body as Record<string, unknown>;
-      const title = String(body?.title ?? '').trim();
-      if (!title) {
-        res.status(400).json({ message: '岗位名称必填' });
+      const titleNorm = normalizeJobTitle(String(body?.title ?? ''));
+      if (!titleNorm) {
+        res.status(400).json({
+          message: String(body?.title ?? '').trim() ? jobTitleValidationMessage() : '岗位名称必填'
+        });
         return;
       }
       const locationReq = String(body?.location ?? '').trim();
@@ -844,8 +865,13 @@ async function startServer() {
         res.status(400).json({ message: '工作地点必填' });
         return;
       }
-      if (!levelReq) {
+      if (!levelReq.trim()) {
         res.status(400).json({ message: '级别必填' });
+        return;
+      }
+      const levelNorm = normalizeJobLevel(levelReq);
+      if (!levelNorm) {
+        res.status(400).json({ message: jobLevelValidationMessage() });
         return;
       }
       if (!salaryReq) {
@@ -873,7 +899,7 @@ async function startServer() {
         Number.isFinite(rawDemand) && rawDemand > 0 ? Math.min(Math.floor(rawDemand), 99999) : 1;
       const location = locationReq;
       const skills = String(body?.skills ?? '').trim();
-      const level = levelReq;
+      const level = levelNorm;
       const salary = salaryReq;
       const recruitersJson =
         body?.recruiters !== undefined ? normalizeRecruitersForDb(body.recruiters) : undefined;
@@ -881,7 +907,7 @@ async function startServer() {
       const fields: string[] = [];
       const vals: unknown[] = [];
       fields.push('title=?');
-      vals.push(title);
+      vals.push(titleNorm);
       fields.push('department=?');
       vals.push(department || null);
       fields.push('jd_text=?');
