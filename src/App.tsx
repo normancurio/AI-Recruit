@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -723,17 +723,30 @@ export default function App() {
   const [expandedMenus, setExpandedMenus] = useState<string[]>(['projects', 'recruitment', 'system']);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
+  useLayoutEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (window.matchMedia('(min-width: 768px)').matches) {
+      setMobileNavOpen(true);
+    }
+  }, []);
+
   const navigateMenu = useCallback((id: string) => {
     setActiveMenu(id);
-    setMobileNavOpen(false);
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches) {
+      setMobileNavOpen(false);
+    }
   }, []);
 
   useEffect(() => {
     if (!mobileNavOpen) return;
+    const isMobile = typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setMobileNavOpen(false);
     };
     window.addEventListener('keydown', onKey);
+    if (!isMobile) {
+      return () => window.removeEventListener('keydown', onKey);
+    }
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     return () => {
@@ -741,15 +754,6 @@ export default function App() {
       document.body.style.overflow = prev;
     };
   }, [mobileNavOpen]);
-
-  useEffect(() => {
-    const mq = window.matchMedia('(min-width: 768px)');
-    const onChange = () => {
-      if (mq.matches) setMobileNavOpen(false);
-    };
-    mq.addEventListener('change', onChange);
-    return () => mq.removeEventListener('change', onChange);
-  }, []);
 
   const submitHrLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1091,13 +1095,13 @@ export default function App() {
       <div className="min-h-screen min-h-[100dvh] bg-slate-50 flex">
       {mobileNavOpen ? (
         <div
-          className="fixed inset-0 z-20 bg-slate-900/50 md:hidden"
+          className="fixed inset-0 z-20 bg-slate-900/50 md:bg-transparent md:pointer-events-none"
           role="presentation"
           onClick={() => setMobileNavOpen(false)}
         />
       ) : null}
       <aside
-        className={`fixed md:static inset-y-0 left-0 z-30 flex h-[100dvh] md:h-auto w-64 max-w-[min(100vw,16rem)] flex-col bg-slate-900 text-slate-300 shadow-xl transition-transform duration-200 ease-out md:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-30 flex h-[100dvh] w-64 max-w-[min(100vw,16rem)] flex-col bg-slate-900 text-slate-300 shadow-xl transition-transform duration-200 ease-out ${
           mobileNavOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
@@ -1108,7 +1112,7 @@ export default function App() {
           </div>
           <button
             type="button"
-            className="shrink-0 rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white md:hidden"
+            className="shrink-0 rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white"
             onClick={() => setMobileNavOpen(false)}
             aria-label="关闭菜单"
           >
@@ -1181,7 +1185,7 @@ export default function App() {
           <div className="flex min-w-0 items-center gap-2">
             <button
               type="button"
-              className="shrink-0 rounded-lg p-2 text-slate-600 hover:bg-slate-100 md:hidden"
+              className="shrink-0 rounded-lg p-2 text-slate-600 hover:bg-slate-100"
               onClick={() => setMobileNavOpen(true)}
               aria-label="打开菜单"
             >
@@ -5184,13 +5188,13 @@ function ResumeScreeningView({
           </div>
         </div>
 
-        <div>
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden h-full flex flex-col">
+        <div className="min-w-0">
+          <div className="flex h-full min-w-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
             <div className="flex flex-row items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 sm:px-6 sm:py-4">
               <h3 className="font-bold text-slate-900">AI 筛查结果</h3>
               <span className="shrink-0 text-xs text-slate-500 sm:text-sm">当前列表 {filteredResumes.length} 条</span>
             </div>
-            <div className="flex-1 space-y-3 overflow-auto p-2 sm:p-4">
+            <div className="flex-1 space-y-3 overflow-x-hidden overflow-y-auto p-2 sm:p-4">
               {screenListError ? (
                 <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">{screenListError}</div>
               ) : null}
@@ -5207,19 +5211,19 @@ function ResumeScreeningView({
                 </p>
               ) : null}
               {pagedResumes.length > 0 ? (
-                <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-                  <table className="min-w-[900px] w-full text-left text-sm text-slate-800">
+                <div className="max-w-full overflow-x-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+                  <table className="w-full table-fixed text-left text-sm text-slate-800">
                     <thead className="bg-slate-50/95 text-slate-600 border-b border-slate-200 text-xs sticky top-0 z-10">
                       <tr>
-                        <th className="px-3 py-3 font-medium whitespace-nowrap min-w-[12rem]">候选人</th>
-                        <th className="px-3 py-3 font-medium whitespace-nowrap min-w-[8rem]">手机</th>
-                        <th className="px-3 py-3 font-medium min-w-[8rem]">匹配岗位</th>
-                        <th className="px-3 py-3 font-medium whitespace-nowrap text-center min-w-[4.5rem]">匹配分</th>
-                        <th className="px-3 py-3 font-medium min-w-[7rem]">AI 结论</th>
-                        <th className="px-3 py-3 font-medium whitespace-nowrap min-w-[6.5rem]">流程</th>
-                        <th className="px-3 py-3 font-medium whitespace-nowrap min-w-[5rem]">上传人</th>
-                        <th className="px-3 py-3 font-medium whitespace-nowrap min-w-[9rem]">上传时间</th>
-                        <th className="px-3 py-3 font-medium whitespace-nowrap text-right min-w-[11rem]">操作</th>
+                        <th className="w-[13%] px-2 py-3 font-medium">候选人</th>
+                        <th className="w-[11%] px-2 py-3 font-medium">手机</th>
+                        <th className="w-[14%] px-2 py-3 font-medium">匹配岗位</th>
+                        <th className="w-[7%] px-2 py-3 font-medium text-center">匹配分</th>
+                        <th className="w-[12%] px-2 py-3 font-medium">AI 结论</th>
+                        <th className="w-[10%] px-2 py-3 font-medium">流程</th>
+                        <th className="w-[9%] px-2 py-3 font-medium">上传人</th>
+                        <th className="w-[10%] px-2 py-3 font-medium">上传时间</th>
+                        <th className="w-[14%] px-2 py-3 font-medium text-right">操作</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -5231,19 +5235,19 @@ function ResumeScreeningView({
                         return (
                           <React.Fragment key={resume.id}>
                             <tr className={`align-top transition-colors hover:bg-indigo-50/40 ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}`}>
-                              <td className="px-3 py-3">
-                                <div className="flex items-start gap-2.5">
+                              <td className="max-w-0 px-2 py-3">
+                                <div className="flex items-start gap-2">
                                   <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[11px] font-semibold text-indigo-700">
                                     {String(resume.name || '候').trim().slice(0, 1)}
                                   </span>
-                                  <div className="min-w-0">
-                                    <div className="flex items-center gap-1.5">
-                                      <div className="font-semibold text-slate-900 leading-tight truncate max-w-[10rem]">{resume.name}</div>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex min-w-0 items-center gap-1">
+                                      <div className="truncate font-semibold leading-tight text-slate-900">{resume.name}</div>
                                       {canEditContact ? (
                                         <button
                                           type="button"
                                           onClick={() => openContactEditModal(resume)}
-                                          className="inline-flex h-5 w-5 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-indigo-600"
+                                          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-indigo-600"
                                           title="修改姓名和手机号"
                                           aria-label="修改姓名和手机号"
                                         >
@@ -5251,20 +5255,12 @@ function ResumeScreeningView({
                                         </button>
                                       ) : null}
                                     </div>
-                                {resume.fileName ? (
-                                  <div
-                                    className="text-[11px] text-slate-500 truncate max-w-[12rem] mt-1"
-                                    title={resume.fileName}
-                                  >
-                                    文件：{resume.fileName}
-                                  </div>
-                                ) : null}
                                   </div>
                                 </div>
                               </td>
-                              <td className="px-3 py-3 font-mono text-xs whitespace-nowrap text-slate-700">
-                                <div className="inline-flex items-center gap-1.5">
-                                  <span>{resume.phone || <span className="text-slate-400">—</span>}</span>
+                              <td className="max-w-0 px-2 py-3 font-mono text-xs text-slate-700">
+                                <div className="inline-flex min-w-0 max-w-full items-center gap-1">
+                                  <span className="truncate">{resume.phone || <span className="text-slate-400">—</span>}</span>
                                   {canEditContact ? (
                                     <button
                                       type="button"
@@ -5278,8 +5274,10 @@ function ResumeScreeningView({
                                   ) : null}
                                 </div>
                               </td>
-                              <td className="px-3 py-3 text-xs text-slate-700 max-w-[11rem] leading-snug">{resume.job}</td>
-                              <td className="px-3 py-3 tabular-nums text-center">
+                              <td className="max-w-0 px-2 py-3 text-xs leading-snug text-slate-700">
+                                <div className="line-clamp-3 break-words">{resume.job}</div>
+                              </td>
+                              <td className="px-2 py-3 text-center tabular-nums">
                                 <span
                                   className={`inline-flex min-w-10 justify-center rounded-md px-2 py-1 text-xs font-semibold ${
                                     resume.matchScore >= 80
@@ -5292,24 +5290,30 @@ function ResumeScreeningView({
                                   {resume.matchScore}
                                 </span>
                               </td>
-                              <td className="px-3 py-3 text-xs text-slate-600 max-w-[9rem] leading-snug">
-                                <span className="inline-flex rounded-md bg-slate-100 px-2 py-1 text-slate-700">{resume.status}</span>
+                              <td className="max-w-0 px-2 py-3 text-xs leading-snug text-slate-600">
+                                <span className="inline-block max-w-full truncate rounded-md bg-slate-100 px-1.5 py-0.5 text-slate-700">
+                                  {resume.status}
+                                </span>
                               </td>
-                              <td className="px-3 py-3 text-xs whitespace-nowrap">
+                              <td className="max-w-0 px-2 py-3 text-xs">
                                 {resume.flowStage ? (
-                                  <span className="inline-flex rounded-md bg-indigo-50 px-2 py-1 font-medium text-indigo-700">
+                                  <span className="inline-block max-w-full truncate rounded-md bg-indigo-50 px-1.5 py-0.5 font-medium text-indigo-700">
                                     {resume.flowStage}
                                   </span>
                                 ) : (
                                   <span className="text-slate-400">—</span>
                                 )}
                               </td>
-                              <td className="px-3 py-3 text-sm text-slate-900 font-medium">{uploaderLabel}</td>
-                              <td className="px-3 py-3 text-xs text-slate-500 whitespace-nowrap tabular-nums">
-                                {resume.uploadTime}
+                              <td className="max-w-0 px-2 py-3 text-sm font-medium text-slate-900">
+                                <div className="truncate" title={uploaderLabel}>
+                                  {uploaderLabel}
+                                </div>
                               </td>
-                              <td className="px-3 py-3 text-right whitespace-nowrap">
-                                <div className="inline-flex flex-wrap justify-end gap-1.5 max-w-[190px]">
+                              <td className="max-w-0 px-2 py-3 text-xs tabular-nums text-slate-500">
+                                <div className="line-clamp-2 break-all">{resume.uploadTime}</div>
+                              </td>
+                              <td className="max-w-0 px-2 py-3 text-right">
+                                <div className="flex flex-col items-stretch gap-1">
                                   <button
                                     type="button"
                                     onClick={() => setReportResume(resume)}
