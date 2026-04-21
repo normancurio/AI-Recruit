@@ -389,6 +389,73 @@ const JOBS = {
 const RESUME_PLAINTEXT_MAX_SAVE = 60000
 
 const PERSONALIZED_INTERVIEW_TOTAL = 6
+/** Docker 建议挂载卷并可选设置 RESUME_STORAGE_DIR=/data/resumes（见 docker-compose.yml） */
+const RESUME_STORAGE_DIR = (() => {
+  const fromEnv = process.env.RESUME_STORAGE_DIR?.trim()
+  if (!fromEnv) return path.resolve(process.cwd(), 'storage', 'resumes')
+  return path.isAbsolute(fromEnv) ? fromEnv : path.resolve(process.cwd(), fromEnv)
+})()
+
+function ensureResumeStorageDir(): void {
+  try {
+    fs.mkdirSync(RESUME_STORAGE_DIR, { recursive: true })
+  } catch (e) {
+    console.warn('[resume-storage] mkdir failed', e)
+  }
+}
+
+function safeResumeExt(fileName: string): string {
+  const ext = path.extname(String(fileName || '')).toLowerCase()
+  if (ext && /^[.\w-]{1,16}$/.test(ext)) return ext
+  return '.bin'
+}
+
+function saveResumeOriginalFile(file: { buffer: Buffer; originalname?: string; mimetype?: string }): {
+  /** 仅文件名，写入 DB，避免机器绝对路径随部署失效 */
+  storageKey: string
+  absPath: string
+  mimeType: string
+  sizeBytes: number
+  originalName: string
+} {
+  ensureResumeStorageDir()
+  const originalName = normalizeMultipartFilename(file.originalname || 'resume').slice(0, 255) || 'resume'
+  const ext = safeResumeExt(originalName)
+  const key = `${Date.now()}-${crypto.randomUUID()}${ext}`
+  const absPath = path.join(RESUME_STORAGE_DIR, key)
+  fs.writeFileSync(absPath, file.buffer)
+  return {
+    storageKey: key,
+    absPath,
+    mimeType: String(file.mimetype || 'application/octet-stream').trim() || 'application/octet-stream',
+    sizeBytes: Number(file.buffer?.length || 0),
+    originalName
+  }
+}
+
+/** 将库内 storage_path（历史可能为绝对路径）解析为当前可读绝对路径 */
+function resolveResumeStorageAbsPath(raw: unknown): string | null {
+  const t = String(raw ?? '')
+    .trim()
+    .replace(/\0/g, '')
+  if (!t) return null
+  if (path.isAbsolute(t)) {
+    try {
+      if (fs.existsSync(t)) return t
+    } catch {
+      /* ignore */
+    }
+  }
+  const base = path.basename(t)
+  if (!base || base === '.' || base === '..') return null
+  if (!/^[\w.-]{4,240}$/.test(base)) return null
+  const abs = path.join(RESUME_STORAGE_DIR, base)
+  try {
+    return fs.existsSync(abs) ? abs : null
+  } catch {
+    return null
+  }
+}
 
 function packResumeScreeningRow(row: { resume_plaintext?: string | null; report_summary?: string | null }): string {
   const full = String(row.resume_plaintext || '').trim()
@@ -820,7 +887,9 @@ function buildResumeEvalPromptForServer(params: {
     '必须输出字段：schema_version,job_type,hard_gate,dimension_scores,total_score,strengths,risks,decision,summary,candidate_profile,candidate_name。' +
     'candidate_name：从简历中识别的候选人真实姓名（2～30 个字符）；能识别则必填，无法识别时填空字符串 ""（不要用「未知」「候选人」等占位）。' +
     'candidate_profile 为对象，从简历原文抽取候选人静态信息（无依据填 null；字符串可填空串）；其中可含 name 或「姓名」键，与 candidate_name 一致即可。' +
-    'gender（男|女|未知）、age（整数|null）、work_experience_years（工作年限年数|null）、major、education、current_position（现任或最近职位名称，勿含公司名）、' +
+    '必填尽量填写：school（毕业/就读院校）、job_title（应聘/求职岗位，勿写 JD 要求）、email、candidate_phone、current_position（现任或最近职位，勿含公司名）、' +
+    'gender（男|女|未知）、age（整数|null）、work_experience_years（工作年限年数|null）、major、education、' +
+    'current_address、graduation_date、arrival_time、id_number、is_third_party、' +
     'has_degree、is_unified_enrollment、expected_salary、verifiable、recruitment_channel、resume_uploaded（布尔，无依据 null）。' +
     '禁止编造：无法从简历判断的字段必须为 null。' +
     `dimension_scores 必须包含：${dimKeys}。` +
@@ -859,6 +928,18 @@ function sanitizeCandidateProfile(raw: unknown): Record<string, unknown> | undef
   const personName = pickProfileStr(p.name ?? p['姓名'] ?? p.candidate_name) || null
   const posRaw = pickProfileStr(p.current_position ?? p.position ?? p['职位'] ?? p.current_job)
   const current_position = posRaw ? normalizeExtractedJobTitleForDisplay(posRaw) : null
+  const jobTitleRaw = pickProfileStr(p.job_title ?? p['岗位'] ?? p.expected_job ?? p.intent_job ?? p.position_title)
+  const job_title = jobTitleRaw ? normalizeExtractedJobTitleForDisplay(jobTitleRaw) : null
+  const school = pickProfileStr(p.school ?? p['学校'] ?? p.university ?? p.college) || null
+  const email = pickProfileStr(p.email ?? p.mail ?? p['邮箱'] ?? p.E_mail) || null
+  const current_address = pickProfileStr(p.current_address ?? p.address ?? p['现住址'] ?? p['地址']) || null
+  const graduation_date = pickProfileStr(p.graduation_date ?? p['毕业时间']) || null
+  const arrival_time = pickProfileStr(p.arrival_time ?? p['到岗时间']) || null
+  const id_number = pickProfileStr(p.id_number ?? p.id_no ?? p['证件号码'] ?? p['身份证号']) || null
+  const phoneNorm =
+    normalizeCnMobile(String(p.candidate_phone ?? p.phone ?? p.mobile ?? '').trim()) ||
+    pickProfileStr(p.candidate_phone ?? p.phone ?? p.mobile) ||
+    null
   const recruitment_channel = pickProfileStr(p.recruitment_channel ?? p['招聘渠道']) || null
   const expected_salary = pickProfileStr(p.expected_salary ?? p['期望薪资']) || null
   const out: Record<string, unknown> = {
@@ -868,6 +949,15 @@ function sanitizeCandidateProfile(raw: unknown): Record<string, unknown> | undef
     work_experience_years: pickProfileInt(p.work_experience_years ?? p.workYears ?? p['工作经验']),
     major,
     education,
+    school: school || null,
+    job_title: job_title || null,
+    email: email || null,
+    current_address: current_address || null,
+    graduation_date: graduation_date || null,
+    arrival_time: arrival_time || null,
+    id_number: id_number || null,
+    is_third_party: pickProfileBool(p.is_third_party ?? p['是否第三方']),
+    candidate_phone: phoneNorm,
     current_position,
     has_degree: pickProfileBool(p.has_degree ?? p['是否有学位']),
     is_unified_enrollment: pickProfileBool(p.is_unified_enrollment ?? p['是否统招']),
@@ -878,6 +968,75 @@ function sanitizeCandidateProfile(raw: unknown): Record<string, unknown> | undef
   }
   const hasAny = Object.values(out).some((x) => x !== null && x !== undefined && x !== '')
   return hasAny ? out : undefined
+}
+
+type ResumeProfileRow = {
+  candidateName: string
+  gender: string | null
+  age: number | null
+  workExperienceYears: number | null
+  jobTitle: string | null
+  school: string | null
+  candidatePhone: string | null
+  email: string | null
+  currentAddress: string | null
+  major: string | null
+  education: string | null
+  currentPosition: string | null
+  graduationDate: string | null
+  arrivalTime: string | null
+  idNumber: string | null
+  isThirdParty: number | null
+  expectedSalary: string | null
+  recruitmentChannel: string | null
+  hasDegree: number | null
+  isUnifiedEnrollment: number | null
+  verifiable: number | null
+  resumeUploaded: number | null
+}
+
+function profileBoolToTinyInt(v: unknown): number | null {
+  const b = pickProfileBool(v)
+  if (b === null) return null
+  return b ? 1 : 0
+}
+
+function resumeProfileRowFromValues(input: {
+  candidateName?: unknown
+  profile?: unknown
+}): ResumeProfileRow {
+  const p =
+    input.profile && typeof input.profile === 'object' && !Array.isArray(input.profile)
+      ? (input.profile as Record<string, unknown>)
+      : ({} as Record<string, unknown>)
+  const candidateName = sanitizeCandidateName(input.candidateName) || '候选人'
+  return {
+    candidateName,
+    gender: pickProfileStr(p.gender) || null,
+    age: pickProfileInt(p.age),
+    workExperienceYears: pickProfileInt(p.work_experience_years),
+    jobTitle: pickProfileStr(p.job_title ?? p.position ?? p['岗位']) || null,
+    school: pickProfileStr(p.school ?? p['学校']) || null,
+    candidatePhone:
+      normalizeCnMobile(String(p.candidate_phone ?? p.phone ?? p.mobile ?? '')) ||
+      pickProfileStr(p.candidate_phone ?? p.phone ?? p.mobile) ||
+      null,
+    email: pickProfileStr(p.email ?? p.mail ?? p['邮箱']) || null,
+    currentAddress: pickProfileStr(p.current_address ?? p.address ?? p['现住址']) || null,
+    major: pickProfileStr(p.major) || null,
+    education: pickProfileStr(p.education) || null,
+    currentPosition: pickProfileStr(p.current_position ?? p.position ?? p['职位']) || null,
+    graduationDate: pickProfileStr(p.graduation_date ?? p['毕业时间']) || null,
+    arrivalTime: pickProfileStr(p.arrival_time ?? p['到岗时间']) || null,
+    idNumber: pickProfileStr(p.id_number ?? p.id_no ?? p['证件号码']) || null,
+    isThirdParty: profileBoolToTinyInt(p.is_third_party ?? p['是否第三方']),
+    expectedSalary: pickProfileStr(p.expected_salary) || null,
+    recruitmentChannel: pickProfileStr(p.recruitment_channel) || null,
+    hasDegree: profileBoolToTinyInt(p.has_degree),
+    isUnifiedEnrollment: profileBoolToTinyInt(p.is_unified_enrollment),
+    verifiable: profileBoolToTinyInt(p.verifiable),
+    resumeUploaded: profileBoolToTinyInt(p.resume_uploaded)
+  }
 }
 
 const PLACEHOLDER_NAMES = new Set(
@@ -944,7 +1103,7 @@ function normalizeResumeEvalDimension(
   }
 }
 
-function parseResumeEvalToScreeningResult(raw: string): ResumeScreeningAiResult | null {
+function parseResumeEvalToScreeningResult(raw: string, resumePlain?: string): ResumeScreeningAiResult | null {
   try {
     const cleaned = String(raw || '')
       .trim()
@@ -1002,13 +1161,15 @@ function parseResumeEvalToScreeningResult(raw: string): ResumeScreeningAiResult 
     const { candidate_profile: rawProfile, ...parsedRest } = parsed as Record<string, unknown> & {
       candidate_profile?: unknown
     }
-    const profile = sanitizeCandidateProfile(rawProfile)
+    const sanitized = sanitizeCandidateProfile(rawProfile)
+    const profileMerged = enrichCandidateProfileFromPlainText(sanitized, resumePlain?.trim() || '')
+    const profileFinal = profileRecordHasMeaningfulField(profileMerged) ? profileMerged : undefined
     const candidateNameAi = extractCandidateNameFromEvalParsed(parsed, rawProfile)
     const normalizedEval = {
       ...parsedRest,
       dimension_scores: dim,
       risks,
-      ...(profile ? { candidate_profile: profile } : {}),
+      ...(profileFinal ? { candidate_profile: profileFinal } : {}),
       ...(candidateNameAi ? { candidate_name: candidateNameAi } : {})
     }
     return {
@@ -1056,6 +1217,95 @@ function extractPhoneFromResumeText(text: string): string | null {
     }
   }
   return null
+}
+
+function extractEmailFromResumeText(text: string): string | null {
+  const slice = text.replace(/\r\n/g, '\n').slice(0, 28000)
+  const re = /\b[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}\b/g
+  const found = slice.match(re)
+  if (!found?.length) return null
+  const badDomains = new Set(['example.com', 'test.com', 'domain.com', 'email.com', 'yourname.com'])
+  for (const raw of found) {
+    const m = raw.trim()
+    const dom = m.split('@')[1]?.toLowerCase()
+    if (dom && badDomains.has(dom)) continue
+    if (m.length >= 5 && m.length <= 128) return m
+  }
+  return found[0].trim().length <= 128 ? found[0].trim() : null
+}
+
+/** 从简历正文抓取院校（常见标签 + 教育区块含「大学/学院」的行） */
+function extractSchoolFromResumeText(text: string): string | null {
+  const t = text.replace(/\r\n/g, '\n').replace(/[\t\u3000]+/g, ' ').slice(0, 26000)
+  const labeled: RegExp[] = [
+    /(?:毕业院校|本科院校|硕士院校|博士院校|就读院校|院校|学校)[:：\s\u3000]+([^\n\r,，;；|｜]{2,48})/,
+    /(?:学校名称|毕业学校)[:：\s\u3000]+([^\n\r,，;；|｜]{2,48})/
+  ]
+  for (const re of labeled) {
+    const m = t.match(re)
+    if (m?.[1]) {
+      const s = m[1].trim().replace(/\s{2,}/g, ' ').replace(/^[（(][^)）]*[)）]\s*/, '').slice(0, 80)
+      if (s.length >= 2 && !/^[:：\s]+$/.test(s) && !/^\d+$/.test(s)) return s
+    }
+  }
+  const lines = t.split('\n').map((l) => l.trim()).filter(Boolean)
+  let inEdu = false
+  for (let i = 0; i < Math.min(lines.length, 100); i++) {
+    const line = lines[i]
+    if (/^(教育背景|教育经历|学历信息|Education)/i.test(line)) inEdu = true
+    if (inEdu && /(大学|学院|学校)$/.test(line) && line.length >= 4 && line.length <= 44) {
+      if (!/^(专业|学历|本科|硕士|博士|时间|日期)/.test(line)) return line.slice(0, 80)
+    }
+  }
+  return null
+}
+
+/** 应聘/求职岗位（与 current_position 现任岗区分） */
+function extractJobIntentFromResumeText(text: string): string | null {
+  const t = text.replace(/\r\n/g, '\n').replace(/[\t\u3000]+/g, ' ').slice(0, 22000)
+  const patterns: RegExp[] = [
+    /(?:求职意向|应聘岗位|期望岗位|意向岗位|应聘职位|期望职位|目标岗位|求职岗位|意向职位|期望从事)[:：\s\u3000]+([^\n\r,，;；|｜]{2,48})/,
+    /(?:应聘|求职)[:：\s\u3000]+([^\n\r,，]{2,40}(?:工程师|开发|经理|主管|专员|设计师|分析师|顾问|总监|负责人|架构师|运营|产品))/
+  ]
+  for (const re of patterns) {
+    const m = t.match(re)
+    if (m?.[1]) {
+      const s = normalizeExtractedJobTitleForDisplay(m[1].trim().replace(/\s{2,}/g, ' ').slice(0, 64))
+      if (s.length >= 2) return s
+    }
+  }
+  return null
+}
+
+function profileRecordHasMeaningfulField(out: Record<string, unknown>): boolean {
+  return Object.values(out).some((x) => x !== null && x !== undefined && x !== '')
+}
+
+/** 在模型或清洗结果基础上，用正文正则补全缺失的学校/邮箱/应聘岗位等 */
+function enrichCandidateProfileFromPlainText(
+  base: Record<string, unknown> | undefined,
+  plain: string
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(base || {}) }
+  const pStr = (k: string) => pickProfileStr(out[k])
+  const clip = plain.replace(/\r\n/g, '\n')
+  if (!pStr('email')) {
+    const e = extractEmailFromResumeText(clip)
+    if (e) out.email = e
+  }
+  if (!pStr('school')) {
+    const s = extractSchoolFromResumeText(clip)
+    if (s) out.school = s
+  }
+  if (!pStr('job_title')) {
+    const j = extractJobIntentFromResumeText(clip)
+    if (j) out.job_title = j
+  }
+  if (!pStr('candidate_phone')) {
+    const ph = extractPhoneFromResumeText(clip)
+    if (ph) out.candidate_phone = ph
+  }
+  return out
 }
 
 function guessCandidateNameFromResume(text: string): string {
@@ -1110,15 +1360,18 @@ function fallbackResumeScreening(resumeText: string, jdText: string, jobTitle: s
   const matchScore = Math.min(100, Math.max(35, Math.round(42 + ratio * 58)))
   const dims = deriveResumeDimensionScores(matchScore)
   const phoneFound = extractPhoneFromResumeText(resumeText)
+  const heurProfile = enrichCandidateProfileFromPlainText({}, resumeText)
+  const hasHeurProfile = profileRecordHasMeaningfulField(heurProfile)
   const fallbackEval = {
     schema_version: 1,
     job_type: 'fallback',
     hard_gate: { passed: true, reasons: [] as string[] },
     decision: '建议备选',
     summary: '关键词回退：无大模型结构化简历字段。',
-    candidate_profile: {} as Record<string, unknown>,
-    note:
-      '未调用大模型或调用失败：仅根据岗位 JD 与简历文本的关键词重叠度估算分数；无 candidate_profile 抽取。配置 DASHSCOPE_API_KEY 并重启 dev:api 后可获得完整结构化。'
+    candidate_profile: hasHeurProfile ? heurProfile : ({} as Record<string, unknown>),
+    note: hasHeurProfile
+      ? '未调用大模型或调用失败：分数为关键词估算；已根据简历正文正则补全部分 candidate_profile（邮箱/院校/应聘岗位等）。配置 DASHSCOPE_API_KEY 后可获得完整 AI 评估。'
+      : '未调用大模型或调用失败：仅根据岗位 JD 与简历文本的关键词重叠度估算分数；未能从正文识别结构化字段（可能为扫描件 PDF）。配置 DASHSCOPE_API_KEY 并重启 dev:api 后可获得完整结构化。'
   }
   return {
     candidateName,
@@ -1134,6 +1387,17 @@ function fallbackResumeScreening(resumeText: string, jdText: string, jobTitle: s
   }
 }
 
+/** 部分 PDF 引擎会在相邻汉字间插入空格，导致「学校：清华大学」等模式匹配失败 */
+function normalizePdfExtractedText(s: string): string {
+  let t = s.replace(/\r\n/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '')
+  for (let i = 0; i < 8; i++) {
+    const next = t.replace(/([\u4e00-\u9fa5])\s([\u4e00-\u9fa5])/g, '$1$2')
+    if (next === t) break
+    t = next
+  }
+  return t.replace(/([:：])\s*\n\s*/g, '$1 ')
+}
+
 async function extractResumePlainText(buffer: Buffer, originalname: string, mimetype: string): Promise<string> {
   const ext = path.extname(originalname || '').toLowerCase()
   if (ext === '.txt' || mimetype === 'text/plain') {
@@ -1143,7 +1407,7 @@ async function extractResumePlainText(buffer: Buffer, originalname: string, mime
     const parser = new PDFParse({ data: buffer })
     try {
       const tr = await parser.getText()
-      return (tr.text || '').trim()
+      return normalizePdfExtractedText((tr.text || '').trim())
     } finally {
       await parser.destroy()
     }
@@ -1181,7 +1445,7 @@ async function runResumeScreeningWithAi(params: {
   })
   const raw = data?.choices?.[0]?.message?.content
   const text = typeof raw === 'string' ? raw : ''
-  const next = parseResumeEvalToScreeningResult(text)
+  const next = parseResumeEvalToScreeningResult(text, params.resumeText)
   if (next) return next
   return parseResumeScreeningAiJson(text)
 }
@@ -2611,6 +2875,7 @@ function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: bo
   const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username, s.created_at,
+              EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
               SUBSTRING(COALESCE(s.resume_plaintext,''), 1, 12000) AS resume_plaintext,
               lr.overall_score AS interview_overall_score,
               lr.passed AS interview_passed,
@@ -2650,6 +2915,7 @@ function resumeScreeningsPlainSql(withPipelineStage: boolean, projectId: string 
   const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username, s.created_at,
+              EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
               SUBSTRING(COALESCE(s.resume_plaintext,''), 1, 12000) AS resume_plaintext
        FROM resume_screenings s
        ${jobJoin}
@@ -2854,6 +3120,194 @@ app.patch('/api/admin/resume-screenings/:id', async (req, res) => {
     }
     console.error('[PATCH /api/admin/resume-screenings/:id]', ex.message, e)
     res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.get('/api/admin/resume-screenings/:id/profile', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const idNum = Number(String(req.params.id || '').trim())
+  if (!Number.isFinite(idNum) || idNum <= 0) return res.status(400).json({ message: 'invalid id' })
+  try {
+    const [rows] = await mysqlPool.query<any[]>(
+      `SELECT screening_id, candidate_name, gender, age, work_experience_years, job_title, school, candidate_phone,
+              email, current_address, major, education, current_position, graduation_date, arrival_time, id_number,
+              is_third_party, expected_salary, recruitment_channel, has_degree, is_unified_enrollment,
+              verifiable, resume_uploaded, updated_at
+       FROM resume_screening_profiles
+       WHERE screening_id=? LIMIT 1`,
+      [Math.floor(idNum)]
+    )
+    if (rows.length) return res.json({ data: rows[0] })
+    const [baseRows] = await mysqlPool.query<any[]>(
+      'SELECT id, candidate_name, evaluation_json FROM resume_screenings WHERE id=? LIMIT 1',
+      [Math.floor(idNum)]
+    )
+    if (!baseRows.length) return res.status(404).json({ message: '记录不存在' })
+    const base = baseRows[0] as { candidate_name?: unknown; evaluation_json?: unknown }
+    let evalObj: Record<string, unknown> = {}
+    try {
+      if (base.evaluation_json && typeof base.evaluation_json === 'object') evalObj = base.evaluation_json as Record<string, unknown>
+      else if (base.evaluation_json) evalObj = JSON.parse(String(base.evaluation_json))
+    } catch {
+      evalObj = {}
+    }
+    const row = resumeProfileRowFromValues({
+      candidateName: base.candidate_name,
+      profile: evalObj.candidate_profile
+    })
+    return res.json({
+      data: {
+        screening_id: Math.floor(idNum),
+        candidate_name: row.candidateName,
+        gender: row.gender,
+        age: row.age,
+        work_experience_years: row.workExperienceYears,
+        job_title: row.jobTitle,
+        school: row.school,
+        candidate_phone: row.candidatePhone,
+        email: row.email,
+        current_address: row.currentAddress,
+        major: row.major,
+        education: row.education,
+        current_position: row.currentPosition,
+        graduation_date: row.graduationDate,
+        arrival_time: row.arrivalTime,
+        id_number: row.idNumber,
+        is_third_party: row.isThirdParty,
+        expected_salary: row.expectedSalary,
+        recruitment_channel: row.recruitmentChannel,
+        has_degree: row.hasDegree,
+        is_unified_enrollment: row.isUnifiedEnrollment,
+        verifiable: row.verifiable,
+        resume_uploaded: row.resumeUploaded,
+        updated_at: null
+      }
+    })
+  } catch (e: unknown) {
+    const ex = e as { code?: string; errno?: number }
+    if (ex.code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({ message: '缺少结构化详情表，请执行 server/migration_resume_screening_profiles.sql' })
+    }
+    return res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.patch('/api/admin/resume-screenings/:id/profile', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const idNum = Number(String(req.params.id || '').trim())
+  if (!Number.isFinite(idNum) || idNum <= 0) return res.status(400).json({ message: 'invalid id' })
+  const row = resumeProfileRowFromValues({
+    candidateName: req.body?.candidate_name,
+    profile: req.body
+  })
+  try {
+    const [existRows] = await mysqlPool.query<RowDataPacket[]>('SELECT id FROM resume_screenings WHERE id=? LIMIT 1', [
+      Math.floor(idNum)
+    ])
+    if (!existRows.length) return res.status(404).json({ message: '记录不存在' })
+    await mysqlPool.query(
+      `INSERT INTO resume_screening_profiles
+         (screening_id, candidate_name, gender, age, work_experience_years, job_title, school, candidate_phone,
+          email, current_address, major, education, current_position, graduation_date, arrival_time, id_number,
+          is_third_party, expected_salary, recruitment_channel, has_degree, is_unified_enrollment,
+          verifiable, resume_uploaded)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE
+         candidate_name=VALUES(candidate_name),
+         gender=VALUES(gender),
+         age=VALUES(age),
+         work_experience_years=VALUES(work_experience_years),
+         job_title=VALUES(job_title),
+         school=VALUES(school),
+         candidate_phone=VALUES(candidate_phone),
+         email=VALUES(email),
+         current_address=VALUES(current_address),
+         major=VALUES(major),
+         education=VALUES(education),
+         current_position=VALUES(current_position),
+         graduation_date=VALUES(graduation_date),
+         arrival_time=VALUES(arrival_time),
+         id_number=VALUES(id_number),
+         is_third_party=VALUES(is_third_party),
+         expected_salary=VALUES(expected_salary),
+         recruitment_channel=VALUES(recruitment_channel),
+         has_degree=VALUES(has_degree),
+         is_unified_enrollment=VALUES(is_unified_enrollment),
+         verifiable=VALUES(verifiable),
+         resume_uploaded=VALUES(resume_uploaded),
+         updated_at=NOW()`,
+      [
+        Math.floor(idNum),
+        row.candidateName,
+        row.gender,
+        row.age,
+        row.workExperienceYears,
+        row.jobTitle,
+        row.school,
+        row.candidatePhone,
+        row.email,
+        row.currentAddress,
+        row.major,
+        row.education,
+        row.currentPosition,
+        row.graduationDate,
+        row.arrivalTime,
+        row.idNumber,
+        row.isThirdParty,
+        row.expectedSalary,
+        row.recruitmentChannel,
+        row.hasDegree,
+        row.isUnifiedEnrollment,
+        row.verifiable,
+        row.resumeUploaded
+      ]
+    )
+    await mysqlPool.query('UPDATE resume_screenings SET candidate_name=?, candidate_phone=? WHERE id=?', [
+      row.candidateName,
+      row.candidatePhone,
+      Math.floor(idNum)
+    ])
+    res.json({ ok: true })
+  } catch (e: unknown) {
+    const ex = e as { code?: string; errno?: number }
+    if (ex.code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({ message: '缺少结构化详情表，请执行 server/migration_resume_screening_profiles.sql' })
+    }
+    return res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.get('/api/admin/resume-screenings/:id/file', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const idNum = Number(String(req.params.id || '').trim())
+  if (!Number.isFinite(idNum) || idNum <= 0) return res.status(400).json({ message: 'invalid id' })
+  const mode = String(req.query.mode || '').trim().toLowerCase()
+  const download = mode === 'download'
+  try {
+    const [rows] = await mysqlPool.query<any[]>(
+      `SELECT original_name, mime_type, storage_path
+       FROM resume_screening_files
+       WHERE screening_id=? LIMIT 1`,
+      [Math.floor(idNum)]
+    )
+    if (!rows.length) return res.status(404).json({ message: '未找到原始简历文件' })
+    const r = rows[0] as { original_name?: unknown; mime_type?: unknown; storage_path?: unknown }
+    const abs = resolveResumeStorageAbsPath(r.storage_path)
+    if (!abs) return res.status(404).json({ message: '简历文件不存在或已被移除' })
+    const mime = String(r.mime_type || '').trim() || 'application/octet-stream'
+    const name = normalizeMultipartFilename(String(r.original_name || 'resume.bin')).slice(0, 255) || 'resume.bin'
+    res.setHeader('Content-Type', mime)
+    res.setHeader(
+      'Content-Disposition',
+      `${download ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(name)}`
+    )
+    return res.sendFile(abs)
+  } catch (e: unknown) {
+    const ex = e as { code?: string }
+    if (ex.code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({ message: '缺少简历文件表，请执行 server/migration_resume_screening_files.sql' })
+    }
+    return res.status(500).json({ message: 'db error' })
   }
 })
 
@@ -3271,10 +3725,101 @@ app.post(
           throw insErr
         }
       }
+      const screeningId = Number(ins.insertId)
+      try {
+        const saved = saveResumeOriginalFile({
+          buffer: req.file.buffer,
+          originalname: uploadFileName,
+          mimetype: req.file.mimetype || ''
+        })
+        await mysqlPool.query(
+          `INSERT INTO resume_screening_files
+             (screening_id, original_name, mime_type, file_size_bytes, storage_path)
+           VALUES (?,?,?,?,?)
+           ON DUPLICATE KEY UPDATE
+             original_name=VALUES(original_name),
+             mime_type=VALUES(mime_type),
+             file_size_bytes=VALUES(file_size_bytes),
+             storage_path=VALUES(storage_path),
+             updated_at=NOW()`,
+          [screeningId, saved.originalName, saved.mimeType, saved.sizeBytes, saved.storageKey]
+        )
+      } catch (fileErr) {
+        console.warn('[resume-screen] save original file skipped:', fileErr)
+      }
+      try {
+        const parsedEval =
+          result.evaluationJson && String(result.evaluationJson).trim()
+            ? (JSON.parse(String(result.evaluationJson)) as Record<string, unknown>)
+            : ({} as Record<string, unknown>)
+        const profile = resumeProfileRowFromValues({
+          candidateName,
+          profile: parsedEval?.candidate_profile
+        })
+        await mysqlPool.query(
+          `INSERT INTO resume_screening_profiles
+             (screening_id, candidate_name, gender, age, work_experience_years, job_title, school, candidate_phone,
+              email, current_address, major, education, current_position, graduation_date, arrival_time, id_number,
+              is_third_party, expected_salary, recruitment_channel, has_degree, is_unified_enrollment,
+              verifiable, resume_uploaded)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON DUPLICATE KEY UPDATE
+             candidate_name=VALUES(candidate_name),
+             gender=VALUES(gender),
+             age=VALUES(age),
+             work_experience_years=VALUES(work_experience_years),
+             job_title=VALUES(job_title),
+             school=VALUES(school),
+             candidate_phone=VALUES(candidate_phone),
+             email=VALUES(email),
+             current_address=VALUES(current_address),
+             major=VALUES(major),
+             education=VALUES(education),
+             current_position=VALUES(current_position),
+             graduation_date=VALUES(graduation_date),
+             arrival_time=VALUES(arrival_time),
+             id_number=VALUES(id_number),
+             is_third_party=VALUES(is_third_party),
+             expected_salary=VALUES(expected_salary),
+             recruitment_channel=VALUES(recruitment_channel),
+             has_degree=VALUES(has_degree),
+             is_unified_enrollment=VALUES(is_unified_enrollment),
+             verifiable=VALUES(verifiable),
+             resume_uploaded=VALUES(resume_uploaded),
+             updated_at=NOW()`,
+          [
+            screeningId,
+            profile.candidateName,
+            profile.gender,
+            profile.age,
+            profile.workExperienceYears,
+            profile.jobTitle,
+            profile.school,
+            profile.candidatePhone,
+            profile.email,
+            profile.currentAddress,
+            profile.major,
+            profile.education,
+            profile.currentPosition,
+            profile.graduationDate,
+            profile.arrivalTime,
+            profile.idNumber,
+            profile.isThirdParty,
+            profile.expectedSalary,
+            profile.recruitmentChannel,
+            profile.hasDegree,
+            profile.isUnifiedEnrollment,
+            profile.verifiable,
+            profile.resumeUploaded
+          ]
+        )
+      } catch (profileErr) {
+        console.warn('[resume-screen] save structured profile skipped:', profileErr)
+      }
       flowLog('resume-screen', true, `job=${jobCode} score=${result.matchScore}`)
       res.json({
         data: {
-          id: Number(ins.insertId),
+          id: screeningId,
           jobCode,
           candidateName,
           candidatePhone: candidatePhone ?? '',

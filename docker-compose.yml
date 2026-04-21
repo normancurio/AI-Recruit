@@ -12,6 +12,12 @@
 # 服务器上放置 .env（从 .env.example 复制并填写 MYSQL_*、WECHAT_*、ADMIN_API_TOKEN 等），然后：
 #   docker compose up -d
 #
+# 简历原件（预览/下载）：api 已挂载命名卷到容器内 /app/storage/resumes（与代码默认一致）。
+#   改用宿主机目录持久化：把 api.volumes 改为例如
+#     - /srv/ai-recruit/resume-files:/app/storage/resumes
+#   并在 .env 中可设 RESUME_STORAGE_DIR=/app/storage/resumes（与挂载右侧路径一致）。
+#   管理端「预览/下载」由浏览器请求公网 API（PUBLIC_API_BASE / 构建期 VITE_API_BASE），须能访问到 3011。
+#
 # MySQL 在宿主机或其它机器时：MYSQL_HOST 填可解析地址（Linux 常用宿主机内网 IP 或 Docker 网关）。
 
 x-app-build: &app-build
@@ -35,6 +41,9 @@ services:
       NODE_ENV: production
       PORT: "3011"
       HOST: "0.0.0.0"
+    volumes:
+      # 简历原件：持久化命名卷；重建/升级容器不丢文件（否则预览/下载 404）
+      - resume_screening_files:/app/storage/resumes
     restart: unless-stopped
     healthcheck:
       test:
@@ -61,3 +70,6 @@ services:
       # 浏览器访问的小程序 API 公网根地址（无尾斜杠），覆盖错误构建里的 localhost:3011
       MINIAPP_API_PUBLIC_URL: ${MINIAPP_API_PUBLIC_URL:-}
     restart: unless-stopped
+
+volumes:
+  resume_screening_files:
