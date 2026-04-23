@@ -41,6 +41,7 @@ services:
       NODE_ENV: production
       PORT: "3011"
       HOST: "0.0.0.0"
+      TZ: Asia/Shanghai
     volumes:
       # 简历原件：持久化命名卷；重建/升级容器不丢文件（否则预览/下载 404）
       - resume_screening_files:/app/storage/resumes
@@ -66,6 +67,7 @@ services:
       - .env
     environment:
       NODE_ENV: production
+      TZ: Asia/Shanghai
       ADMIN_UI_PORT: "3010"
       # 浏览器访问的小程序 API 公网根地址（无尾斜杠），覆盖错误构建里的 localhost:3011
       MINIAPP_API_PUBLIC_URL: ${MINIAPP_API_PUBLIC_URL:-}

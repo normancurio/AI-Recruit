@@ -16,6 +16,7 @@ import {
   jobTitleValidationMessage,
   normalizeExtractedJobTitleForDisplay
 } from '../shared/jobTaxonomy'
+import { mysqlConnectionTimezoneOptions, wireMysqlSessionTimezone } from '../shared/mysqlSessionTimezone'
 
 const requireCjs = createRequire(import.meta.url)
 
@@ -66,8 +67,10 @@ const mysqlPool = mysql.createPool({
   database: process.env.MYSQL_DATABASE || 'ai_recruit',
   waitForConnections: true,
   connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 10),
-  queueLimit: 0
+  queueLimit: 0,
+  ...mysqlConnectionTimezoneOptions
 })
+wireMysqlSessionTimezone(mysqlPool)
 
 /** 管理端演示库（HR users 等），与 MYSQL_DATABASE 业务库分离 */
 const mysqlAdminPool = mysql.createPool({
@@ -78,8 +81,10 @@ const mysqlAdminPool = mysql.createPool({
   database: process.env.MYSQL_ADMIN_DATABASE || 'ai_recruit_admin',
   waitForConnections: true,
   connectionLimit: Math.min(5, Number(process.env.MYSQL_CONNECTION_LIMIT || 10)),
-  queueLimit: 0
+  queueLimit: 0,
+  ...mysqlConnectionTimezoneOptions
 })
+wireMysqlSessionTimezone(mysqlAdminPool)
 
 const ADMIN_SESSION_KEY_PREFIX = String(process.env.REDIS_ADMIN_SESSION_PREFIX || 'ar:admin:sess:').trim() || 'ar:admin:sess:'
 

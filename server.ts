@@ -15,6 +15,7 @@ import {
   jobLevelValidationMessage,
   jobTitleValidationMessage
 } from './shared/jobTaxonomy';
+import { mysqlConnectionTimezoneOptions, wireMysqlSessionTimezone } from './shared/mysqlSessionTimezone';
 
 const envLocalPath = path.resolve(process.cwd(), '.env.local');
 if (fs.existsSync(envLocalPath)) {
@@ -34,8 +35,10 @@ const adminPool = mysql.createPool({
   database: adminDb,
   waitForConnections: true,
   connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 10),
-  queueLimit: 0
+  queueLimit: 0,
+  ...mysqlConnectionTimezoneOptions
 });
+wireMysqlSessionTimezone(adminPool);
 
 const bizPool = mysql.createPool({
   host: process.env.MYSQL_HOST || '127.0.0.1',
@@ -45,8 +48,10 @@ const bizPool = mysql.createPool({
   database: bizDb,
   waitForConnections: true,
   connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 10),
-  queueLimit: 0
+  queueLimit: 0,
+  ...mysqlConnectionTimezoneOptions
 });
+wireMysqlSessionTimezone(bizPool);
 
 /** jobs.recruiters JSON 列：mysql2 可能返回数组 / 字符串 */
 function parseRecruiters(raw: unknown): string[] {

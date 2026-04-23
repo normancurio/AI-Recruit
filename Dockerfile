@@ -3,7 +3,7 @@
 # 基础镜像说明：
 # - 避免仅用 node:22-slim：部分镜像站对 manifest 解析异常会出现 “content size of zero: invalid argument”
 # - bookworm-slim 为 Debian 12，标签更稳定；国内可 build 前设置：export NODE_IMAGE=docker.m.daocloud.io/library/node:22-bookworm-slim
-ARG NODE_IMAGE=node:22-bookworm-slim
+ARG NODE_IMAGE=docker.m.daocloud.io/library/node:22-bookworm-slim
 FROM ${NODE_IMAGE}
 
 WORKDIR /app
