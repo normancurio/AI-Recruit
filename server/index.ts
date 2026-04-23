@@ -2879,7 +2879,8 @@ function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: bo
   // 标量子查询取最新报告；CONVERT+COLLATE 避免表间 utf8mb4_unicode_ci / utf8mb4_0900_ai_ci 混用报错
   const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
-              s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username, s.created_at,
+              s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username,
+              DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
               EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
               SUBSTRING(COALESCE(s.resume_plaintext,''), 1, 12000) AS resume_plaintext,
               lr.overall_score AS interview_overall_score,
@@ -2919,7 +2920,8 @@ function resumeScreeningsPlainSql(withPipelineStage: boolean, projectId: string 
   const { fragment: jobJoin, params: jobParams } = resumeScreeningsJobFilterJoinSql(projectId)
   const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
-              s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username, s.created_at,
+              s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username,
+              DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
               EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
               SUBSTRING(COALESCE(s.resume_plaintext,''), 1, 12000) AS resume_plaintext
        FROM resume_screenings s

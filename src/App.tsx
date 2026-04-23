@@ -4229,8 +4229,11 @@ function uploaderDisplayFromUsers(username: string | undefined, users: User[]): 
   return String(username || '').trim()
 }
 
-/** 筛查列表 created_at：接口 JSON 常为带 Z 的 UTC 时刻，须按东八区展示，否则会少 8 小时 */
+/** 筛查列表：接口多为带 Z 的 UTC 或已格式化的东八区墙钟字符串 */
 const SCREENING_UPLOAD_TZ = 'Asia/Shanghai'
+
+/** 后端 `DATE_FORMAT(..., ...)` 等返回的、无需再作时区转换的东八区墙钟 */
+const SCREENING_NAIVE_CIVIL_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
 
 function formatScreeningUploadTime(created: string | Date | null | undefined): string {
   if (created == null) return ''
@@ -4240,6 +4243,8 @@ function formatScreeningUploadTime(created: string | Date | null | undefined): s
   }
   const s = String(created).trim()
   if (!s) return ''
+  // 与 MySQL 会话时区下的 DATE_FORMAT 一致，直接展示，避免 Date/ISO 来回解读差 8 或 16 小时
+  if (SCREENING_NAIVE_CIVIL_RE.test(s)) return s
   const hasExplicitZone = /Z$/i.test(s) || /[+-]\d{2}:?\d{2}$/.test(s)
   if (!hasExplicitZone) {
     const naive = s.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.\d+)?$/)
