@@ -4234,6 +4234,8 @@ const SCREENING_UPLOAD_TZ = 'Asia/Shanghai'
 
 /** 后端 `DATE_FORMAT(..., ...)` 等返回的、无需再作时区转换的东八区墙钟 */
 const SCREENING_NAIVE_CIVIL_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
+/** 历史：东八区墙钟被 `JSON` 成 `T…Z`，再 `toLocaleString(Asia/Shanghai)` 会多 +8h；取 ISO 字面量作展示 */
+const SCREENING_MISZ_RE = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?Z$/i
 
 function formatScreeningUploadTime(created: string | Date | null | undefined): string {
   if (created == null) return ''
@@ -4245,6 +4247,10 @@ function formatScreeningUploadTime(created: string | Date | null | undefined): s
   if (!s) return ''
   // 与 MySQL 会话时区下的 DATE_FORMAT 一致，直接展示，避免 Date/ISO 来回解读差 8 或 16 小时
   if (SCREENING_NAIVE_CIVIL_RE.test(s)) return s
+  const zMis = s.match(SCREENING_MISZ_RE)
+  if (zMis) {
+    return `${zMis[1]} ${zMis[2]}:${zMis[3]}:${zMis[4]}`
+  }
   const hasExplicitZone = /Z$/i.test(s) || /[+-]\d{2}:?\d{2}$/.test(s)
   if (!hasExplicitZone) {
     const naive = s.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.\d+)?$/)

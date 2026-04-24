@@ -2880,7 +2880,7 @@ function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: bo
   const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username,
-              DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+              CAST(DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS CHAR(32)) AS created_at,
               EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
               SUBSTRING(COALESCE(s.resume_plaintext,''), 1, 12000) AS resume_plaintext,
               lr.overall_score AS interview_overall_score,
@@ -2921,7 +2921,7 @@ function resumeScreeningsPlainSql(withPipelineStage: boolean, projectId: string 
   const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username,
-              DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+              CAST(DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS CHAR(32)) AS created_at,
               EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
               SUBSTRING(COALESCE(s.resume_plaintext,''), 1, 12000) AS resume_plaintext
        FROM resume_screenings s
@@ -2979,6 +2979,38 @@ async function queryResumeScreeningsJoinedRows(projectId: string | null): Promis
   throw lastErr
 }
 
+function pad2(n: number): string {
+  return String(n).padStart(2, '0')
+}
+
+/** 将 MySQL/JSON 的 created_at 统一成与表里「墙钟」一致的 `YYYY-MM-DD HH:mm:ss`；避免 `DATE_FORMAT` 仍被当 DATETIME 变 Date，JSON 成带 Z 的 ISO 后前端再 +8h */
+function resumeScreeningCreatedAtForResponse(raw: unknown): string {
+  if (raw == null) return ''
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer(raw)) {
+    return resumeScreeningCreatedAtForResponse(raw.toString('utf8').trim())
+  }
+  if (typeof raw === 'string') {
+    const t = raw.trim()
+    // 被误作 UTC 序列化的 ISO：直接取 T 前日期与 T～Z 之间的时间，不再按 Asia/Shanghai 从 UTC 换算
+    const isoZ = t.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?Z$/i)
+    if (isoZ) {
+      return `${isoZ[1]} ${isoZ[2]}:${isoZ[3]}:${isoZ[4]}`
+    }
+    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(t)) {
+      return t.slice(0, 19)
+    }
+    return t
+  }
+  if (raw instanceof Date) {
+    if (Number.isNaN(raw.getTime())) return ''
+    // 与「墙钟当 UTC 装盒」的 Date 一致，用 getUTC* 成墙钟
+    return `${raw.getUTCFullYear()}-${pad2(raw.getUTCMonth() + 1)}-${pad2(raw.getUTCDate())} ${pad2(
+      raw.getUTCHours()
+    )}:${pad2(raw.getUTCMinutes())}:${pad2(raw.getUTCSeconds())}`
+  }
+  return String(raw)
+}
+
 app.get('/api/admin/resume-screenings', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const rawPid = String(req.query.projectId ?? req.query.project_id ?? '').trim()
@@ -2987,6 +3019,7 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
     const rows = await queryResumeScreeningsJoinedRows(projectId)
     const data = (rows || []).map((r) => ({
       ...r,
+      created_at: resumeScreeningCreatedAtForResponse((r as { created_at?: unknown }).created_at),
       file_name:
         r?.file_name != null && String(r.file_name).trim()
           ? normalizeMultipartFilename(String(r.file_name)).slice(0, 255)
@@ -3012,6 +3045,7 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
         }
         const patched = (rows || []).map((r) => ({
           ...r,
+          created_at: resumeScreeningCreatedAtForResponse((r as { created_at?: unknown }).created_at),
           file_name:
             r?.file_name != null && String(r.file_name).trim()
               ? normalizeMultipartFilename(String(r.file_name)).slice(0, 255)
