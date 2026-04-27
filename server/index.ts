@@ -4,7 +4,7 @@ import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import { createRequire } from 'node:module'
-import mysql, { type ResultSetHeader, type RowDataPacket } from 'mysql2/promise'
+import mysql, { type PoolConnection, type ResultSetHeader, type RowDataPacket } from 'mysql2/promise'
 import multer from 'multer'
 import Redis from 'ioredis'
 import { PDFParse } from 'pdf-parse'
@@ -1222,6 +1222,62 @@ function extractPhoneFromResumeText(text: string): string | null {
     }
   }
   return null
+}
+
+/** 按规范化手机号维护 resume_candidates，返回主键；无手机号或表未迁移时返回 null */
+async function ensureResumeCandidateIdForPhone(phoneNorm: string | null, displayName: string): Promise<number | null> {
+  const p = phoneNorm && String(phoneNorm).trim() ? String(phoneNorm).trim() : ''
+  if (!p) return null
+  const name = String(displayName || '').trim().slice(0, 128) || null
+  try {
+    await mysqlPool.query(
+      `INSERT INTO resume_candidates (phone, display_name) VALUES (?, ?)
+       ON DUPLICATE KEY UPDATE
+         id = LAST_INSERT_ID(id),
+         display_name = COALESCE(VALUES(display_name), resume_candidates.display_name),
+         updated_at = CURRENT_TIMESTAMP`,
+      [p, name]
+    )
+    const [lid] = await mysqlPool.query<RowDataPacket[]>('SELECT LAST_INSERT_ID() AS i')
+    const id = Number((lid[0] as { i?: unknown })?.i)
+    return Number.isFinite(id) && id > 0 ? Math.floor(id) : null
+  } catch (e: unknown) {
+    const ex = e as { code?: string; errno?: number }
+    if (ex.code === 'ER_NO_SUCH_TABLE' || ex.errno === 1146) return null
+    throw e
+  }
+}
+
+/**
+ * 将 resume_screenings 与 resume_candidates 关联（同人 = 规范化手机号一致）。
+ * 手机号无法规范化时 candidate_id 置空。表或列未迁移时静默跳过。
+ */
+async function linkResumeScreeningToCandidateByPhone(
+  screeningId: number,
+  phoneRaw: string | null | undefined,
+  displayName: string
+): Promise<number | null> {
+  const sid = Math.floor(screeningId)
+  if (!Number.isFinite(sid) || sid <= 0) return null
+  const norm = normalizeCnMobile(String(phoneRaw || '').trim())
+  try {
+    if (!norm) {
+      await mysqlPool.query('UPDATE resume_screenings SET candidate_id = NULL WHERE id = ?', [sid])
+      return null
+    }
+    const cid = await ensureResumeCandidateIdForPhone(norm, displayName)
+    if (cid) {
+      await mysqlPool.query('UPDATE resume_screenings SET candidate_id = ? WHERE id = ?', [cid, sid])
+      return cid
+    }
+    return null
+  } catch (e: unknown) {
+    const ex = e as { errno?: number; code?: string }
+    if (ex.errno === 1054 || ex.code === 'ER_BAD_FIELD_ERROR' || ex.code === 'ER_NO_SUCH_TABLE' || ex.errno === 1146) {
+      return null
+    }
+    throw e
+  }
 }
 
 function extractEmailFromResumeText(text: string): string | null {
@@ -2613,6 +2669,132 @@ async function screeningJobAllowsRecruiter(
   return recruitersJsonContainsIdentity(row.recruiters, keys)
 }
 
+function identityKeysHitLeadList(leads: string[], actor: { username: string; displayName: string }): boolean {
+  const keys = adminRecruiterIdentityKeys(actor.username, actor.displayName)
+  const lower = leads.map((x) => String(x || '').trim().toLowerCase()).filter(Boolean)
+  return keys.some((k) => lower.includes(k))
+}
+
+async function screeningJobAllowsRecruitingManager(
+  jobCode: string,
+  actor: { username: string; displayName: string }
+): Promise<boolean> {
+  const jc = String(jobCode || '').trim()
+  if (!jc) return false
+  const [jr] = await mysqlPool.query<RowDataPacket[]>(
+    `SELECT p.recruitment_leads AS recruitment_leads
+     FROM jobs j
+     LEFT JOIN projects p ON p.id = j.project_id
+     WHERE UPPER(TRIM(j.job_code)) = UPPER(TRIM(?))
+     LIMIT 1`,
+    [jc]
+  )
+  const row = jr[0] as { recruitment_leads?: unknown } | undefined
+  if (!row) return false
+  const leads = parseRecruitmentLeadsColumn(row.recruitment_leads)
+  return leads.length > 0 && identityKeysHitLeadList(leads, actor)
+}
+
+async function screeningJobAllowsDeliveryManager(jobCode: string, actorDept: string): Promise<boolean> {
+  const d = String(actorDept || '').trim()
+  if (!d || d === '-') return false
+  const [jr] = await mysqlPool.query<RowDataPacket[]>(
+    `SELECT p.dept AS project_dept
+     FROM jobs j
+     LEFT JOIN projects p ON p.id = j.project_id
+     WHERE UPPER(TRIM(j.job_code)) = UPPER(TRIM(?))
+     LIMIT 1`,
+    [jobCode]
+  )
+  const row = jr[0] as { project_dept?: unknown } | undefined
+  if (!row) return false
+  const pd = String(row.project_dept || '').trim()
+  if (!pd) return false
+  return d.toLowerCase() === pd.toLowerCase()
+}
+
+async function assertCanDeleteResumeScreening(
+  token: string,
+  jobCodeRaw: string
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const jobCode = String(jobCodeRaw || '').trim()
+  if (!jobCode) return { ok: false, message: '记录岗位信息无效，无法校验删除权限' }
+
+  const un = await resolveAdminDbUsernameFromToken(token)
+  if (!un) return { ok: true }
+
+  const [rows] = await mysqlAdminPool.query<RowDataPacket[]>(
+    'SELECT username, name, role, dept FROM users WHERE username = ? LIMIT 1',
+    [un]
+  )
+  const row = rows[0] as { username?: string | null; name?: string | null; role?: string | null; dept?: string | null } | undefined
+  const username = String(row?.username || un).trim() || un
+  const displayName = String(row?.name || '').trim() || username
+  const actor = { username, displayName }
+  const uiRole = mapAdminDbRoleToUiRole(String(row?.role || ''))
+  const dept = String(row?.dept || '').trim()
+
+  if (uiRole === 'admin') return { ok: true }
+  if (uiRole === 'recruiter') {
+    const ok = await screeningJobAllowsRecruiter(jobCode, actor)
+    return ok ? { ok: true } : { ok: false, message: '仅可删除您负责招聘的岗位下的简历' }
+  }
+  if (uiRole === 'recruiting_manager') {
+    const ok = await screeningJobAllowsRecruitingManager(jobCode, actor)
+    return ok ? { ok: true } : { ok: false, message: '仅可删除您作为项目招聘负责人所属项目下的简历' }
+  }
+  if (uiRole === 'delivery_manager') {
+    const ok = await screeningJobAllowsDeliveryManager(jobCode, dept)
+    return ok ? { ok: true } : { ok: false, message: '仅可删除与您部门一致的项目下的简历' }
+  }
+  return { ok: false, message: '当前角色无删除权限' }
+}
+
+/**
+ * 筛查主键 id（库中为 BIGINT）：规范为十进制数字串，供 IN (...) 与 JSON 安全下发；
+ * 丢弃非法值；对超过 Number.MAX_SAFE_INTEGER 的 id 仅接受字符串形态，避免前端 Number 精度丢失导致删不掉。
+ */
+function normalizeResumeScreeningPkToken(v: unknown): string | null {
+  if (v == null) return null
+  if (typeof v === 'bigint') return v.toString()
+  if (typeof v === 'number') {
+    if (!Number.isFinite(v) || v <= 0) return null
+    const n = Math.floor(v)
+    if (!Number.isSafeInteger(n)) return null
+    return String(n)
+  }
+  const s = String(v).trim()
+  if (!/^\d{1,20}$/.test(s)) return null
+  return s
+}
+
+function normalizeResumeScreeningDeleteIds(raw: unknown): string[] {
+  const arr = Array.isArray(raw) ? raw : []
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const x of arr) {
+    const s = normalizeResumeScreeningPkToken(x)
+    if (!s) continue
+    if (seen.has(s)) continue
+    seen.add(s)
+    out.push(s)
+    if (out.length >= 200) break
+  }
+  return out
+}
+
+/** 在库内 screening_files 行已删除之后无法查路径；应在事务内先查出路径，提交后再调用本函数 */
+async function unlinkResumeFileAbsPaths(absPaths: string[]): Promise<void> {
+  for (const abs of absPaths) {
+    if (!abs) continue
+    try {
+      await fs.promises.unlink(abs)
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 /** mysql2 对 BIGINT 等可能返回 bigint，JSON.stringify 会抛错 */
 function jsonSafeMysqlCell(v: unknown): unknown {
   if (typeof v === 'bigint') return v.toString()
@@ -2858,10 +3040,16 @@ function resumeScreeningsJobFilterJoinSql(projectId: string | null): { fragment:
   }
 }
 
-function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: boolean, projectId: string | null): {
+function resumeScreeningsJoinSql(
+  withPipelineStage: boolean,
+  withSessionJoin: boolean,
+  projectId: string | null,
+  includeCandidateId = true
+): {
   sql: string
   params: unknown[]
 } {
+  const cidCol = includeCandidateId ? 's.candidate_id, ' : ''
   const ps = withPipelineStage ? 's.pipeline_stage, ' : ''
   const sessCols = withSessionJoin
     ? `sess.status AS interview_session_status,
@@ -2877,7 +3065,7 @@ function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: bo
     : ''
   const { fragment: jobJoin, params: jobParams } = resumeScreeningsJobFilterJoinSql(projectId)
   // 标量子查询取最新报告；CONVERT+COLLATE 避免表间 utf8mb4_unicode_ci / utf8mb4_0900_ai_ci 混用报错
-  const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
+  const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, ${cidCol}s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username,
               CAST(DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS CHAR(32)) AS created_at,
@@ -2915,10 +3103,15 @@ function resumeScreeningsJoinSql(withPipelineStage: boolean, withSessionJoin: bo
   return { sql, params: jobParams }
 }
 
-function resumeScreeningsPlainSql(withPipelineStage: boolean, projectId: string | null): { sql: string; params: unknown[] } {
+function resumeScreeningsPlainSql(
+  withPipelineStage: boolean,
+  projectId: string | null,
+  includeCandidateId = true
+): { sql: string; params: unknown[] } {
+  const cidCol = includeCandidateId ? 's.candidate_id, ' : ''
   const ps = withPipelineStage ? 'pipeline_stage, ' : ''
   const { fragment: jobJoin, params: jobParams } = resumeScreeningsJobFilterJoinSql(projectId)
-  const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
+  const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, ${cidCol}s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username,
               CAST(DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS CHAR(32)) AS created_at,
@@ -2948,13 +3141,19 @@ function isCollationMismatch(e: unknown): boolean {
   return err.code === 'ER_CANT_AGGREGATE_2COLLATIONS' || err.errno === 1267
 }
 
+function isMissingMysqlColumn(e: unknown, col: string): boolean {
+  const err = e as { errno?: number; message?: string }
+  return err.errno === 1054 && String(err.message || '').includes(col)
+}
+
 async function queryResumeScreeningsJoinedRows(projectId: string | null): Promise<any[]> {
   let usePipeline = true
   let useSession = true
+  let includeCandidateId = true
   let lastErr: unknown
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt < 8; attempt++) {
     try {
-      const { sql, params } = resumeScreeningsJoinSql(usePipeline, useSession, projectId)
+      const { sql, params } = resumeScreeningsJoinSql(usePipeline, useSession, projectId, includeCandidateId)
       const [rows] = await mysqlPool.query<any[]>(sql, params)
       let out = rows || []
       if (!usePipeline) out = out.map((r) => ({ ...r, pipeline_stage: r.pipeline_stage ?? 'resume_done' }))
@@ -2971,6 +3170,10 @@ async function queryResumeScreeningsJoinedRows(projectId: string | null): Promis
       }
       if (isCollationMismatch(e) && useSession) {
         useSession = false
+        continue
+      }
+      if (isMissingMysqlColumn(e, 'candidate_id') && includeCandidateId) {
+        includeCandidateId = false
         continue
       }
       throw e
@@ -3019,6 +3222,7 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
     const rows = await queryResumeScreeningsJoinedRows(projectId)
     const data = (rows || []).map((r) => ({
       ...r,
+      id: jsonSafeMysqlCell((r as { id?: unknown }).id),
       created_at: resumeScreeningCreatedAtForResponse((r as { created_at?: unknown }).created_at),
       file_name:
         r?.file_name != null && String(r.file_name).trim()
@@ -3031,20 +3235,31 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
     if (code === 'ER_NO_SUCH_TABLE') {
       try {
         let rows: any[]
-        try {
-          const q1 = resumeScreeningsPlainSql(true, projectId)
-          ;[rows] = await mysqlPool.query<any[]>(q1.sql, q1.params)
-        } catch (e2: unknown) {
-          if (isMissingPipelineStageColumn(e2)) {
-            const q0 = resumeScreeningsPlainSql(false, projectId)
-            ;[rows] = await mysqlPool.query<any[]>(q0.sql, q0.params)
-            rows = (rows || []).map((r) => ({ ...r, pipeline_stage: 'resume_done' }))
-          } else {
+        let plainWithPipeline = true
+        let plainWithCid = true
+        for (;;) {
+          try {
+            const q = resumeScreeningsPlainSql(plainWithPipeline, projectId, plainWithCid)
+            ;[rows] = await mysqlPool.query<any[]>(q.sql, q.params)
+            break
+          } catch (e2: unknown) {
+            if (isMissingMysqlColumn(e2, 'candidate_id') && plainWithCid) {
+              plainWithCid = false
+              continue
+            }
+            if (isMissingPipelineStageColumn(e2) && plainWithPipeline) {
+              plainWithPipeline = false
+              continue
+            }
             throw e2
           }
         }
+        if (!plainWithPipeline) {
+          rows = (rows || []).map((r) => ({ ...r, pipeline_stage: 'resume_done' }))
+        }
         const patched = (rows || []).map((r) => ({
           ...r,
+          id: jsonSafeMysqlCell((r as { id?: unknown }).id),
           created_at: resumeScreeningCreatedAtForResponse((r as { created_at?: unknown }).created_at),
           file_name:
             r?.file_name != null && String(r.file_name).trim()
@@ -3150,6 +3365,18 @@ app.patch('/api/admin/resume-screenings/:id', async (req, res) => {
     if (!hdr.affectedRows) {
       return res.status(404).json({ message: '记录不存在' })
     }
+    const [sAfter] = await mysqlPool.query<RowDataPacket[]>(
+      'SELECT candidate_name, candidate_phone FROM resume_screenings WHERE id = ? LIMIT 1',
+      [Math.floor(idNum)]
+    )
+    if (sAfter?.length) {
+      const rr = sAfter[0] as { candidate_name?: unknown; candidate_phone?: unknown }
+      await linkResumeScreeningToCandidateByPhone(
+        Math.floor(idNum),
+        rr.candidate_phone != null ? String(rr.candidate_phone) : '',
+        String(rr.candidate_name || '')
+      )
+    }
     res.json({ ok: true })
   } catch (e: unknown) {
     const ex = e as { code?: string; errno?: number; message?: string }
@@ -3161,6 +3388,112 @@ app.patch('/api/admin/resume-screenings/:id', async (req, res) => {
     }
     console.error('[PATCH /api/admin/resume-screenings/:id]', ex.message, e)
     res.status(500).json({ message: 'db error' })
+  }
+})
+
+/** 删除简历筛查记录（含 profile、原件索引；邀请上的 screening 关联置空）。body: { ids: number[] }，最多 200 条 */
+app.post('/api/admin/resume-screenings/delete', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const ids = normalizeResumeScreeningDeleteIds(req.body?.ids)
+  if (!ids.length) {
+    return res.status(400).json({ message: '请提供要删除的记录 id 列表（ids）' })
+  }
+  const token = extractAdminRequestToken(req)
+  let conn: PoolConnection | null = null
+  try {
+    const phSel = ids.map(() => '?').join(',')
+    const [srows] = await mysqlPool.query<RowDataPacket[]>(
+      `SELECT id, job_code FROM resume_screenings WHERE id IN (${phSel})`,
+      ids
+    )
+    if (!srows?.length) {
+      return res.status(404).json({ message: '所选记录不存在或已被删除' })
+    }
+    for (const row of srows) {
+      const r = row as { id?: unknown; job_code?: unknown }
+      const jc = String(r.job_code || '').trim()
+      const gate = await assertCanDeleteResumeScreening(token, jc)
+      if (gate.ok === false) {
+        return res.status(403).json({ message: gate.message })
+      }
+    }
+    const toDelete = (srows as { id?: unknown }[])
+      .map((r) => normalizeResumeScreeningPkToken((r as { id?: unknown }).id))
+      .filter((s): s is string => Boolean(s))
+    const uniqueDelete = [...new Set(toDelete)]
+    conn = await mysqlPool.getConnection()
+    await conn.beginTransaction()
+    const ph = uniqueDelete.map(() => '?').join(',')
+    const [fileRows] = await conn.query<RowDataPacket[]>(
+      `SELECT storage_path FROM resume_screening_files WHERE screening_id IN (${ph})`,
+      uniqueDelete
+    )
+    const deleteCountByPath = new Map<string, number>()
+    for (const row of fileRows || []) {
+      const sp = String((row as { storage_path?: unknown }).storage_path ?? '')
+        .trim()
+        .replace(/\0/g, '')
+      if (!sp) continue
+      deleteCountByPath.set(sp, (deleteCountByPath.get(sp) || 0) + 1)
+    }
+    const absToUnlink: string[] = []
+    const absSeen = new Set<string>()
+    for (const [storagePath, delCnt] of deleteCountByPath) {
+      const [totRows] = await conn.query<RowDataPacket[]>(
+        'SELECT COUNT(*) AS c FROM resume_screening_files WHERE storage_path = ?',
+        [storagePath]
+      )
+      const total = Number((totRows?.[0] as { c?: unknown })?.c ?? 0)
+      if (total === delCnt) {
+        const abs = resolveResumeStorageAbsPath(storagePath)
+        if (abs && !absSeen.has(abs)) {
+          absSeen.add(abs)
+          absToUnlink.push(abs)
+        }
+      }
+    }
+    try {
+      await conn.query(`DELETE FROM resume_screening_profiles WHERE screening_id IN (${ph})`, uniqueDelete)
+    } catch (e: unknown) {
+      if ((e as { code?: string })?.code !== 'ER_NO_SUCH_TABLE') throw e
+    }
+    try {
+      await conn.query(`DELETE FROM resume_screening_files WHERE screening_id IN (${ph})`, uniqueDelete)
+    } catch (e: unknown) {
+      if ((e as { code?: string })?.code !== 'ER_NO_SUCH_TABLE') throw e
+    }
+    try {
+      await conn.query(
+        `UPDATE interview_invitations SET resume_screening_id = NULL WHERE resume_screening_id IN (${ph})`,
+        uniqueDelete
+      )
+    } catch (e: unknown) {
+      const code = (e as { code?: string })?.code
+      const errno = (e as { errno?: number })?.errno
+      if (code !== 'ER_BAD_FIELD_ERROR' && errno !== 1054) throw e
+    }
+    const [dh] = await conn.query<ResultSetHeader>(`DELETE FROM resume_screenings WHERE id IN (${ph})`, uniqueDelete)
+    await conn.commit()
+    conn.release()
+    conn = null
+    await unlinkResumeFileAbsPaths(absToUnlink)
+    res.json({ ok: true, deleted: Number(dh.affectedRows) || uniqueDelete.length })
+  } catch (e: unknown) {
+    if (conn) {
+      try {
+        await conn.rollback()
+      } catch {
+        /* ignore */
+      }
+    }
+    const ex = e as { code?: string; errno?: number; message?: string }
+    if (ex.code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({ message: '数据表不完整，无法完成删除' })
+    }
+    console.error('[POST /api/admin/resume-screenings/delete]', ex.message, e)
+    res.status(500).json({ message: '删除失败，请稍后重试' })
+  } finally {
+    if (conn) conn.release()
   }
 })
 
@@ -3308,6 +3641,7 @@ app.patch('/api/admin/resume-screenings/:id/profile', async (req, res) => {
       row.candidatePhone,
       Math.floor(idNum)
     ])
+    await linkResumeScreeningToCandidateByPhone(Math.floor(idNum), row.candidatePhone, row.candidateName)
     res.json({ ok: true })
   } catch (e: unknown) {
     const ex = e as { code?: string; errno?: number }
@@ -3645,9 +3979,98 @@ app.post(
       const phoneFromResult = normalizeCnMobile(String(result.candidatePhone || ''))
       const phoneFromText = extractPhoneFromResumeText(plain)
       const candidatePhone: string | null = phoneFromResult || phoneFromText || null
-      const insertRow = async (withPhone: boolean, withEvaluationJson: boolean): Promise<ResultSetHeader> => {
+      const normForCandidate = normalizeCnMobile(String(candidatePhone || ''))
+      let preResolveCandidateId: number | null = null
+      if (normForCandidate) {
+        try {
+          preResolveCandidateId = await ensureResumeCandidateIdForPhone(normForCandidate, candidateName)
+        } catch (preCandErr) {
+          console.warn('[resume-screen] ensure candidate before insert skipped:', preCandErr)
+        }
+      }
+      if (preResolveCandidateId) {
+        try {
+          const [dupByCandidate] = await mysqlPool.query<RowDataPacket[]>(
+            'SELECT id FROM resume_screenings WHERE job_code = ? AND candidate_id = ? LIMIT 1',
+            [jobCode, preResolveCandidateId]
+          )
+          if (Array.isArray(dupByCandidate) && dupByCandidate.length) {
+            return res.status(409).json({
+              message: '该手机号对应候选人已在该岗位下存在投递记录，请勿重复上传。',
+              existingId: Number((dupByCandidate[0] as { id?: unknown }).id)
+            })
+          }
+        } catch (dupCandErr) {
+          console.warn('[resume-screen] duplicate job+candidate check skipped:', dupCandErr)
+        }
+      }
+
+      const insertRow = async (
+        withPhone: boolean,
+        withEvaluationJson: boolean,
+        withCandidateId: boolean
+      ): Promise<ResultSetHeader> => {
         const evalJson = String(result.evaluationJson || '').trim() || null
+        const cidForInsert =
+          withPhone && withCandidateId && preResolveCandidateId != null
+            ? Math.floor(preResolveCandidateId)
+            : withPhone && withCandidateId
+              ? null
+              : undefined
         if (withPhone) {
+          if (withCandidateId) {
+            const [h] = withEvaluationJson
+              ? await mysqlPool.query<ResultSetHeader>(
+                  `INSERT INTO resume_screenings (
+                     job_code, candidate_name, candidate_phone, candidate_id, matched_job_title, match_score,
+                     skill_score, experience_score, education_score, stability_score,
+                     status, report_summary, evaluation_json, resume_plaintext, file_name, uploader_username
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+                  [
+                    jobCode,
+                    candidateName,
+                    candidatePhone,
+                    cidForInsert as number | null,
+                    String(job.title || ''),
+                    result.matchScore,
+                    result.skillScore,
+                    result.experienceScore,
+                    result.educationScore,
+                    result.stabilityScore,
+                    result.status,
+                    result.summary,
+                    evalJson,
+                    plainStore,
+                    uploadFileName,
+                    uploaderUsername
+                  ]
+                )
+              : await mysqlPool.query<ResultSetHeader>(
+                  `INSERT INTO resume_screenings (
+                     job_code, candidate_name, candidate_phone, candidate_id, matched_job_title, match_score,
+                     skill_score, experience_score, education_score, stability_score,
+                     status, report_summary, resume_plaintext, file_name, uploader_username
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+                  [
+                    jobCode,
+                    candidateName,
+                    candidatePhone,
+                    cidForInsert as number | null,
+                    String(job.title || ''),
+                    result.matchScore,
+                    result.skillScore,
+                    result.experienceScore,
+                    result.educationScore,
+                    result.stabilityScore,
+                    result.status,
+                    result.summary,
+                    plainStore,
+                    uploadFileName,
+                    uploaderUsername
+                  ]
+                )
+            return h
+          }
           const [h] = withEvaluationJson
             ? await mysqlPool.query<ResultSetHeader>(
                 `INSERT INTO resume_screenings (
@@ -3746,33 +4169,111 @@ app.post(
             )
         return h
       }
-      let ins: ResultSetHeader
-      try {
-        ins = await insertRow(true, true)
-      } catch (insErr: unknown) {
-        const ie = insErr as { errno?: number; code?: string }
-        if (ie.errno === 1054 || ie.code === 'ER_BAD_FIELD_ERROR') {
-          try {
-            ins = await insertRow(true, false)
-          } catch (insErr2: unknown) {
-            const ie2 = insErr2 as { errno?: number; code?: string }
-            if (ie2.errno === 1054 || ie2.code === 'ER_BAD_FIELD_ERROR') {
-              ins = await insertRow(false, false)
-            } else {
-              throw insErr2
-            }
+      const insertAttempts: Array<[boolean, boolean, boolean]> = [
+        [true, true, true],
+        [true, true, false],
+        [true, false, true],
+        [true, false, false],
+        [false, false, false]
+      ]
+      let ins: ResultSetHeader | null = null
+      let insertLastErr: unknown = null
+      for (const [wp, we, wc] of insertAttempts) {
+        try {
+          ins = await insertRow(wp, we, wc)
+          insertLastErr = null
+          break
+        } catch (insErr: unknown) {
+          insertLastErr = insErr
+          const ie = insErr as { errno?: number; code?: string }
+          if (ie.errno === 1054 || ie.code === 'ER_BAD_FIELD_ERROR') continue
+          if (ie.errno === 1062 || ie.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({
+              message: '该手机号对应候选人已在该岗位下存在投递记录，请勿重复上传。'
+            })
           }
-        } else {
           throw insErr
         }
       }
+      if (!ins) throw insertLastErr
       const screeningId = Number(ins.insertId)
+      const screeningCandidateId = await linkResumeScreeningToCandidateByPhone(
+        screeningId,
+        candidatePhone,
+        candidateName
+      )
+      const fileShaHex = crypto.createHash('sha256').update(req.file.buffer).digest('hex').toLowerCase()
       try {
-        const saved = saveResumeOriginalFile({
-          buffer: req.file.buffer,
-          originalname: uploadFileName,
-          mimetype: req.file.mimetype || ''
-        })
+        let saved: { storageKey: string; originalName: string; mimeType: string; sizeBytes: number }
+        const cidForFile = screeningCandidateId ?? preResolveCandidateId
+        if (cidForFile) {
+          try {
+            const [candRows] = await mysqlPool.query<RowDataPacket[]>(
+              'SELECT last_file_sha256, last_storage_key FROM resume_candidates WHERE id = ? LIMIT 1',
+              [Math.floor(cidForFile)]
+            )
+            const cr = candRows?.[0] as { last_file_sha256?: unknown; last_storage_key?: unknown } | undefined
+            const lastHash = String(cr?.last_file_sha256 || '').toLowerCase()
+            const lastKey = String(cr?.last_storage_key || '').trim()
+            if (lastHash === fileShaHex && lastKey) {
+              saved = {
+                storageKey: lastKey,
+                originalName: normalizeMultipartFilename(req.file.originalname || 'resume').slice(0, 255) || 'resume',
+                mimeType: String(req.file.mimetype || 'application/octet-stream').trim() || 'application/octet-stream',
+                sizeBytes: Number(req.file.buffer?.length || 0)
+              }
+            } else {
+              const wr = saveResumeOriginalFile({
+                buffer: req.file.buffer,
+                originalname: uploadFileName,
+                mimetype: req.file.mimetype || ''
+              })
+              await mysqlPool.query(
+                'UPDATE resume_candidates SET last_file_sha256 = ?, last_storage_key = ? WHERE id = ?',
+                [fileShaHex, wr.storageKey, Math.floor(cidForFile)]
+              )
+              saved = {
+                storageKey: wr.storageKey,
+                originalName: wr.originalName,
+                mimeType: wr.mimeType,
+                sizeBytes: wr.sizeBytes
+              }
+            }
+          } catch (dedupErr) {
+            console.warn('[resume-screen] candidate file dedup skipped:', dedupErr)
+            const wr = saveResumeOriginalFile({
+              buffer: req.file.buffer,
+              originalname: uploadFileName,
+              mimetype: req.file.mimetype || ''
+            })
+            saved = {
+              storageKey: wr.storageKey,
+              originalName: wr.originalName,
+              mimeType: wr.mimeType,
+              sizeBytes: wr.sizeBytes
+            }
+            try {
+              await mysqlPool.query(
+                'UPDATE resume_candidates SET last_file_sha256 = ?, last_storage_key = ? WHERE id = ?',
+                [fileShaHex, wr.storageKey, Math.floor(cidForFile)]
+              )
+            } catch {
+              /* ignore */
+            }
+          }
+        } else {
+          const wr = saveResumeOriginalFile({
+            buffer: req.file.buffer,
+            originalname: uploadFileName,
+            mimetype: req.file.mimetype || ''
+          })
+          saved = {
+            storageKey: wr.storageKey,
+            originalName: wr.originalName,
+            mimeType: wr.mimeType,
+            sizeBytes: wr.sizeBytes
+          }
+        }
         await mysqlPool.query(
           `INSERT INTO resume_screening_files
              (screening_id, original_name, mime_type, file_size_bytes, storage_path)
@@ -3861,6 +4362,7 @@ app.post(
       res.json({
         data: {
           id: screeningId,
+          candidateId: screeningCandidateId,
           jobCode,
           candidateName,
           candidatePhone: candidatePhone ?? '',
