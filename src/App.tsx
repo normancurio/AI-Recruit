@@ -448,6 +448,67 @@ function userDeptInSubtree(userDept: string, subtreeDepts: Dept[]): boolean {
   return subtreeDepts.some((sd) => deptNamesMatch(d, sd.name));
 }
 
+function resolveUserByRecruiterToken(users: User[], token: string): User | null {
+  const key = String(token || '').trim().toLowerCase();
+  if (!key) return null;
+  const u = users.find((x) => {
+    if (x.status && x.status !== '正常') return false;
+    const nm = String(x.name || '').trim().toLowerCase();
+    const un = String(x.username || '').trim().toLowerCase();
+    return nm === key || un === key;
+  });
+  return u ?? null;
+}
+
+/** 编辑表单中仅展示：当前招聘经理所在部门子树内、且能解析到账号的招聘人员条目 */
+function filterRecruitersToMySubtreeTokens(
+  existing: string[] | undefined,
+  mySubtree: Dept[],
+  users: User[]
+): string[] {
+  const arr = (existing || []).map((x) => String(x || '').trim()).filter(Boolean);
+  return arr.filter((token) => {
+    const u = resolveUserByRecruiterToken(users, token);
+    if (!u) return false;
+    return userDeptInSubtree(u.dept, mySubtree);
+  });
+}
+
+/**
+ * 招聘经理保存「招聘人员」：表单里只维护本人部门子树内的分配；
+ * 原记录中其他部门子树（由其他招聘负责人添加）的条目予以保留，便于多部门共管同一岗位。
+ */
+function mergeRecruitersForRecruitingManagerSave(
+  existing: string[] | undefined,
+  myPicks: string[],
+  myDeptSubtree: Dept[],
+  users: User[]
+): string[] {
+  const existingArr = (existing || []).map((x) => String(x || '').trim()).filter(Boolean);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (raw: string) => {
+    const t = String(raw || '').trim();
+    if (!t) return;
+    const k = t.toLowerCase();
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(t);
+  };
+  for (const token of existingArr) {
+    const u = resolveUserByRecruiterToken(users, token);
+    if (!u) {
+      push(token);
+      continue;
+    }
+    if (!userDeptInSubtree(u.dept, myDeptSubtree)) {
+      push(token);
+    }
+  }
+  for (const p of myPicks) push(p);
+  return out;
+}
+
 const CN_MOBILE_LOGIN_USERNAME_RE = /^1[3-9]\d{9}$/;
 
 /** 平台管理员等可使用非手机号登录名；其余角色须为大陆手机号 */
@@ -1576,11 +1637,6 @@ function ProjectManagementView({
     return [{ id: '__edit_dept__', name: cur, deptType: '', level: 0, manager: '-', count: 0, parentId: null }, ...base];
   }, [role, depts, scopedDeptsForProjectForm, formDept]);
 
-  const jobFormDeptOptions = useMemo(
-    () => (role === 'admin' ? depts : scopedDeptsForProjectForm),
-    [role, depts, scopedDeptsForProjectForm]
-  );
-
   const projectRecruitmentLeadDeptOptions = useMemo(
     () => recruitmentDeptOptionsForProjectLeads(depts, dmUserDept, role),
     [depts, dmUserDept, role]
@@ -1620,6 +1676,11 @@ function ProjectManagementView({
     return filterProjectsForDeliveryManagerScope(projects, dmUserDept);
   }, [projects, role, dmDeptReady, dmUserDept, authProfile]);
 
+  const jobFormDeptOptions = useMemo(
+    () => (role === 'admin' ? depts : scopedDeptsForProjectForm),
+    [role, depts, scopedDeptsForProjectForm]
+  );
+
   const totalRealProjects = useMemo(
     () => projects.filter((p) => p.id !== 'EMPTY' && p.id !== 'UNASSIGNED').length,
     [projects]
@@ -1657,6 +1718,25 @@ function ProjectManagementView({
     setPjRecruiterPickUsername('');
     setProjectJobLockId(project.id);
     const pid = job.project_id === 'UNASSIGNED' ? project.id : job.project_id || project.id;
+    const myPjSubtree =
+      role === 'recruiting_manager'
+        ? deliveryManagerDeptSubtree(depts, String(authProfile?.dept || '').trim())
+        : [];
+    const recruitersForForm =
+      role === 'recruiting_manager' && hrUsers.length && myPjSubtree.length
+        ? filterRecruitersToMySubtreeTokens(job.recruiters, myPjSubtree, hrUsers).join('、')
+        : job.recruiters?.length
+          ? job.recruiters.join('、')
+          : '';
+    const departmentForForm =
+      role === 'recruiting_manager' && recruitersForForm && hrUsers.length
+        ? departmentsFromJobRecruiters(
+            { recruiters: parseRecruitersInput(recruitersForForm) } as Job,
+            hrUsers
+          ) || (job.department && job.department !== '-' ? job.department : '')
+        : job.department && job.department !== '-'
+          ? job.department
+          : '';
     setProjectJobForm({
       mode: 'edit',
       submitting: false,
@@ -1664,13 +1744,13 @@ function ProjectManagementView({
       jobCode: job.id,
       roleBase: matchRoleBaseFromJobTitle(job.title, job.level) ?? '',
       projectId: pid,
-      department: job.department && job.department !== '-' ? job.department : '',
+      department: departmentForForm,
       demand: String(job.demand ?? 1),
       location: job.location && job.location !== '-' ? job.location : '',
       skills: job.skills && job.skills !== '见 JD' ? job.skills : '',
       level: normalizeJobLevel(job.level) ?? '',
       salary: job.salary && job.salary !== '面议' ? job.salary : '',
-      recruiters: job.recruiters?.length ? job.recruiters.join('、') : '',
+      recruiters: recruitersForForm,
       jdText: job.jdText || ''
     });
   };
@@ -1726,6 +1806,24 @@ function ProjectManagementView({
       salary: projectJobForm.salary.trim() || null,
       jdText: projectJobForm.jdText.trim() || null
     };
+    if (role === 'recruiting_manager' && projectJobForm.mode === 'edit') {
+      let prevJob: Job | null = null;
+      for (const p of projects) {
+        const j = (p.jobs || []).find((x) => x.id === projectJobForm.jobCode);
+        if (j) {
+          prevJob = j;
+          break;
+        }
+      }
+      if (prevJob) {
+        const mySubtree = deliveryManagerDeptSubtree(depts, String(authProfile?.dept || '').trim());
+        const picks = parseRecruitersInput(projectJobForm.recruiters);
+        const merged = mergeRecruitersForRecruitingManagerSave(prevJob.recruiters, picks, mySubtree, hrUsers);
+        payload.recruiters = merged;
+        const inferredDept = departmentsFromJobRecruiters({ recruiters: merged } as Job, hrUsers);
+        if (inferredDept) payload.department = inferredDept;
+      }
+    }
     try {
       if (projectJobForm.mode === 'create') {
         const jc = projectJobForm.jobCode.trim();
@@ -2892,10 +2990,14 @@ function tryComposeBatchJobTitle(job: Job, levelNorm: StandardJobLevelResolved):
 }
 
 /**
- * 与编辑弹窗保存逻辑尽量一致，供招聘经理批量覆盖「招聘人员」时组装 PATCH 体。
+ * 与编辑弹窗保存逻辑尽量一致，供招聘经理批量写入「招聘人员」时组装 PATCH 体（列表侧已先做跨部门合并）。
  * 对历史非标标题（如 java开发工程师、无级别列）做回退，避免无法组装。
  */
-function buildRecruitingManagerJobPatchPayload(job: Job, recruitersParsed: string[]): Record<string, unknown> | null {
+function buildRecruitingManagerJobPatchPayload(
+  job: Job,
+  recruitersParsed: string[],
+  users?: User[]
+): Record<string, unknown> | null {
   const levelClean = String(job.level || '')
     .trim()
     .replace(/^[—\-–]+$/u, '');
@@ -2922,10 +3024,15 @@ function buildRecruitingManagerJobPatchPayload(job: Job, recruitersParsed: strin
   const salary = job.salary && job.salary !== '面议' ? String(job.salary).trim() : '';
   if (!location || !salary) return null;
   const jdText = String(job.jdText ?? '').trim();
+  let departmentOut = department;
+  if (users && users.length) {
+    const inferred = departmentsFromJobRecruiters({ ...job, recruiters: recruitersParsed }, users);
+    if (inferred) departmentOut = inferred;
+  }
   return {
     title: titleNorm,
     projectId: pidTrim,
-    department: department || null,
+    department: departmentOut || null,
     demand,
     location,
     skills: skills || null,
@@ -3482,7 +3589,7 @@ function JobEditorModal({
                   <div className="max-h-56 overflow-y-auto rounded-lg border border-indigo-100 bg-white p-2">
                     {jobRecruiterSpecialistGroups.length === 0 ? (
                       <p className="px-2 py-1 text-xs text-slate-500">
-                        暂无可选招聘专员。请在「用户管理」中新建用户并分配「招聘专员」角色，且账号「所属部门」须与本岗位「招聘部门」一致。
+                        暂无可选招聘专员。请在「用户管理」中新建用户并分配「招聘专员」角色，且账号「所属部门」须落在您所在部门组织范围内。
                       </p>
                     ) : (
                       jobRecruiterSpecialistGroups.map((g) => (
@@ -3881,6 +3988,25 @@ function JobQueryView({
     if (!pid || !selectableProjects.some((p) => p.id === pid)) pid = firstPid;
     setRecruiterPickDept('');
     setRecruiterPickUsername('');
+    const mySubtree =
+      currentRole === 'recruiting_manager'
+        ? deliveryManagerDeptSubtree(jobFormDepts, String(authProfile?.dept || '').trim())
+        : [];
+    const recruitersForForm =
+      currentRole === 'recruiting_manager' && jobFormUsers.length && mySubtree.length
+        ? filterRecruitersToMySubtreeTokens(job.recruiters, mySubtree, jobFormUsers).join('、')
+        : job.recruiters?.length
+          ? job.recruiters.join('、')
+          : '';
+    const departmentForForm =
+      currentRole === 'recruiting_manager' && recruitersForForm && jobFormUsers.length
+        ? departmentsFromJobRecruiters(
+            { recruiters: parseRecruitersInput(recruitersForForm) } as Job,
+            jobFormUsers
+          ) || (job.department && job.department !== '-' ? job.department : '')
+        : job.department && job.department !== '-'
+          ? job.department
+          : '';
     setJobForm({
       mode: 'edit',
       submitting: false,
@@ -3888,13 +4014,13 @@ function JobQueryView({
       jobCode: job.id,
       roleBase: matchRoleBaseFromJobTitle(job.title, job.level) ?? '',
       projectId: pid,
-      department: job.department && job.department !== '-' ? job.department : '',
+      department: departmentForForm,
       demand: String(job.demand ?? 1),
       location: job.location && job.location !== '-' ? job.location : '',
       skills: job.skills && job.skills !== '见 JD' ? job.skills : '',
       level: normalizeJobLevel(job.level) ?? '',
       salary: job.salary && job.salary !== '面议' ? job.salary : '',
-      recruiters: job.recruiters?.length ? job.recruiters.join('、') : '',
+      recruiters: recruitersForForm,
       jdText: job.jdText || ''
     });
   };
@@ -3936,13 +4062,32 @@ function JobQueryView({
     }
     setJobForm((f) => (f ? { ...f, submitting: true, error: '' } : f));
     const recruitersParsed = parseRecruitersInput(jobForm.recruiters);
+    const myRmSubtree = deliveryManagerDeptSubtree(jobFormDepts, String(authProfile?.dept || '').trim());
+    let recruitersOut = recruitersParsed;
+    if (currentRole === 'recruiting_manager' && jobForm.mode === 'edit') {
+      const row = rows.find((r) => r.job.id === jobForm.jobCode);
+      if (row) {
+        recruitersOut = mergeRecruitersForRecruitingManagerSave(
+          row.job.recruiters,
+          recruitersParsed,
+          myRmSubtree,
+          jobFormUsers
+        );
+      }
+    }
     const demand = Math.max(1, Math.min(99999, Number(jobForm.demand) || 1));
     const projectId = pidTrim;
     const isRm = currentRole === 'recruiting_manager';
+    const departmentPayload =
+      isRm && jobForm.mode === 'edit' && jobFormUsers.length
+        ? departmentsFromJobRecruiters({ recruiters: recruitersOut } as Job, jobFormUsers) ||
+          jobForm.department.trim() ||
+          null
+        : jobForm.department.trim() || null;
     const basePayload: Record<string, unknown> = {
       title: composedTitle,
       projectId,
-      department: jobForm.department.trim() || null,
+      department: departmentPayload,
       demand,
       location: jobForm.location.trim() || null,
       skills: jobForm.skills.trim() || null,
@@ -3967,7 +4112,7 @@ function JobQueryView({
         if (!r.ok) throw new Error(j.message || `创建失败 ${r.status}`);
       } else {
         const patchBody: Record<string, unknown> = { ...basePayload };
-        if (isRm) patchBody.recruiters = recruitersParsed;
+        if (isRm) patchBody.recruiters = recruitersOut;
         const r = await fetch(`/api/jobs/${encodeURIComponent(jobForm.jobCode)}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -4049,10 +4194,6 @@ function JobQueryView({
 
   const runRmBatchAssignRecruiters = async () => {
     const recruitersParsed = parseRecruitersInput(rmBatchRecruiters);
-    if (!recruitersParsed.length) {
-      setRmBatchError('请至少选择一名招聘专员');
-      return;
-    }
     const targets = rmBatchSelectedJobCodes.filter((id) => {
       const row = rows.find((x) => x.job.id === id);
       return row && jobQueryCanEditRow(row.job);
@@ -4068,7 +4209,14 @@ function JobQueryView({
     for (const jobId of targets) {
       const row = rows.find((x) => x.job.id === jobId);
       if (!row) continue;
-      const payload = buildRecruitingManagerJobPatchPayload(row.job, recruitersParsed);
+      const mySubtree = deliveryManagerDeptSubtree(jobFormDepts, String(authProfile?.dept || '').trim());
+      const merged = mergeRecruitersForRecruitingManagerSave(
+        row.job.recruiters,
+        recruitersParsed,
+        mySubtree,
+        jobFormUsers
+      );
+      const payload = buildRecruitingManagerJobPatchPayload(row.job, merged, jobFormUsers);
       if (!payload) {
         fails.push(`${row.job.title}（${jobId}）：无法组装保存数据`);
         continue;
@@ -4092,7 +4240,9 @@ function JobQueryView({
       setRmBatchAssignOpen(false);
       setRmBatchSelectedJobCodes([]);
       setRmBatchRecruiters('');
-      window.alert(`已成功为 ${ok} 个岗位统一分配招聘专员。`);
+      window.alert(
+        `已成功更新 ${ok} 个岗位的招聘人员（本部门由您勾选；其他部门负责人已分配的人员已自动保留）。`
+      );
     } else {
       setRmBatchError(`成功 ${ok} 条；失败 ${fails.length} 条。`);
       window.alert(
@@ -4221,7 +4371,7 @@ function JobQueryView({
                 <th className="px-5 py-3 font-medium whitespace-nowrap">交付负责人</th>
                 <th
                   className="px-5 py-3 font-medium whitespace-nowrap"
-                  title="与当前项目上负责本岗位招聘的成员所在部门一致；已分配招聘人员时按账号所属部门聚合；未分配招聘专员时本列为空（不使用手工填写值顶替）。"
+                  title="按岗位「招聘人员」在用户表中的所属部门聚合，可对应多个招聘部门；多位项目招聘负责人可为同一岗位各自添加本部门专员，列表会合并展示。"
                 >
                   招聘部门
                 </th>
@@ -4444,8 +4594,8 @@ function JobQueryView({
                 </div>
                 <div className="px-5 py-3 text-sm text-slate-600 border-b border-slate-50 leading-relaxed">
                   将为已选的 <strong className="text-slate-900">{rmBatchSelectedJobCodes.length}</strong> 个岗位
-                  <strong className="text-indigo-700"> 覆盖写入 </strong>
-                  下方「招聘专员」名单；各岗位其它信息不变。可先按「项目」筛选列表再全选。
+                  写入您下方勾选的<strong className="text-indigo-700">本部门招聘专员</strong>；各岗位由其他招聘负责人添加的专员会
+                  <strong className="text-slate-800">自动保留</strong>。各岗位其它信息不变。可先按「项目」筛选再全选。
                 </div>
                 <div className="px-5 py-3 overflow-y-auto flex-1 space-y-3 min-h-0">
                   {rmBatchError ? (
