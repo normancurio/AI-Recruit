@@ -28,7 +28,8 @@ import {
   Search, Plus, UploadCloud, BrainCircuit, ChevronDown,
   ChevronRight, ChevronLeft, MoreHorizontal, CheckCircle2, XCircle,
   LogOut, Bell, LayoutDashboard, FolderOpen, Bot,
-  Clock, Calendar, Pencil, Trash2, Loader2, KeyRound, Sparkles, UserRound, Lock, X, RotateCcw
+  Clock, Calendar, Pencil, Trash2, Loader2, KeyRound, Sparkles, UserRound, Lock, X, RotateCcw,
+  FileBarChart, UserPen, CalendarCheck, Eye, Download
 } from 'lucide-react';
 
 /**
@@ -4941,8 +4942,26 @@ const RECRUITMENT_CHANNEL_OPTIONS = [
   '线下'
 ] as const;
 
+/** 学历枚举：与列表筛选「学历」一致，详情编辑用下拉选择 */
+const PROFILE_EDUCATION_OPTIONS = ['高中', '大专', '本科', '研究生'] as const;
+
 function isStandardRecruitmentChannel(v: string): boolean {
   return (RECRUITMENT_CHANNEL_OPTIONS as readonly string[]).includes(v);
+}
+
+function isStandardProfileEducation(v: string): boolean {
+  return (PROFILE_EDUCATION_OPTIONS as readonly string[]).includes(v);
+}
+
+/** 与 shared/jobTaxonomy STANDARD_JOB_ROLE_BASE_SET 一致，供简历详情「职位」下拉校验 */
+const PROFILE_JOB_ROLE_BASE_SET = new Set<string>(STANDARD_JOB_ROLE_BASES as readonly string[]);
+
+const PROFILE_JOB_ROLE_BASE_OPTIONS = [...STANDARD_JOB_ROLE_BASES].sort((a, b) =>
+  a.localeCompare(b, 'zh-Hans-CN')
+);
+
+function isStandardProfileJobTitle(v: string): boolean {
+  return PROFILE_JOB_ROLE_BASE_SET.has(v);
 }
 
 function ResumeScreeningView({
@@ -5366,9 +5385,9 @@ function ResumeScreeningView({
           candidate_phone: String(d.candidate_phone || resume.phone || ''),
           email: String(d.email || ''),
           current_address: String(d.current_address || ''),
+          current_company: String(d.current_company || ''),
           major: String(d.major || ''),
           education: String(d.education || ''),
-          current_position: String(d.current_position || ''),
           graduation_date: String(d.graduation_date || ''),
           arrival_time: String(d.arrival_time || ''),
           id_number: String(d.id_number || ''),
@@ -5414,9 +5433,10 @@ function ResumeScreeningView({
         candidate_phone: String(profileDraft.candidate_phone || '').trim(),
         email: String(profileDraft.email || '').trim(),
         current_address: String(profileDraft.current_address || '').trim(),
+        current_company: String(profileDraft.current_company || '').trim(),
         major: String(profileDraft.major || '').trim(),
         education: String(profileDraft.education || '').trim(),
-        current_position: String(profileDraft.current_position || '').trim(),
+        current_position: null,
         graduation_date: String(profileDraft.graduation_date || '').trim(),
         arrival_time: String(profileDraft.arrival_time || '').trim(),
         id_number: String(profileDraft.id_number || '').trim(),
@@ -6100,15 +6120,15 @@ function ResumeScreeningView({
                             className="h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                           />
                         </th>
-                        <th className="w-[12%] px-2 py-3 font-medium">候选人</th>
+                        <th className="w-[14%] px-2 py-3 font-medium">候选人</th>
                         <th className="w-[10%] px-2 py-3 font-medium">手机</th>
-                        <th className="w-[13%] px-2 py-3 font-medium">匹配岗位</th>
+                        <th className="w-[15%] px-2 py-3 font-medium">匹配岗位</th>
                         <th className="w-[7%] px-2 py-3 font-medium text-center">匹配分</th>
                         <th className="w-[11%] px-2 py-3 font-medium">AI 结论</th>
                         <th className="w-[9%] px-2 py-3 font-medium">流程</th>
                         <th className="w-[8%] px-2 py-3 font-medium">上传人</th>
                         <th className="w-[9%] px-2 py-3 font-medium">上传时间</th>
-                        <th className="w-[13%] px-2 py-3 font-medium text-right">操作</th>
+                        <th className="w-[8.5rem] min-w-[8.5rem] max-w-[10rem] px-1 py-3 font-medium text-right">操作</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -6120,8 +6140,8 @@ function ResumeScreeningView({
                         const rid = String(resume.id);
                         return (
                           <React.Fragment key={resume.id}>
-                            <tr className={`align-top transition-colors hover:bg-indigo-50/40 ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}`}>
-                              <td className="w-9 px-1 py-3 align-top text-center">
+                            <tr className={`align-middle transition-colors hover:bg-indigo-50/40 ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}`}>
+                              <td className="w-9 px-1 py-2.5 align-middle text-center">
                                 <input
                                   type="checkbox"
                                   checked={Boolean(screeningSelection[rid])}
@@ -6134,10 +6154,10 @@ function ResumeScreeningView({
                                     })
                                   }
                                   aria-label={`选择 ${resume.name || '候选人'}`}
-                                  className="mt-1 h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                                  className="h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                                 />
                               </td>
-                              <td className="max-w-0 px-2 py-3">
+                              <td className="max-w-0 px-2 py-2.5">
                                 <div className="flex items-start gap-2">
                                   <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[11px] font-semibold text-indigo-700">
                                     {String(resume.name || '候').trim().slice(0, 1)}
@@ -6214,30 +6234,36 @@ function ResumeScreeningView({
                               <td className="max-w-0 px-2 py-3 text-xs tabular-nums text-slate-500">
                                 <div className="line-clamp-2 break-all">{resume.uploadTime}</div>
                               </td>
-                              <td className="max-w-0 px-2 py-3 text-right">
-                                <div className="flex flex-col items-stretch gap-1">
+                              <td className="px-1 py-2 text-right align-middle">
+                                <div className="inline-flex flex-wrap items-center justify-end gap-1">
                                   <button
                                     type="button"
                                     onClick={() => setReportResume(resume)}
-                                    className="rounded-md bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+                                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-400/35"
+                                    title="查看报告"
+                                    aria-label="查看报告"
                                   >
-                                    查看报告
+                                    <FileBarChart className="h-4 w-4" aria-hidden />
                                   </button>
                                   <button
                                     type="button"
                                     onClick={() => void openResumeProfileModal(resume)}
-                                    className="rounded-md bg-violet-50 px-2.5 py-1 text-xs font-medium text-violet-700 hover:bg-violet-100"
+                                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-400/35"
+                                    title="简历详情"
+                                    aria-label="简历详情"
                                   >
-                                    简历详情
+                                    <UserPen className="h-4 w-4" aria-hidden />
                                   </button>
                                   {resume.matchScore >= 60 ? (
                                     <button
                                       type="button"
                                       onClick={() => handleInviteFromResume(resume)}
                                       disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
-                                      className="rounded-md bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"
+                                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-40"
+                                      title="发起面试"
+                                      aria-label="发起面试"
                                     >
-                                      发起面试
+                                      <CalendarCheck className="h-4 w-4" aria-hidden />
                                     </button>
                                   ) : null}
                                   {resume.hasOriginalFile ? (
@@ -6246,17 +6272,21 @@ function ResumeScreeningView({
                                         type="button"
                                         disabled={fileBusyId === resume.id}
                                         onClick={() => void openResumeOriginalFile(resume, 'preview')}
-                                        className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300/60 disabled:opacity-50"
+                                        title="预览原件"
+                                        aria-label="预览原件"
                                       >
-                                        预览原件
+                                        <Eye className="h-4 w-4" aria-hidden />
                                       </button>
                                       <button
                                         type="button"
                                         disabled={fileBusyId === resume.id}
                                         onClick={() => void openResumeOriginalFile(resume, 'download')}
-                                        className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300/60 disabled:opacity-50"
+                                        title="下载原件"
+                                        aria-label="下载原件"
                                       >
-                                        下载原件
+                                        <Download className="h-4 w-4" aria-hidden />
                                       </button>
                                     </>
                                   ) : null}
@@ -6731,12 +6761,37 @@ function ResumeScreeningView({
                         />
                       </label>
                       <label className="text-xs text-slate-600">
-                        岗位
+                        当前公司
                         <input
-                          value={String(profileDraft.job_title || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, job_title: e.target.value }))}
+                          value={String(profileDraft.current_company || '')}
+                          onChange={(e) => setProfileDraft((d) => ({ ...d, current_company: e.target.value }))}
                           className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
+                          placeholder="现任或最近工作单位"
                         />
+                      </label>
+                      <label className="text-xs text-slate-600">
+                        职位
+                        <select
+                          value={String(profileDraft.job_title || '').trim()}
+                          onChange={(e) => setProfileDraft((d) => ({ ...d, job_title: e.target.value }))}
+                          className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm"
+                        >
+                          <option value="">请选择</option>
+                          {(() => {
+                            const rawJt = String(profileDraft.job_title || '').trim();
+                            if (!rawJt || isStandardProfileJobTitle(rawJt)) return null;
+                            return (
+                              <option value={rawJt}>
+                                {rawJt}（请改为标准项）
+                              </option>
+                            );
+                          })()}
+                          {PROFILE_JOB_ROLE_BASE_OPTIONS.map((base) => (
+                            <option key={base} value={base}>
+                              {base}
+                            </option>
+                          ))}
+                        </select>
                       </label>
                       <label className="text-xs text-slate-600">
                         学校
@@ -6780,11 +6835,27 @@ function ResumeScreeningView({
                       </label>
                       <label className="text-xs text-slate-600">
                         学历
-                        <input
-                          value={String(profileDraft.education || '')}
+                        <select
+                          value={String(profileDraft.education || '').trim()}
                           onChange={(e) => setProfileDraft((d) => ({ ...d, education: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
-                        />
+                          className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm"
+                        >
+                          <option value="">请选择</option>
+                          {(() => {
+                            const rawEdu = String(profileDraft.education || '').trim();
+                            if (!rawEdu || isStandardProfileEducation(rawEdu)) return null;
+                            return (
+                              <option value={rawEdu}>
+                                {rawEdu}（请改为标准项）
+                              </option>
+                            );
+                          })()}
+                          {PROFILE_EDUCATION_OPTIONS.map((opt) => (
+                            <option key={opt} value={opt}>
+                              {opt}
+                            </option>
+                          ))}
+                        </select>
                       </label>
                       <label className="text-xs text-slate-600">
                         是否有学位
@@ -6838,14 +6909,6 @@ function ResumeScreeningView({
                           <option value="0">否</option>
                           <option value="1">是</option>
                         </select>
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        当前职位
-                        <input
-                          value={String(profileDraft.current_position || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, current_position: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
-                        />
                       </label>
                       <label className="text-xs text-slate-600">
                         证件号码

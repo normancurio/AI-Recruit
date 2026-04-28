@@ -14,8 +14,20 @@ import {
   normalizeJobTitle,
   jobLevelValidationMessage,
   jobTitleValidationMessage,
-  normalizeExtractedJobTitleForDisplay
+  normalizeExtractedJobTitleForDisplay,
+  STANDARD_JOB_ROLE_BASE_SET,
+  matchRoleBaseFromJobTitle
 } from '../shared/jobTaxonomy'
+
+/** 将解析/抽取的应聘职位对齐为标准岗位序列（不含级别），供简历详情下拉落库 */
+function matchJobTitleToStandardProfileOption(raw: string): string | null {
+  const t = normalizeExtractedJobTitleForDisplay(String(raw || ''))
+  if (!t) return null
+  if (STANDARD_JOB_ROLE_BASE_SET.has(t)) return t
+  const base = matchRoleBaseFromJobTitle(t, '')
+  if (base && STANDARD_JOB_ROLE_BASE_SET.has(base)) return base
+  return null
+}
 import { mysqlConnectionTimezoneOptions, wireMysqlSessionTimezone } from '../shared/mysqlSessionTimezone'
 
 const requireCjs = createRequire(import.meta.url)
@@ -892,7 +904,7 @@ function buildResumeEvalPromptForServer(params: {
     '必须输出字段：schema_version,job_type,hard_gate,dimension_scores,total_score,strengths,risks,decision,summary,candidate_profile,candidate_name。' +
     'candidate_name：从简历中识别的候选人真实姓名（2～30 个字符）；能识别则必填，无法识别时填空字符串 ""（不要用「未知」「候选人」等占位）。' +
     'candidate_profile 为对象，从简历原文抽取候选人静态信息（无依据填 null；字符串可填空串）；其中可含 name 或「姓名」键，与 candidate_name 一致即可。' +
-    '必填尽量填写：school（毕业/就读院校）、job_title（应聘/求职岗位，勿写 JD 要求）、email、candidate_phone、current_position（现任或最近职位，勿含公司名）、' +
+    '必填尽量填写：school（毕业/就读院校）、job_title（应聘职位，仅填标准岗位序列名称，勿带初级/中级等级别前缀，勿写 JD 要求）、email、candidate_phone、current_company（现任或最近工作单位全称，勿写职位名）、' +
     'gender（男|女|未知）、age（整数|null）、work_experience_years（工作年限年数|null）、major、education、' +
     'current_address、graduation_date、arrival_time、id_number、is_third_party、' +
     'has_degree、is_unified_enrollment、expected_salary、verifiable、recruitment_channel、resume_uploaded（布尔，无依据 null）。' +
@@ -931,10 +943,15 @@ function sanitizeCandidateProfile(raw: unknown): Record<string, unknown> | undef
   const major = pickProfileStr(p.major ?? p['专业']) || null
   const education = pickProfileStr(p.education ?? p['学历']) || null
   const personName = pickProfileStr(p.name ?? p['姓名'] ?? p.candidate_name) || null
-  const posRaw = pickProfileStr(p.current_position ?? p.position ?? p['职位'] ?? p.current_job)
-  const current_position = posRaw ? normalizeExtractedJobTitleForDisplay(posRaw) : null
-  const jobTitleRaw = pickProfileStr(p.job_title ?? p['岗位'] ?? p.expected_job ?? p.intent_job ?? p.position_title)
-  const job_title = jobTitleRaw ? normalizeExtractedJobTitleForDisplay(jobTitleRaw) : null
+  const jobTitleRaw = pickProfileStr(
+    p.job_title ?? p['应聘岗位'] ?? p.expected_job ?? p.intent_job ?? p.position_title ?? p['岗位']
+  )
+  const job_title_matched = jobTitleRaw ? matchJobTitleToStandardProfileOption(jobTitleRaw) : null
+  const job_title_norm = jobTitleRaw ? normalizeExtractedJobTitleForDisplay(jobTitleRaw) : ''
+  const job_title =
+    job_title_matched || (job_title_norm && job_title_norm.length <= 128 ? job_title_norm : null) || null
+  const current_company =
+    pickProfileStr(p.current_company ?? p['当前公司'] ?? p.employer ?? p.work_company ?? p.company_name) || null
   const school = pickProfileStr(p.school ?? p['学校'] ?? p.university ?? p.college) || null
   const email = pickProfileStr(p.email ?? p.mail ?? p['邮箱'] ?? p.E_mail) || null
   const current_address = pickProfileStr(p.current_address ?? p.address ?? p['现住址'] ?? p['地址']) || null
@@ -958,12 +975,12 @@ function sanitizeCandidateProfile(raw: unknown): Record<string, unknown> | undef
     job_title: job_title || null,
     email: email || null,
     current_address: current_address || null,
+    current_company: current_company || null,
     graduation_date: graduation_date || null,
     arrival_time: arrival_time || null,
     id_number: id_number || null,
     is_third_party: pickProfileBool(p.is_third_party ?? p['是否第三方']),
     candidate_phone: phoneNorm,
-    current_position,
     has_degree: pickProfileBool(p.has_degree ?? p['是否有学位']),
     is_unified_enrollment: pickProfileBool(p.is_unified_enrollment ?? p['是否统招']),
     expected_salary: expected_salary || null,
@@ -985,6 +1002,7 @@ type ResumeProfileRow = {
   candidatePhone: string | null
   email: string | null
   currentAddress: string | null
+  currentCompany: string | null
   major: string | null
   education: string | null
   currentPosition: string | null
@@ -1015,12 +1033,18 @@ function resumeProfileRowFromValues(input: {
       ? (input.profile as Record<string, unknown>)
       : ({} as Record<string, unknown>)
   const candidateName = sanitizeCandidateName(input.candidateName) || '候选人'
+  const jobTitleRaw = pickProfileStr(
+    p.job_title ?? p['应聘岗位'] ?? p.expected_job ?? p.intent_job ?? p.position_title ?? p['岗位']
+  )
+  const jobTitleStd = jobTitleRaw ? matchJobTitleToStandardProfileOption(jobTitleRaw) : null
+  const jobTitleFinal =
+    jobTitleStd || (jobTitleRaw ? (jobTitleRaw.length <= 128 ? jobTitleRaw : jobTitleRaw.slice(0, 128)) : '')
   return {
     candidateName,
     gender: pickProfileStr(p.gender) || null,
     age: pickProfileInt(p.age),
     workExperienceYears: pickProfileInt(p.work_experience_years),
-    jobTitle: pickProfileStr(p.job_title ?? p.position ?? p['岗位']) || null,
+    jobTitle: jobTitleFinal ? jobTitleFinal : null,
     school: pickProfileStr(p.school ?? p['学校']) || null,
     candidatePhone:
       normalizeCnMobile(String(p.candidate_phone ?? p.phone ?? p.mobile ?? '')) ||
@@ -1028,9 +1052,10 @@ function resumeProfileRowFromValues(input: {
       null,
     email: pickProfileStr(p.email ?? p.mail ?? p['邮箱']) || null,
     currentAddress: pickProfileStr(p.current_address ?? p.address ?? p['现住址']) || null,
+    currentCompany: pickProfileStr(p.current_company ?? p['当前公司']) || null,
     major: pickProfileStr(p.major) || null,
     education: pickProfileStr(p.education) || null,
-    currentPosition: pickProfileStr(p.current_position ?? p.position ?? p['职位']) || null,
+    currentPosition: null,
     graduationDate: pickProfileStr(p.graduation_date ?? p['毕业时间']) || null,
     arrivalTime: pickProfileStr(p.arrival_time ?? p['到岗时间']) || null,
     idNumber: pickProfileStr(p.id_number ?? p.id_no ?? p['证件号码']) || null,
@@ -1321,6 +1346,26 @@ function extractSchoolFromResumeText(text: string): string | null {
   return null
 }
 
+/** 从简历正文抓取现任/最近工作单位 */
+function extractCurrentCompanyFromResumeText(text: string): string | null {
+  const t = text.replace(/\r\n/g, '\n').replace(/[\t\u3000]+/g, ' ').slice(0, 26000)
+  const labeled: RegExp[] = [
+    /(?:现任公司|目前公司|就职公司|工作单位|任职公司|所在公司|公司名称|就职单位|目前任职)[:：\s\u3000]+([^\n\r,，;；|｜]{2,80})/
+  ]
+  for (const re of labeled) {
+    const m = t.match(re)
+    if (m?.[1]) {
+      const s = m[1]
+        .trim()
+        .replace(/\s{2,}/g, ' ')
+        .replace(/^[（(][^)）]*[)）]\s*/, '')
+        .slice(0, 120)
+      if (s.length >= 2 && !/^[:：\s\d.-]+$/.test(s)) return s
+    }
+  }
+  return null
+}
+
 /** 应聘/求职岗位（与 current_position 现任岗区分） */
 function extractJobIntentFromResumeText(text: string): string | null {
   const t = text.replace(/\r\n/g, '\n').replace(/[\t\u3000]+/g, ' ').slice(0, 22000)
@@ -1365,6 +1410,10 @@ function enrichCandidateProfileFromPlainText(
   if (!pStr('candidate_phone')) {
     const ph = extractPhoneFromResumeText(clip)
     if (ph) out.candidate_phone = ph
+  }
+  if (!pStr('current_company')) {
+    const co = extractCurrentCompanyFromResumeText(clip)
+    if (co) out.current_company = co
   }
   return out
 }
@@ -3504,7 +3553,7 @@ app.get('/api/admin/resume-screenings/:id/profile', async (req, res) => {
   try {
     const [rows] = await mysqlPool.query<any[]>(
       `SELECT screening_id, candidate_name, gender, age, work_experience_years, job_title, school, candidate_phone,
-              email, current_address, major, education, current_position, graduation_date, arrival_time, id_number,
+              email, current_address, current_company, major, education, current_position, graduation_date, arrival_time, id_number,
               is_third_party, expected_salary, recruitment_channel, has_degree, is_unified_enrollment,
               verifiable, resume_uploaded, updated_at
        FROM resume_screening_profiles
@@ -3541,6 +3590,7 @@ app.get('/api/admin/resume-screenings/:id/profile', async (req, res) => {
         candidate_phone: row.candidatePhone,
         email: row.email,
         current_address: row.currentAddress,
+        current_company: row.currentCompany,
         major: row.major,
         education: row.education,
         current_position: row.currentPosition,
@@ -3582,10 +3632,10 @@ app.patch('/api/admin/resume-screenings/:id/profile', async (req, res) => {
     await mysqlPool.query(
       `INSERT INTO resume_screening_profiles
          (screening_id, candidate_name, gender, age, work_experience_years, job_title, school, candidate_phone,
-          email, current_address, major, education, current_position, graduation_date, arrival_time, id_number,
+          email, current_address, current_company, major, education, current_position, graduation_date, arrival_time, id_number,
           is_third_party, expected_salary, recruitment_channel, has_degree, is_unified_enrollment,
           verifiable, resume_uploaded)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON DUPLICATE KEY UPDATE
          candidate_name=VALUES(candidate_name),
          gender=VALUES(gender),
@@ -3596,6 +3646,7 @@ app.patch('/api/admin/resume-screenings/:id/profile', async (req, res) => {
          candidate_phone=VALUES(candidate_phone),
          email=VALUES(email),
          current_address=VALUES(current_address),
+         current_company=VALUES(current_company),
          major=VALUES(major),
          education=VALUES(education),
          current_position=VALUES(current_position),
@@ -3621,6 +3672,7 @@ app.patch('/api/admin/resume-screenings/:id/profile', async (req, res) => {
         row.candidatePhone,
         row.email,
         row.currentAddress,
+        row.currentCompany,
         row.major,
         row.education,
         row.currentPosition,
@@ -4301,10 +4353,10 @@ app.post(
         await mysqlPool.query(
           `INSERT INTO resume_screening_profiles
              (screening_id, candidate_name, gender, age, work_experience_years, job_title, school, candidate_phone,
-              email, current_address, major, education, current_position, graduation_date, arrival_time, id_number,
+              email, current_address, current_company, major, education, current_position, graduation_date, arrival_time, id_number,
               is_third_party, expected_salary, recruitment_channel, has_degree, is_unified_enrollment,
               verifiable, resume_uploaded)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON DUPLICATE KEY UPDATE
              candidate_name=VALUES(candidate_name),
              gender=VALUES(gender),
@@ -4315,6 +4367,7 @@ app.post(
              candidate_phone=VALUES(candidate_phone),
              email=VALUES(email),
              current_address=VALUES(current_address),
+             current_company=VALUES(current_company),
              major=VALUES(major),
              education=VALUES(education),
              current_position=VALUES(current_position),
@@ -4340,6 +4393,7 @@ app.post(
             profile.candidatePhone,
             profile.email,
             profile.currentAddress,
+            profile.currentCompany,
             profile.major,
             profile.education,
             profile.currentPosition,

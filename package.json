@@ -13,6 +13,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
+    "migrate:current-company": "tsx server/scripts/run-migration-current-company.ts",
     "start": "tsx server.ts"
   },
   "dependencies": {

@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS resume_screening_profiles (
   candidate_phone VARCHAR(32) NULL,
   email VARCHAR(128) NULL,
   current_address VARCHAR(255) NULL,
+  current_company VARCHAR(255) NULL,
   major VARCHAR(128) NULL,
   education VARCHAR(64) NULL,
   current_position VARCHAR(128) NULL,

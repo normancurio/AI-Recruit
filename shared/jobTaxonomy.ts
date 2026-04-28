@@ -105,7 +105,14 @@ export const STANDARD_JOB_ROLE_BASES = [
   '运营专员',
   '市场专员',
   '财务专员',
-  '行政专员'
+  '行政专员',
+  /** 机械 / 机器人 / 电气 / 成本等业务岗位 */
+  '机械设计岗',
+  '产品工程师/机械工程师',
+  '机器人应用工程师',
+  '成本估价岗',
+  '电气设计岗',
+  '软件算法岗'
 ] as const
 
 export const STANDARD_JOB_ROLE_BASE_SET = new Set<string>(STANDARD_JOB_ROLE_BASES as readonly string[])
@@ -199,4 +206,9 @@ export function normalizeExtractedJobTitleForDisplay(raw: string): string {
     if (compact === b.replace(/\s/g, '')) return b
   }
   return t.length <= 255 ? t : t.slice(0, 255)
+}
+
+/** 简历详情「职位」下拉：仅标准岗位序列（不含初级/中级等级别前缀），有序 */
+export function buildStandardProfileJobRoleBaseOptions(): string[] {
+  return [...STANDARD_JOB_ROLE_BASES].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'))
 }
