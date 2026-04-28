@@ -3084,9 +3084,24 @@ function resumeScreeningsJobFilterJoinSql(projectId: string | null): { fragment:
     }
   }
   return {
-    fragment: ` INNER JOIN jobs j ON ${onJob} AND j.project_id = ? `,
+    fragment: ` INNER JOIN jobs j ON ${onJob} AND CONVERT(TRIM(j.project_id) USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+          CONVERT(TRIM(?) USING utf8mb4) COLLATE utf8mb4_unicode_ci `,
     params: [projectId]
   }
+}
+
+/** projects.id 与 jobs.project_id 常见 utf8mb4_unicode_ci / utf8mb4_0900_ai_ci 混用，须与 job_code 一样显式归一 */
+function resumeScreeningsProjectIdMatchSql(projectAlias: string, jobAlias: string): string {
+  return `CONVERT(TRIM(${projectAlias}.id) USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+          CONVERT(TRIM(${jobAlias}.project_id) USING utf8mb4) COLLATE utf8mb4_unicode_ci`
+}
+
+/** 筛查 job_code → jobs(jn) → projects(pn)，列表展示项目名称 */
+function resumeScreeningsProjectJoinSql(): string {
+  const onJn = resumeScreeningsJobCodeMatchSql('jn', 's')
+  const onPn = resumeScreeningsProjectIdMatchSql('pn', 'jn')
+  return `LEFT JOIN jobs jn ON ${onJn}
+      LEFT JOIN projects pn ON ${onPn}`
 }
 
 function resumeScreeningsJoinSql(
@@ -3124,9 +3139,11 @@ function resumeScreeningsJoinSql(
               lr.passed AS interview_passed,
               lr.updated_at AS interview_report_updated_at,
               lr.session_id AS interview_report_session_id,
+              TRIM(COALESCE(pn.name, '')) AS job_project_name,
               ${sessCols}
        FROM resume_screenings s
        ${jobJoin}
+       ${resumeScreeningsProjectJoinSql()}
        LEFT JOIN interview_reports lr ON lr.id = (
          SELECT ir.id
          FROM interview_reports ir
@@ -3165,11 +3182,47 @@ function resumeScreeningsPlainSql(
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username,
               CAST(DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS CHAR(32)) AS created_at,
               EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
-              SUBSTRING(COALESCE(s.resume_plaintext,''), 1, 12000) AS resume_plaintext
+              SUBSTRING(COALESCE(s.resume_plaintext,''), 1, 12000) AS resume_plaintext,
+              TRIM(COALESCE(pn.name, '')) AS job_project_name
        FROM resume_screenings s
        ${jobJoin}
+       ${resumeScreeningsProjectJoinSql()}
        ORDER BY s.id DESC
        LIMIT 200`
+  return { sql, params: jobParams }
+}
+
+/** 简历库列表：筛查主表 + 结构化详情（profiles）+ 项目名；字段贴合简历详情编辑 */
+function resumeLibraryListSql(projectId: string | null): { sql: string; params: unknown[] } {
+  const { fragment: jobJoin, params: jobParams } = resumeScreeningsJobFilterJoinSql(projectId)
+  const sql = `SELECT s.id,
+              s.candidate_name,
+              s.candidate_phone,
+              s.matched_job_title,
+              s.job_code,
+              s.file_name,
+              CAST(DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS CHAR(32)) AS created_at,
+              EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
+              TRIM(COALESCE(pn.name, '')) AS job_project_name,
+              TRIM(COALESCE(jn.title, '')) AS job_list_title,
+              p.gender,
+              p.age,
+              p.work_experience_years,
+              p.major,
+              p.education,
+              NULLIF(TRIM(p.job_title), '') AS profile_job_title,
+              p.has_degree,
+              p.is_unified_enrollment,
+              p.expected_salary,
+              p.verifiable,
+              p.recruitment_channel,
+              p.resume_uploaded
+       FROM resume_screenings s
+       ${jobJoin}
+       ${resumeScreeningsProjectJoinSql()}
+       LEFT JOIN resume_screening_profiles p ON p.screening_id = s.id
+       ORDER BY s.id DESC
+       LIMIT 500`
   return { sql, params: jobParams }
 }
 
@@ -3334,6 +3387,39 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
     }
     const ex = e as { code?: string; errno?: number; message?: string }
     console.error('[GET /api/admin/resume-screenings]', ex.code, ex.errno, ex.message, e)
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.get('/api/admin/resume-library', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const rawPid = String(req.query.projectId ?? req.query.project_id ?? '').trim()
+  const projectId = rawPid.length ? rawPid : null
+  try {
+    const { sql, params } = resumeLibraryListSql(projectId)
+    const [rows] = await mysqlPool.query<any[]>(sql, params)
+    const data = (rows || []).map((r) => ({
+      ...r,
+      id: jsonSafeMysqlCell((r as { id?: unknown }).id),
+      created_at: resumeScreeningCreatedAtForResponse((r as { created_at?: unknown }).created_at),
+      file_name:
+        r?.file_name != null && String(r.file_name).trim()
+          ? normalizeMultipartFilename(String(r.file_name)).slice(0, 255)
+          : r.file_name
+    }))
+    res.json({ data })
+  } catch (e: unknown) {
+    const code = (e as { code?: string })?.code
+    if (code === 'ER_NO_SUCH_TABLE') {
+      const msg = String((e as { message?: string }).message || '')
+      if (msg.includes('resume_screening_profiles')) {
+        return res
+          .status(503)
+          .json({ message: '缺少结构化详情表，请执行 server/migration_resume_screening_profiles.sql' })
+      }
+      return res.status(503).json({ message: 'resume_screenings 表未创建，请执行 server/migration_resume_screenings.sql' })
+    }
+    console.error('[GET /api/admin/resume-library]', (e as { message?: string })?.message, e)
     res.status(500).json({ message: 'db error' })
   }
 })

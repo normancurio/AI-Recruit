@@ -106,6 +106,7 @@ const ADMIN_ROLE_MENU_OPTIONS: { group: string; items: { id: string; label: stri
     group: '招聘管理',
     items: [
       { id: 'resume-screening', label: '简历管理' },
+      { id: 'resume-library', label: '简历库' },
       { id: 'application-mgmt', label: '初面管理' }
     ]
   },
@@ -205,9 +206,21 @@ const NAV_TEMPLATE: NavItem[] = [
       {
         id: 'resume-screening',
         title: '简历管理',
-        roles: ['admin', 'recruiter', 'recruiting_manager', 'delivery_manager']
+        roles: ['admin', 'recruiter', 'recruiting_manager', 'delivery_manager'],
+        icon: <FileText className="w-4 h-4" />
       },
-      { id: 'application-mgmt', title: '初面管理', roles: ['admin', 'recruiter', 'recruiting_manager'] }
+      {
+        id: 'resume-library',
+        title: '简历库',
+        roles: ['admin', 'recruiter', 'recruiting_manager', 'delivery_manager'],
+        icon: <FolderOpen className="w-4 h-4" />
+      },
+      {
+        id: 'application-mgmt',
+        title: '初面管理',
+        roles: ['admin', 'recruiter', 'recruiting_manager'],
+        icon: <UserCheck className="w-4 h-4" />
+      }
     ]
   },
   {
@@ -272,6 +285,8 @@ export interface Resume {
   uploaderUsername?: string
   job: string
   jobCode?: string
+  /** 岗位绑定项目（projects.name） */
+  projectName?: string
   matchScore: number
   skillScore?: number
   experienceScore?: number
@@ -282,6 +297,8 @@ export interface Resume {
   /** 招聘漏斗阶段：简历筛查完成 / 已发邀请 / AI面试完成 等 */
   flowStage?: string
   uploadTime: string
+  /** 上传完整墙钟时间，供悬停 title（列表仅展示 uploadTime 年月日） */
+  uploadTimeFull?: string
   reportSummary?: string
   /** 原始上传文件名 */
   fileName?: string
@@ -860,6 +877,7 @@ export default function App() {
       case 'project-list': return <ProjectManagementView role={currentRole} onNavigate={setActiveMenu} authProfile={authProfile} />;
       case 'job-query': return <JobQueryView onNavigate={setActiveMenu} currentRole={currentRole} authProfile={authProfile} />;
       case 'resume-screening': return <ResumeScreeningView currentRole={currentRole} authProfile={authProfile} />;
+      case 'resume-library': return <ResumeLibraryView currentRole={currentRole} authProfile={authProfile} />;
       case 'application-mgmt': return <ApplicationManagementView currentRole={currentRole} authProfile={authProfile} />;
       case 'sys-dept': return <SystemDeptView />;
       case 'sys-user': return <SystemUserView currentRole={currentRole} authProfile={authProfile} />;
@@ -4652,6 +4670,31 @@ function deriveScreeningFlowLabels(row: Record<string, unknown>): { flowStage: s
   return { flowStage: '简历筛查完成', aiConclusion }
 }
 
+/** 初面管理列表「状态」列：与面试报告 passed 一致；无报告时按流程给可读文案 */
+function deriveApplicationListInterviewOutcome(
+  hasInterviewReport: boolean,
+  interviewPassed: unknown,
+  flowStage: string
+): string {
+  const pass =
+    interviewPassed === true ||
+    interviewPassed === 1 ||
+    interviewPassed === '1' ||
+    String(interviewPassed).toLowerCase() === 'true'
+  const fail =
+    interviewPassed === false ||
+    interviewPassed === 0 ||
+    interviewPassed === '0' ||
+    String(interviewPassed).toLowerCase() === 'false'
+  if (!hasInterviewReport) {
+    if (flowStage === '已发面试邀请') return '待完成面试'
+    return '暂无面试结论'
+  }
+  if (pass) return '面试通过'
+  if (fail) return '面试未通过'
+  return '结论待定'
+}
+
 function fmtAdminListDateTime(v: unknown): string {
   if (v == null || v === '') return ''
   try {
@@ -4707,7 +4750,8 @@ const SCREENING_NAIVE_CIVIL_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
 /** 历史：东八区墙钟被 `JSON` 成 `T…Z`，再 `toLocaleString(Asia/Shanghai)` 会多 +8h；取 ISO 字面量作展示 */
 const SCREENING_MISZ_RE = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?Z$/i
 
-function formatScreeningUploadTime(created: string | Date | null | undefined): string {
+/** 与库/会话时区一致的完整上传时间（年月日 时分秒） */
+function formatScreeningUploadTimeFull(created: string | Date | null | undefined): string {
   if (created == null) return ''
   if (created instanceof Date) {
     if (Number.isNaN(created.getTime())) return ''
@@ -4734,6 +4778,13 @@ function formatScreeningUploadTime(created: string | Date | null | undefined): s
   const d = new Date(s)
   if (Number.isNaN(d.getTime())) return s
   return d.toLocaleString('sv-SE', { timeZone: SCREENING_UPLOAD_TZ, hour12: false })
+}
+
+/** 列表展示用：仅年月日 */
+function formatScreeningUploadDate(created: string | Date | null | undefined): string {
+  const full = formatScreeningUploadTimeFull(created).trim()
+  const m = full.match(/^(\d{4}-\d{2}-\d{2})/)
+  return m ? m[1] : full.slice(0, 10)
 }
 
 function isLikelyCandidateDisplayName(raw: unknown): boolean {
@@ -4798,10 +4849,12 @@ function mapScreeningRow(r: {
   has_original_file?: unknown
   resume_plaintext?: string | null
   uploader_username?: string | null
+  job_project_name?: string | null
   created_at: string | Date
 }): Resume {
   const created = r.created_at
-  const uploadTime = formatScreeningUploadTime(created)
+  const uploadTimeFull = formatScreeningUploadTimeFull(created)
+  const uploadTime = formatScreeningUploadDate(created)
   const overall = Math.max(0, Math.min(100, Number(r.match_score) || 0))
   const d = dimsFromScreeningDbRow(r, overall)
   const { flowStage, aiConclusion } = deriveScreeningFlowLabels(r as unknown as Record<string, unknown>)
@@ -4846,6 +4899,10 @@ function mapScreeningRow(r: {
         : undefined,
     job: String(r.matched_job_title || r.job_code || ''),
     jobCode: String(r.job_code || ''),
+    projectName:
+      r.job_project_name != null && String(r.job_project_name).trim()
+        ? String(r.job_project_name).trim()
+        : undefined,
     matchScore: overall,
     skillScore: d.skill,
     experienceScore: d.experience,
@@ -4855,6 +4912,7 @@ function mapScreeningRow(r: {
     status: aiConclusion,
     flowStage,
     uploadTime,
+    uploadTimeFull: uploadTimeFull.trim() || undefined,
     reportSummary: String(r.report_summary || ''),
     evaluationJson: parsedEval,
     fileName:
@@ -4945,12 +5003,19 @@ const RECRUITMENT_CHANNEL_OPTIONS = [
 /** 学历枚举：与列表筛选「学历」一致，详情编辑用下拉选择 */
 const PROFILE_EDUCATION_OPTIONS = ['高中', '大专', '本科', '研究生'] as const;
 
+/** 到岗时间（必填）：常用选项，与业务表单一致 */
+const PROFILE_ARRIVAL_TIME_OPTIONS = ['随时', '一周内', '两周内', '一个月内', '三个月内', '面议'] as const;
+
 function isStandardRecruitmentChannel(v: string): boolean {
   return (RECRUITMENT_CHANNEL_OPTIONS as readonly string[]).includes(v);
 }
 
 function isStandardProfileEducation(v: string): boolean {
   return (PROFILE_EDUCATION_OPTIONS as readonly string[]).includes(v);
+}
+
+function isStandardProfileArrivalTime(v: string): boolean {
+  return (PROFILE_ARRIVAL_TIME_OPTIONS as readonly string[]).includes(v);
 }
 
 /** 与 shared/jobTaxonomy STANDARD_JOB_ROLE_BASE_SET 一致，供简历详情「职位」下拉校验 */
@@ -4962,6 +5027,1460 @@ const PROFILE_JOB_ROLE_BASE_OPTIONS = [...STANDARD_JOB_ROLE_BASES].sort((a, b) =
 
 function isStandardProfileJobTitle(v: string): boolean {
   return PROFILE_JOB_ROLE_BASE_SET.has(v);
+}
+
+/** 简历详情编辑：附件所示全部必填项校验（保存前） */
+function validateResumeProfileDraftComplete(d: Record<string, string>): string | null {
+  const name = String(d.candidate_name || '').trim();
+  if (!name) return '请填写姓名';
+  const gender = String(d.gender || '').trim();
+  if (!gender || (gender !== '男' && gender !== '女')) return '请选择性别';
+  const ageStr = String(d.age || '').trim();
+  if (!ageStr) return '请填写年龄';
+  const age = Number(ageStr);
+  if (!Number.isFinite(age) || age < 15 || age > 99) return '请填写有效年龄（15–99）';
+  const ch = String(d.recruitment_channel || '').trim();
+  if (!ch) return '请选择招聘渠道';
+  if (!isStandardRecruitmentChannel(ch)) return '招聘渠道须为系统预设选项之一';
+  const itp = String(d.is_third_party || '').trim();
+  if (itp !== '0' && itp !== '1') return '请选择是否第三方';
+  const wy = String(d.work_experience_years || '').trim();
+  if (!wy) return '请填写经验（工作年限）';
+  const wyn = Number(wy);
+  if (!Number.isFinite(wyn) || wyn < 0 || wyn > 60) return '请填写有效工作年限（0–60 年）';
+  const jt = String(d.job_title || '').trim();
+  if (!jt) return '请选择岗位';
+  if (!isStandardProfileJobTitle(jt)) return '岗位须为系统预设选项之一';
+  const phone = String(d.candidate_phone || '').replace(/\s/g, '');
+  if (!phone) return '请填写手机号';
+  if (!/^1\d{10}$/.test(phone)) return '请填写有效中国大陆手机号';
+  const edu = String(d.education || '').trim();
+  if (!edu) return '请选择学历';
+  if (!isStandardProfileEducation(edu)) return '学历须为系统预设选项之一';
+  const hd = String(d.has_degree || '').trim();
+  if (hd !== '0' && hd !== '1') return '请选择是否有学位';
+  const ue = String(d.is_unified_enrollment || '').trim();
+  if (ue !== '0' && ue !== '1') return '请选择是否统招';
+  const gd = String(d.graduation_date || '').trim();
+  if (!gd) return '请填写毕业时间';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(gd)) return '毕业时间格式须为 yyyy-MM-dd';
+  const at = String(d.arrival_time || '').trim();
+  if (!at) return '请选择到岗时间';
+  if (!isStandardProfileArrivalTime(at) && (at.length < 2 || at.length > 64)) {
+    return '到岗时间请选择预设项';
+  }
+  const vb = String(d.verifiable || '').trim();
+  if (vb !== '0' && vb !== '1') return '请选择是否可查';
+  return null;
+}
+
+type ResumeLibraryApiRow = {
+  id: number | string
+  candidate_name: string
+  candidate_phone?: string | null
+  matched_job_title: string | null
+  job_code: string
+  created_at: string | Date
+  file_name?: string | null
+  has_original_file?: unknown
+  job_project_name?: string | null
+  /** 岗位表 JD 名称 jobs.title */
+  job_list_title?: string | null
+  gender?: string | null
+  age?: number | null
+  work_experience_years?: number | null
+  major?: string | null
+  education?: string | null
+  profile_job_title?: string | null
+  has_degree?: unknown
+  is_unified_enrollment?: unknown
+  expected_salary?: string | null
+  verifiable?: unknown
+  recruitment_channel?: string | null
+  resume_uploaded?: unknown
+}
+
+function resumeStubFromLibraryRow(row: ResumeLibraryApiRow): Resume {
+  const created = row.created_at
+  const uploadTimeFull = formatScreeningUploadTimeFull(created)
+  const uploadTime = formatScreeningUploadDate(created)
+  const position = String(row.profile_job_title || row.matched_job_title || '').trim()
+  return {
+    id: String(row.id),
+    name: pickCandidateDisplayName(String(row.candidate_name || ''), undefined),
+    phone:
+      row.candidate_phone != null && String(row.candidate_phone).trim()
+        ? String(row.candidate_phone).trim()
+        : undefined,
+    job: position || String(row.matched_job_title || row.job_code || ''),
+    jobCode: String(row.job_code || ''),
+    projectName:
+      row.job_project_name != null && String(row.job_project_name).trim()
+        ? String(row.job_project_name).trim()
+        : undefined,
+    matchScore: 0,
+    status: '—',
+    uploadTime,
+    uploadTimeFull: uploadTimeFull.trim() || undefined,
+    fileName:
+      row.file_name != null && String(row.file_name).trim()
+        ? String(row.file_name).trim().slice(0, 255)
+        : undefined,
+    hasOriginalFile: Number(row.has_original_file) === 1
+  }
+}
+
+function mysqlTinyBoolTri(v: unknown): boolean | null {
+  if (v === null || v === undefined) return null
+  const n = Number(v)
+  if (n === 1) return true
+  if (n === 0) return false
+  return null
+}
+
+function emptyResumeLibraryFilters() {
+  return {
+    candidate: '',
+    gender: 'all' as 'all' | '男' | '女',
+    education: '',
+    jobCode: '',
+    hasDegree: 'all' as 'all' | '1' | '0',
+    unified: 'all' as 'all' | '1' | '0',
+    salary: '',
+    verifiable: 'all' as 'all' | '1' | '0',
+    channel: '',
+    keyword: ''
+  }
+}
+
+type ResumeLibraryFilters = ReturnType<typeof emptyResumeLibraryFilters>
+
+function resumeLibraryEducationMatches(stored: string, eduQ: string): boolean {
+  const e = (stored || '').trim()
+  if (!eduQ) return true
+  if (!e) return false
+  if (eduQ === '高中') return e.includes('高中')
+  if (eduQ === '大专') return e.includes('大专') || e.includes('专科') || e.includes('高职')
+  if (eduQ === '本科') return e.includes('本科') || e.includes('学士')
+  if (eduQ === '研究生') {
+    return (
+      e.includes('研究生') ||
+      e.includes('硕士') ||
+      e.includes('博士') ||
+      /Master|Ph\.?\s*D\.?/i.test(e)
+    )
+  }
+  return e.includes(eduQ)
+}
+
+function resumeLibraryChannelMatches(stored: string, chQ: string): boolean {
+  const c = (stored || '').trim()
+  if (!chQ) return true
+  if (!c) return false
+  if (chQ === 'Boss 直聘') {
+    const norm = c.replace(/\s+/g, '').toLowerCase()
+    return norm.includes('boss') && norm.includes('直聘')
+  }
+  return c.includes(chQ)
+}
+
+function resumeLibraryTriFilter(sel: 'all' | '1' | '0', v: boolean | null): boolean {
+  if (sel === 'all') return true
+  if (v === true) return sel === '1'
+  if (v === false) return sel === '0'
+  return false
+}
+
+/** 与简历管理共用：详情编辑弹框（加载 /api/admin/resume-screenings/:id/profile、PATCH 保存） */
+function ResumeProfileEditDialog({
+  resume,
+  onClose,
+  onSaved
+}: {
+  resume: Resume | null
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const apiBase = resolveMiniappApiBase()
+  const hasToken = hasAdminApiCredentials()
+  const [profileDraft, setProfileDraft] = useState<Record<string, string>>({})
+  const [profileLoading, setProfileLoading] = useState(false)
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [profileError, setProfileError] = useState('')
+
+  useEffect(() => {
+    if (!resume || !apiBase || !hasToken) {
+      setProfileDraft({})
+      setProfileLoading(false)
+      setProfileError('')
+      return
+    }
+    let cancelled = false
+    setProfileLoading(true)
+    setProfileError('')
+    void miniappApiFetch(`/api/admin/resume-screenings/${encodeURIComponent(resume.id)}/profile`)
+      .then(async (r) => {
+        const j = (await r.json().catch(() => ({}))) as { data?: Record<string, unknown>; message?: string }
+        if (!r.ok) throw new Error(j.message || `加载失败 ${r.status}`)
+        const d = (j.data || {}) as Record<string, unknown>
+        if (cancelled) return
+        setProfileDraft({
+          candidate_name: String(d.candidate_name || resume.name || ''),
+          gender: String(d.gender || ''),
+          age: d.age == null ? '' : String(d.age),
+          work_experience_years: d.work_experience_years == null ? '' : String(d.work_experience_years),
+          job_title: String(d.job_title || ''),
+          school: String(d.school || ''),
+          candidate_phone: String(d.candidate_phone || resume.phone || ''),
+          email: String(d.email || ''),
+          current_address: String(d.current_address || ''),
+          current_company: String(d.current_company || ''),
+          major: String(d.major || ''),
+          education: String(d.education || ''),
+          graduation_date: String(d.graduation_date || ''),
+          arrival_time: String(d.arrival_time || ''),
+          id_number: String(d.id_number || ''),
+          is_third_party: d.is_third_party == null ? '' : String(d.is_third_party),
+          expected_salary: String(d.expected_salary || ''),
+          recruitment_channel: String(d.recruitment_channel || '').trim(),
+          has_degree: d.has_degree == null ? '' : String(d.has_degree),
+          is_unified_enrollment: d.is_unified_enrollment == null ? '' : String(d.is_unified_enrollment),
+          verifiable: d.verifiable == null ? '' : String(d.verifiable)
+        })
+      })
+      .catch((e) => {
+        if (!cancelled) setProfileError(e instanceof Error ? e.message : '加载详情失败')
+      })
+      .finally(() => {
+        if (!cancelled) setProfileLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [resume, apiBase, hasToken])
+
+  const saveResumeProfile = useCallback(async () => {
+    if (!resume || !apiBase || !hasToken) return
+    const ve = validateResumeProfileDraftComplete(profileDraft)
+    if (ve) {
+      setProfileError(ve)
+      return
+    }
+    setProfileSaving(true)
+    setProfileError('')
+    try {
+      const payload = {
+        candidate_name: String(profileDraft.candidate_name || '').trim(),
+        gender: String(profileDraft.gender || '').trim(),
+        age: String(profileDraft.age || '').trim() ? Number(profileDraft.age) : null,
+        work_experience_years: String(profileDraft.work_experience_years || '').trim()
+          ? Number(profileDraft.work_experience_years)
+          : null,
+        job_title: String(profileDraft.job_title || '').trim(),
+        school: String(profileDraft.school || '').trim(),
+        candidate_phone: String(profileDraft.candidate_phone || '').trim(),
+        email: String(profileDraft.email || '').trim(),
+        current_address: String(profileDraft.current_address || '').trim(),
+        current_company: String(profileDraft.current_company || '').trim(),
+        major: String(profileDraft.major || '').trim(),
+        education: String(profileDraft.education || '').trim(),
+        current_position: null,
+        graduation_date: String(profileDraft.graduation_date || '').trim(),
+        arrival_time: String(profileDraft.arrival_time || '').trim(),
+        id_number: String(profileDraft.id_number || '').trim(),
+        is_third_party:
+          String(profileDraft.is_third_party || '').trim() === ''
+            ? null
+            : Number(profileDraft.is_third_party) === 1
+              ? true
+              : Number(profileDraft.is_third_party) === 0
+                ? false
+                : null,
+        expected_salary: String(profileDraft.expected_salary || '').trim(),
+        recruitment_channel: String(profileDraft.recruitment_channel || '').trim(),
+        has_degree:
+          String(profileDraft.has_degree || '').trim() === ''
+            ? null
+            : Number(profileDraft.has_degree) === 1
+              ? true
+              : Number(profileDraft.has_degree) === 0
+                ? false
+                : null,
+        is_unified_enrollment:
+          String(profileDraft.is_unified_enrollment || '').trim() === ''
+            ? null
+            : Number(profileDraft.is_unified_enrollment) === 1
+              ? true
+              : Number(profileDraft.is_unified_enrollment) === 0
+                ? false
+                : null,
+        verifiable:
+          String(profileDraft.verifiable || '').trim() === ''
+            ? null
+            : Number(profileDraft.verifiable) === 1
+              ? true
+              : Number(profileDraft.verifiable) === 0
+                ? false
+                : null
+      }
+      const r = await miniappApiFetch(`/api/admin/resume-screenings/${encodeURIComponent(resume.id)}/profile`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      const j = (await r.json().catch(() => ({}))) as { message?: string }
+      if (!r.ok) throw new Error(j.message || `保存失败 ${r.status}`)
+      onClose()
+      onSaved()
+    } catch (e) {
+      setProfileError(e instanceof Error ? e.message : '保存失败')
+    } finally {
+      setProfileSaving(false)
+    }
+  }, [resume, apiBase, hasToken, profileDraft, onClose, onSaved])
+
+  if (!resume) return null
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-[63] flex items-center justify-center p-4 bg-slate-900/50"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="resume-profile-title"
+      onClick={() => !profileSaving && onClose()}
+    >
+      <motion.div
+        initial={{ opacity: 0, scale: 0.96, y: 8 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.96, y: 8 }}
+        transition={{ duration: 0.2 }}
+        className="bg-white rounded-xl shadow-xl border border-slate-200 w-full max-w-4xl max-h-[85vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+          <h3 id="resume-profile-title" className="text-lg font-bold text-slate-900">
+            简历详情编辑
+          </h3>
+          <button
+            type="button"
+            onClick={() => !profileSaving && onClose()}
+            className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+          >
+            <XCircle className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="px-6 py-4 overflow-y-auto space-y-3">
+          {profileLoading ? (
+            <p className="text-sm text-slate-500">加载中...</p>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <label className="text-xs text-slate-600">
+                  <span className="text-red-500 mr-0.5" aria-hidden>*</span>
+                  姓名
+                  <input
+                    value={String(profileDraft.candidate_name || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, candidate_name: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="text-xs text-slate-600">
+                  <span className="text-red-500 mr-0.5" aria-hidden>*</span>
+                  性别
+                  <select
+                    value={String(profileDraft.gender || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, gender: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm bg-white"
+                  >
+                    <option value="">请选择</option>
+                    <option value="男">男</option>
+                    <option value="女">女</option>
+                  </select>
+                </label>
+                <label className="text-xs text-slate-600">
+                  <span className="text-red-500 mr-0.5" aria-hidden>*</span>
+                  年龄
+                  <input
+                    inputMode="numeric"
+                    value={String(profileDraft.age || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, age: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="text-xs text-slate-600">
+                  <span className="text-red-500 mr-0.5" aria-hidden>*</span>
+                  招聘渠道
+                  <select
+                    value={String(profileDraft.recruitment_channel || '').trim()}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, recruitment_channel: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm"
+                  >
+                    <option value="">请选择</option>
+                    {(() => {
+                      const rawCh = String(profileDraft.recruitment_channel || '').trim()
+                      if (!rawCh || isStandardRecruitmentChannel(rawCh)) return null
+                      return <option value={rawCh}>{rawCh}（请改为标准项）</option>
+                    })()}
+                    {RECRUITMENT_CHANNEL_OPTIONS.map((opt) => (
+                      <option key={opt} value={opt}>
+                        {opt}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-xs text-slate-600">
+                  <span className="text-red-500 mr-0.5" aria-hidden>*</span>
+                  是否第三方
+                  <select
+                    value={String(profileDraft.is_third_party || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, is_third_party: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm bg-white"
+                  >
+                    <option value="">请选择</option>
+                    <option value="0">否</option>
+                    <option value="1">是</option>
+                  </select>
+                </label>
+                <label className="text-xs text-slate-600">
+                  <span className="text-red-500 mr-0.5" aria-hidden>*</span>
+                  经验（年）
+                  <input
+                    inputMode="decimal"
+                    value={String(profileDraft.work_experience_years || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, work_experience_years: e.target.value }))}
+                    placeholder="工作年限"
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="text-xs text-slate-600">
+                  <span className="text-red-500 mr-0.5" aria-hidden>*</span>
+                  岗位
+                  <select
+                    value={String(profileDraft.job_title || '').trim()}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, job_title: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm"
+                  >
+                    <option value="">请选择</option>
+                    {(() => {
+                      const rawJt = String(profileDraft.job_title || '').trim()
+                      if (!rawJt || isStandardProfileJobTitle(rawJt)) return null
+                      return <option value={rawJt}>{rawJt}（请改为标准项）</option>
+                    })()}
+                    {PROFILE_JOB_ROLE_BASE_OPTIONS.map((base) => (
+                      <option key={base} value={base}>
+                        {base}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-xs text-slate-600">
+                  <span className="text-red-500 mr-0.5" aria-hidden>*</span>
+                  手机号
+                  <input
+                    inputMode="tel"
+                    autoComplete="tel"
+                    value={String(profileDraft.candidate_phone || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, candidate_phone: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="text-xs text-slate-600">
+                  邮箱
+                  <input
+                    type="email"
+                    value={String(profileDraft.email || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, email: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="text-xs text-slate-600">
+                  <span className="text-red-500 mr-0.5" aria-hidden>*</span>
+                  学历
+                  <select
+                    value={String(profileDraft.education || '').trim()}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, education: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm"
+                  >
+                    <option value="">请选择</option>
+                    {(() => {
+                      const rawEdu = String(profileDraft.education || '').trim()
+                      if (!rawEdu || isStandardProfileEducation(rawEdu)) return null
+                      return <option value={rawEdu}>{rawEdu}（请改为标准项）</option>
+                    })()}
+                    {PROFILE_EDUCATION_OPTIONS.map((opt) => (
+                      <option key={opt} value={opt}>
+                        {opt}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-xs text-slate-600">
+                  <span className="text-red-500 mr-0.5" aria-hidden>*</span>
+                  是否有学位
+                  <select
+                    value={String(profileDraft.has_degree || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, has_degree: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm bg-white"
+                  >
+                    <option value="">请选择</option>
+                    <option value="0">否</option>
+                    <option value="1">是</option>
+                  </select>
+                </label>
+                <label className="text-xs text-slate-600">
+                  <span className="text-red-500 mr-0.5" aria-hidden>*</span>
+                  是否统招
+                  <select
+                    value={String(profileDraft.is_unified_enrollment || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, is_unified_enrollment: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm bg-white"
+                  >
+                    <option value="">请选择</option>
+                    <option value="0">否</option>
+                    <option value="1">是</option>
+                  </select>
+                </label>
+                <label className="text-xs text-slate-600">
+                  <span className="text-red-500 mr-0.5" aria-hidden>*</span>
+                  毕业时间
+                  <input
+                    type="text"
+                    value={String(profileDraft.graduation_date || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, graduation_date: e.target.value }))}
+                    placeholder="yyyy-MM-dd"
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="text-xs text-slate-600">
+                  <span className="text-red-500 mr-0.5" aria-hidden>*</span>
+                  到岗时间
+                  <select
+                    value={String(profileDraft.arrival_time || '').trim()}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, arrival_time: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm"
+                  >
+                    <option value="">请选择</option>
+                    {(() => {
+                      const rawAt = String(profileDraft.arrival_time || '').trim()
+                      if (!rawAt || isStandardProfileArrivalTime(rawAt)) return null
+                      return <option value={rawAt}>{rawAt}（请改为标准项）</option>
+                    })()}
+                    {PROFILE_ARRIVAL_TIME_OPTIONS.map((opt) => (
+                      <option key={opt} value={opt}>
+                        {opt}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-xs text-slate-600">
+                  <span className="text-red-500 mr-0.5" aria-hidden>*</span>
+                  是否可查
+                  <select
+                    value={String(profileDraft.verifiable || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, verifiable: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm bg-white"
+                  >
+                    <option value="">请选择</option>
+                    <option value="0">否</option>
+                    <option value="1">是</option>
+                  </select>
+                </label>
+                <label className="text-xs text-slate-600">
+                  专业
+                  <input
+                    value={String(profileDraft.major || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, major: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="text-xs text-slate-600">
+                  期望薪资
+                  <input
+                    value={String(profileDraft.expected_salary || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, expected_salary: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="text-xs text-slate-600">
+                  学校
+                  <input
+                    value={String(profileDraft.school || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, school: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="text-xs text-slate-600">
+                  证件号码
+                  <input
+                    value={String(profileDraft.id_number || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, id_number: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="text-xs text-slate-600 sm:col-span-2">
+                  现住址
+                  <input
+                    value={String(profileDraft.current_address || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, current_address: e.target.value }))}
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="text-xs text-slate-600 sm:col-span-3">
+                  当前公司
+                  <input
+                    value={String(profileDraft.current_company || '')}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, current_company: e.target.value }))}
+                    placeholder="选填"
+                    className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+              </div>
+            </>
+          )}
+          {profileError ? <p className="text-xs text-red-600">{profileError}</p> : null}
+        </div>
+        <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 flex justify-end gap-2 rounded-b-xl">
+          <button type="button" className={btnSecondarySm} onClick={() => onClose()} disabled={profileSaving}>
+            取消
+          </button>
+          <button
+            type="button"
+            className={btnSaveSm}
+            onClick={() => void saveResumeProfile()}
+            disabled={profileSaving || profileLoading}
+          >
+            {profileSaving ? '保存中…' : '保存详情'}
+          </button>
+        </div>
+      </motion.div>
+    </motion.div>
+  )
+}
+
+function LibraryTriCell({ v }: { v: boolean | null }) {
+  if (v === true) {
+    return (
+      <span className="inline-flex min-h-[1.1rem] min-w-[1.1rem] shrink-0 items-center justify-center rounded-full border border-teal-300 bg-teal-50 px-1.5 text-[10px] font-medium text-teal-800">
+        是
+      </span>
+    );
+  }
+  if (v === false) {
+    return (
+      <span className="inline-flex min-h-[1.1rem] shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-50 px-1.5 text-[10px] text-slate-600">
+        否
+      </span>
+    );
+  }
+  return <span className="text-slate-400">—</span>;
+}
+
+function ResumeLibraryView({
+  currentRole,
+  authProfile
+}: {
+  currentRole: Role;
+  authProfile: AdminLoginProfile | null;
+}) {
+  const [sessRev, setSessRev] = useState(0);
+  useEffect(() => subscribeAdminSession(() => setSessRev((n) => n + 1)), []);
+  const apiBase = resolveMiniappApiBase();
+  const hasToken = hasAdminApiCredentials();
+  void sessRev;
+
+  const [libRows, setLibRows] = useState<ResumeLibraryApiRow[]>([]);
+  const [libError, setLibError] = useState('');
+  const [listPage, setListPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [resumeProjectFilter, setResumeProjectFilter] = useState('');
+  const [inviteJobs, setInviteJobs] = useState<
+    { job_code: string; title: string; department: string; project_id?: string | null }[]
+  >([]);
+  const [inviteJobsLoading, setInviteJobsLoading] = useState(false);
+  const [screeningProjects, setScreeningProjects] = useState<
+    { id: string; name: string; dept?: string; recruitmentLeads?: string[] }[]
+  >([]);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [inviteBanner, setInviteBanner] = useState('');
+  const [profileEditResume, setProfileEditResume] = useState<Resume | null>(null);
+  const [fileBusyId, setFileBusyId] = useState<string | null>(null);
+  const [libFilterDraft, setLibFilterDraft] = useState<ResumeLibraryFilters>(() => emptyResumeLibraryFilters());
+  const [libFilterApplied, setLibFilterApplied] = useState<ResumeLibraryFilters>(() => emptyResumeLibraryFilters());
+
+  const { codes: recruiterJobCodes, loading: recruiterScopeLoading } = useRecruiterScopedJobCodes(
+    currentRole,
+    authProfile
+  );
+  const isRecruiter = currentRole === 'recruiter';
+  const isDeliveryManager = currentRole === 'delivery_manager';
+  const isRecruitingManager = currentRole === 'recruiting_manager';
+  const recruiterCodeSet = useMemo(() => new Set(recruiterJobCodes), [recruiterJobCodes]);
+
+  const projectFilterOptions = useMemo(() => {
+    let base = screeningProjects;
+    if (isRecruitingManager) {
+      base = base.filter((p) => p.id && namesListContainsIdentity(p.recruitmentLeads, authProfile));
+    }
+    if (isDeliveryManager) {
+      const ud = String(authProfile?.dept || '').trim();
+      if (!ud || ud === '-') return [];
+      base = base.filter((p) => p.id && deptNamesMatch(ud, String(p.dept || '')));
+    }
+    if (!isRecruiter) return base;
+    if (inviteJobs.length === 0) return [];
+    const pidSet = new Set(inviteJobs.map((j) => String(j.project_id || '').trim()).filter(Boolean));
+    if (pidSet.size === 0) return [];
+    return base.filter((p) => pidSet.has(p.id));
+  }, [authProfile, isDeliveryManager, isRecruiter, isRecruitingManager, inviteJobs, screeningProjects]);
+
+  useEffect(() => {
+    setResumeProjectFilter((prev) => {
+      if (prev === '_null') return '';
+      if (!prev) return prev;
+      if (projectFilterOptions.some((p) => p.id === prev)) return prev;
+      return '';
+    });
+  }, [projectFilterOptions]);
+
+  /** 与简历管理岗位下拉一致：按当前「项目」筛选可选岗位 */
+  const jobsForLibSelect = useMemo(() => {
+    const pid = resumeProjectFilter.trim();
+    if (!pid) return inviteJobs;
+    if (pid === '_null') {
+      return inviteJobs.filter((j) => !String(j.project_id ?? '').trim());
+    }
+    return inviteJobs.filter((j) => String(j.project_id ?? '').trim() === pid);
+  }, [inviteJobs, resumeProjectFilter]);
+
+  useEffect(() => {
+    if (!apiBase || !hasToken) {
+      setScreeningProjects([]);
+      return;
+    }
+    setProjectsLoading(true);
+    void miniappApiFetch('/api/admin/projects')
+      .then(async (r) => {
+        const j = (await r.json()) as { data?: { id: string; name?: string }[]; message?: string };
+        if (!r.ok) throw new Error(j.message || 'load projects failed');
+        const list = (j.data || []).map((p) => {
+          const row = p as {
+            id?: unknown;
+            name?: unknown;
+            dept?: unknown;
+            recruitmentLeads?: unknown;
+          };
+          const lr = row.recruitmentLeads;
+          const recruitmentLeads = Array.isArray(lr)
+            ? lr.map((x) => String(x || '').trim()).filter(Boolean)
+            : [];
+          return {
+            id: String(row.id || ''),
+            name: String(row.name || row.id || '').trim() || String(row.id || ''),
+            dept: row.dept != null ? String(row.dept) : '',
+            recruitmentLeads
+          };
+        });
+        setScreeningProjects(list.filter((x) => x.id));
+      })
+      .catch(() => setScreeningProjects([]))
+      .finally(() => setProjectsLoading(false));
+  }, [apiBase, hasToken, sessRev]);
+
+  useEffect(() => {
+    if (!apiBase || !hasToken) {
+      setInviteBanner('请先完成管理端登录；若已登录仍提示此项，请联系管理员确认招聘服务是否已开启。');
+      return;
+    }
+    setInviteJobsLoading(true);
+    setInviteBanner('');
+    miniappApiFetch('/api/admin/jobs')
+      .then(async (r) => {
+        const j = (await r.json().catch(() => ({}))) as {
+          data?: { job_code: string; title: string; department: string; project_id?: string | null }[];
+          message?: string;
+        };
+        if (!r.ok) {
+          const hint =
+            j.message ||
+            (r.status === 401
+              ? '未授权，请重新登录；若仍失败请联系管理员。'
+              : r.status === 503
+                ? '登录服务暂不可用，请稍后再试或联系管理员。'
+                : `服务异常（${r.status}），请稍后再试或联系管理员。`);
+          throw new Error(hint);
+        }
+        const all = j.data || [];
+        let scoped = all;
+        if (isRecruiter) {
+          scoped = all.filter((x) => recruiterCodeSet.has(String(x.job_code)));
+        } else if (isRecruitingManager) {
+          const allowed = new Set(
+            screeningProjects
+              .filter((p) => p.id && namesListContainsIdentity(p.recruitmentLeads, authProfile))
+              .map((p) => p.id)
+          );
+          scoped =
+            allowed.size === 0 ? [] : all.filter((x) => allowed.has(String(x.project_id ?? '').trim()));
+        } else if (isDeliveryManager) {
+          const ud = String(authProfile?.dept || '').trim();
+          if (!ud || ud === '-') {
+            scoped = [];
+          } else {
+            let plist = screeningProjects;
+            if (plist.length === 0) {
+              try {
+                const pr = await miniappApiFetch('/api/admin/projects');
+                const pj = (await pr.json()) as {
+                  data?: { id?: unknown; name?: unknown; dept?: unknown }[];
+                  message?: string;
+                };
+                if (pr.ok && Array.isArray(pj.data)) {
+                  plist = pj.data.map((p) => ({
+                    id: String(p.id || ''),
+                    name: String(p.name || p.id || '').trim() || String(p.id || ''),
+                    dept: p.dept != null ? String(p.dept) : ''
+                  }));
+                  setScreeningProjects(plist.filter((x) => x.id));
+                } else {
+                  plist = [];
+                }
+              } catch {
+                plist = [];
+              }
+            }
+            const allowed = new Set(
+              plist.filter((p) => p.id && deptNamesMatch(ud, String(p.dept || ''))).map((p) => p.id)
+            );
+            scoped = all.filter((x) => allowed.has(String(x.project_id ?? '').trim()));
+          }
+        }
+        setInviteJobs(scoped);
+      })
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        const isNet =
+          msg === 'Failed to fetch' || msg === 'Load failed' || msg.includes('NetworkError');
+        setInviteBanner(
+          isNet
+            ? '无法连接到招聘服务，请检查网络或联系管理员确认后台是否在线。'
+            : `加载岗位列表失败：${msg || '请稍后重试或联系管理员。'}`
+        );
+        setInviteJobs([]);
+      })
+      .finally(() => setInviteJobsLoading(false));
+  }, [
+    apiBase,
+    hasToken,
+    isRecruiter,
+    isDeliveryManager,
+    isRecruitingManager,
+    authProfile,
+    authProfile?.dept,
+    screeningProjects,
+    recruiterCodeSet,
+    sessRev
+  ]);
+
+  const loadLibrary = useCallback(() => {
+    if (!apiBase || !hasToken) {
+      setLibRows([]);
+      setLibError('');
+      return;
+    }
+    setLibError('');
+    const url =
+      resumeProjectFilter.trim().length > 0
+        ? `/api/admin/resume-library?projectId=${encodeURIComponent(resumeProjectFilter.trim())}`
+        : '/api/admin/resume-library';
+    void miniappApiFetch(url)
+      .then(async (r) => {
+        const j = (await r.json()) as { data?: ResumeLibraryApiRow[]; message?: string };
+        if (!r.ok) throw new Error(j.message || 'load failed');
+        setLibRows(j.data || []);
+      })
+      .catch(() => {
+        setLibRows([]);
+        setLibError('简历库数据暂时无法加载，请稍后重试或联系管理员检查库表是否已升级。');
+      });
+  }, [apiBase, hasToken, resumeProjectFilter, sessRev]);
+
+  useEffect(() => {
+    loadLibrary();
+  }, [loadLibrary]);
+
+  const scopedLibRows = useMemo(() => {
+    let list = libRows;
+    if (isRecruiter) {
+      list = list.filter((r) => recruiterCodeSet.has(String(r.job_code)));
+    } else if (isDeliveryManager || isRecruitingManager) {
+      const allow = new Set(inviteJobs.map((j) => String(j.job_code || '').trim()).filter(Boolean));
+      if (allow.size === 0) return [];
+      list = list.filter((r) => allow.has(String(r.job_code || '').trim()));
+    }
+    return list;
+  }, [libRows, isRecruiter, isDeliveryManager, isRecruitingManager, inviteJobs, recruiterCodeSet]);
+
+  const filteredLibRows = useMemo(() => {
+    const f = libFilterApplied;
+    let list = scopedLibRows;
+    const cq = f.candidate.trim().toLowerCase();
+    if (cq) {
+      list = list.filter((r) => String(r.candidate_name || '').toLowerCase().includes(cq));
+    }
+    if (f.gender !== 'all') {
+      list = list.filter((r) => String(r.gender || '').trim() === f.gender);
+    }
+    if (f.education.trim()) {
+      list = list.filter((r) => resumeLibraryEducationMatches(String(r.education || ''), f.education.trim()));
+    }
+    const jc = f.jobCode.trim();
+    if (jc) {
+      list = list.filter((r) => String(r.job_code || '').trim() === jc);
+    }
+    list = list.filter((r) => {
+      const hd = mysqlTinyBoolTri(r.has_degree);
+      const un = mysqlTinyBoolTri(r.is_unified_enrollment);
+      const vb = mysqlTinyBoolTri(r.verifiable);
+      return (
+        resumeLibraryTriFilter(f.hasDegree, hd) &&
+        resumeLibraryTriFilter(f.unified, un) &&
+        resumeLibraryTriFilter(f.verifiable, vb)
+      );
+    });
+    const sal = f.salary.trim();
+    if (sal) {
+      list = list.filter((r) => String(r.expected_salary || '').includes(sal));
+    }
+    const ch = f.channel.trim();
+    if (ch) {
+      list = list.filter((r) => resumeLibraryChannelMatches(String(r.recruitment_channel || ''), ch));
+    }
+    const kw = f.keyword.trim().toLowerCase();
+    if (kw) {
+      list = list.filter((r) => {
+        const position = String(r.profile_job_title || r.matched_job_title || '').trim();
+        const blob = [
+          r.candidate_name,
+          r.candidate_phone,
+          position,
+          r.job_code,
+          r.job_project_name,
+          r.job_list_title,
+          r.major,
+          r.education,
+          r.recruitment_channel,
+          r.expected_salary
+        ]
+          .map((x) => String(x || '').toLowerCase())
+          .join('\n');
+        return blob.includes(kw);
+      });
+    }
+    return list;
+  }, [scopedLibRows, libFilterApplied]);
+
+  const handleResumeLibrarySearch = useCallback(() => {
+    setLibFilterApplied({ ...libFilterDraft });
+    setListPage(1);
+  }, [libFilterDraft]);
+
+  const handleResumeLibraryReset = useCallback(() => {
+    const z = emptyResumeLibraryFilters();
+    setLibFilterDraft(z);
+    setLibFilterApplied(z);
+    setListPage(1);
+  }, []);
+
+  useEffect(() => {
+    setListPage(1);
+  }, [resumeProjectFilter, isRecruiter, isDeliveryManager, isRecruitingManager]);
+
+  const pagedRows = useMemo(() => {
+    const start = (listPage - 1) * pageSize;
+    return filteredLibRows.slice(start, start + pageSize);
+  }, [filteredLibRows, listPage, pageSize]);
+
+  useEffect(() => {
+    const tp = Math.max(1, Math.ceil(filteredLibRows.length / pageSize) || 1);
+    setListPage((p) => Math.min(Math.max(1, p), tp));
+  }, [filteredLibRows.length, pageSize]);
+
+  const openResumeOriginalFile = useCallback(
+    async (resume: Resume, mode: 'preview' | 'download') => {
+      if (!apiBase || !hasToken) return;
+      setFileBusyId(resume.id);
+      try {
+        const r = await miniappApiFetch(
+          `/api/admin/resume-screenings/${encodeURIComponent(resume.id)}/file?mode=${mode === 'download' ? 'download' : 'preview'}`
+        );
+        if (!r.ok) {
+          const j = (await r.json().catch(() => ({}))) as { message?: string };
+          throw new Error(j.message || `获取文件失败 ${r.status}`);
+        }
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        if (mode === 'download') {
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = resume.fileName || 'resume';
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1500);
+        } else {
+          window.open(url, '_blank', 'noopener,noreferrer');
+          setTimeout(() => URL.revokeObjectURL(url), 5000);
+        }
+      } catch (e) {
+        window.alert(e instanceof Error ? e.message : '获取简历文件失败');
+      } finally {
+        setFileBusyId(null);
+      }
+    },
+    [apiBase, hasToken]
+  );
+
+  const libFilterCtrl =
+    'w-full rounded-md border border-slate-200 bg-white py-1 pl-2 pr-1.5 text-xs leading-normal text-slate-900 outline-none focus:ring-2 focus:ring-indigo-400/40 disabled:bg-slate-100';
+
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-2 p-2 sm:gap-2 sm:p-3">
+      {inviteBanner ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 sm:text-sm">{inviteBanner}</div>
+      ) : null}
+      {isRecruiter && !recruiterScopeLoading && recruiterJobCodes.length === 0 ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 sm:text-sm">
+          当前账号未分配可操作岗位，请联系招聘经理在「岗位分配」中为对应岗位配置招聘人员。
+        </div>
+      ) : null}
+
+      <form
+        className="shrink-0 rounded-lg border border-slate-200 bg-white px-2.5 py-2 shadow-sm"
+        title="项目决定数据拉取范围；筛选条件需点击搜索后生效"
+        onSubmit={(e) => {
+          e.preventDefault();
+          handleResumeLibrarySearch();
+        }}
+      >
+        <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-slate-100 pb-1.5">
+          <h2 className="text-xs font-semibold text-slate-800">条件筛选</h2>
+          <span className="hidden text-[11px] leading-snug text-slate-400 md:inline">项目决定拉取范围 · 与简历管理权限一致</span>
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            <button
+              type="submit"
+              className="inline-flex items-center gap-1 rounded-md bg-teal-600 px-2.5 py-1 text-xs font-medium text-white shadow-sm hover:bg-teal-700"
+            >
+              <Search className="h-3.5 w-3.5" aria-hidden />
+              搜索
+            </button>
+            <button
+              type="button"
+              onClick={handleResumeLibraryReset}
+              className="inline-flex items-center gap-1 rounded-md bg-amber-500 px-2.5 py-1 text-xs font-medium text-white shadow-sm hover:bg-amber-600"
+            >
+              <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+              重置
+            </button>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-x-2.5 gap-y-1.5 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-7 2xl:grid-cols-8">
+          <div>
+            <label className="mb-0.5 block text-xs font-medium text-slate-600">项目</label>
+            <select
+              value={resumeProjectFilter}
+              onChange={(e) => setResumeProjectFilter(e.target.value)}
+              disabled={
+                !apiBase ||
+                !hasToken ||
+                projectsLoading ||
+                recruiterScopeLoading ||
+                (isRecruiter && recruiterJobCodes.length === 0) ||
+                (isDeliveryManager &&
+                  (!String(authProfile?.dept || '').trim() || String(authProfile?.dept || '').trim() === '-'))
+              }
+              className={libFilterCtrl}
+            >
+              <option value="">
+                {isDeliveryManager
+                  ? '本部门全部项目'
+                  : isRecruitingManager
+                    ? '我的负责项目（全部）'
+                    : isRecruiter && recruiterJobCodes.length === 0
+                      ? '暂无分配岗位'
+                      : '全部项目'}
+              </option>
+              {projectFilterOptions.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="mb-0.5 block text-xs font-medium text-slate-600">候选人</label>
+            <input
+              value={libFilterDraft.candidate}
+              onChange={(e) => setLibFilterDraft((d) => ({ ...d, candidate: e.target.value }))}
+              placeholder="姓名"
+              className={libFilterCtrl}
+            />
+          </div>
+          <div>
+            <label className="mb-0.5 block text-xs font-medium text-slate-600">性别</label>
+            <select
+              value={libFilterDraft.gender}
+              onChange={(e) =>
+                setLibFilterDraft((d) => ({ ...d, gender: e.target.value as ResumeLibraryFilters['gender'] }))
+              }
+              className={libFilterCtrl}
+            >
+              <option value="all">所有</option>
+              <option value="男">男</option>
+              <option value="女">女</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-0.5 block text-xs font-medium text-slate-600">学历</label>
+            <select
+              value={libFilterDraft.education}
+              onChange={(e) => setLibFilterDraft((d) => ({ ...d, education: e.target.value }))}
+              className={libFilterCtrl}
+            >
+              <option value="">所有</option>
+              <option value="高中">高中</option>
+              <option value="大专">大专</option>
+              <option value="本科">本科</option>
+              <option value="研究生">研究生</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-0.5 block text-xs font-medium text-slate-600">岗位</label>
+            <select
+              value={libFilterDraft.jobCode}
+              onChange={(e) => setLibFilterDraft((d) => ({ ...d, jobCode: e.target.value }))}
+              disabled={!inviteJobs.length || inviteJobsLoading || recruiterScopeLoading}
+              className={`${libFilterCtrl} disabled:bg-slate-100`}
+            >
+              {!inviteJobs.length ? (
+                <option value="">暂无可用岗位</option>
+              ) : jobsForLibSelect.length === 0 ? (
+                <option value="">当前项目下暂无岗位</option>
+              ) : (
+                <>
+                  <option value="">所有</option>
+                  {jobsForLibSelect.map((j) => (
+                    <option key={j.job_code} value={j.job_code}>
+                      {j.title} ({j.job_code})
+                    </option>
+                  ))}
+                </>
+              )}
+            </select>
+          </div>
+          <div>
+            <label className="mb-0.5 block text-xs font-medium text-slate-600">是否有学位</label>
+            <select
+              value={libFilterDraft.hasDegree}
+              onChange={(e) =>
+                setLibFilterDraft((d) => ({ ...d, hasDegree: e.target.value as ResumeLibraryFilters['hasDegree'] }))
+              }
+              className={libFilterCtrl}
+            >
+              <option value="all">所有</option>
+              <option value="1">是</option>
+              <option value="0">否</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-0.5 block text-xs font-medium text-slate-600">是否统招</label>
+            <select
+              value={libFilterDraft.unified}
+              onChange={(e) =>
+                setLibFilterDraft((d) => ({ ...d, unified: e.target.value as ResumeLibraryFilters['unified'] }))
+              }
+              className={libFilterCtrl}
+            >
+              <option value="all">所有</option>
+              <option value="1">是</option>
+              <option value="0">否</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-0.5 block text-xs font-medium text-slate-600">期望薪资</label>
+            <input
+              value={libFilterDraft.salary}
+              onChange={(e) => setLibFilterDraft((d) => ({ ...d, salary: e.target.value }))}
+              placeholder="包含即可"
+              className={libFilterCtrl}
+            />
+          </div>
+          <div>
+            <label className="mb-0.5 block text-xs font-medium text-slate-600">是否可查</label>
+            <select
+              value={libFilterDraft.verifiable}
+              onChange={(e) =>
+                setLibFilterDraft((d) => ({
+                  ...d,
+                  verifiable: e.target.value as ResumeLibraryFilters['verifiable']
+                }))
+              }
+              className={libFilterCtrl}
+            >
+              <option value="all">所有</option>
+              <option value="1">是</option>
+              <option value="0">否</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-0.5 block text-xs font-medium text-slate-600">招聘渠道</label>
+            <select
+              value={libFilterDraft.channel}
+              onChange={(e) => setLibFilterDraft((d) => ({ ...d, channel: e.target.value }))}
+              className={libFilterCtrl}
+            >
+              <option value="">所有</option>
+              {RECRUITMENT_CHANNEL_OPTIONS.map((opt) => (
+                <option key={opt} value={opt}>
+                  {opt}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="mb-0.5 block text-xs font-medium text-slate-600">关键词</label>
+            <input
+              value={libFilterDraft.keyword}
+              onChange={(e) => setLibFilterDraft((d) => ({ ...d, keyword: e.target.value }))}
+              placeholder="姓名、岗位、渠道等"
+              className={libFilterCtrl}
+            />
+          </div>
+        </div>
+      </form>
+
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex shrink-0 flex-row items-center justify-between gap-2 border-b border-slate-100 px-3 py-2 sm:px-4">
+          <h3 className="text-sm font-bold text-slate-900">简历库</h3>
+          <span className="shrink-0 text-xs text-slate-500">
+            {inviteJobsLoading ? '同步岗位…' : `当前列表 ${filteredLibRows.length} 条`}
+          </span>
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto p-2 sm:p-3">
+          {libError ? (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">{libError}</div>
+          ) : null}
+          {!apiBase || !hasToken ? (
+            <p className="text-sm text-slate-500">请先完成管理端登录。</p>
+          ) : null}
+          {apiBase && hasToken && !libError && scopedLibRows.length === 0 ? (
+            <p className="text-sm text-slate-500">
+              {resumeProjectFilter.trim()
+                ? '当前项目筛选下暂无记录。'
+                : '暂无简历库记录；筛查入库后将显示结构化字段。'}
+            </p>
+          ) : null}
+          {apiBase && hasToken && !libError && scopedLibRows.length > 0 && filteredLibRows.length === 0 ? (
+            <p className="text-sm text-slate-500">当前筛选条件下暂无记录，可调整条件后点击「搜索」。</p>
+          ) : null}
+          {pagedRows.length > 0 ? (
+            <div className="max-w-full overflow-x-auto rounded-lg border border-slate-200">
+              <table className="w-full min-w-[89rem] border-collapse text-center text-[11px] text-slate-800 [&_th]:px-0.5 [&_th]:py-1.5 [&_td]:px-0.5 [&_td]:py-1">
+                <thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50/95 text-[10px] font-medium text-slate-600">
+                  <tr>
+                    <th>姓名</th>
+                    <th className="whitespace-nowrap">所属项目</th>
+                    <th className="min-w-[6.5rem] whitespace-normal leading-tight">JD 岗位名称</th>
+                    <th>性别</th>
+                    <th>年龄</th>
+                    <th className="whitespace-nowrap">工作经验</th>
+                    <th>手机号</th>
+                    <th>专业</th>
+                    <th>学历</th>
+                    <th>职位</th>
+                    <th className="whitespace-nowrap">是否有学位</th>
+                    <th className="whitespace-nowrap">是否统招</th>
+                    <th className="whitespace-nowrap">期望薪资</th>
+                    <th className="whitespace-nowrap">是否可查</th>
+                    <th className="whitespace-nowrap">招聘渠道</th>
+                    <th className="whitespace-nowrap">上传简历</th>
+                    <th className="whitespace-nowrap">上传时间</th>
+                    <th className="w-[4.5rem] text-right">操作</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {pagedRows.map((row, idx) => {
+                    const stub = resumeStubFromLibraryRow(row);
+                    const rid = String(row.id);
+                    const hasFile = Number(row.has_original_file) === 1;
+                    const uploaded =
+                      hasFile || Number(row.resume_uploaded) === 1 ? true : Number(row.resume_uploaded) === 0 ? false : null;
+                    const gender = String(row.gender || '').trim() || '未知';
+                    const projectLabel =
+                      row.job_project_name != null && String(row.job_project_name).trim()
+                        ? String(row.job_project_name).trim()
+                        : '';
+                    const jdTitle =
+                      String(row.job_list_title || '').trim() ||
+                      String(row.matched_job_title || '').trim() ||
+                      '';
+                    const jobCodeDisp = String(row.job_code || '').trim();
+                    return (
+                      <tr
+                        key={rid}
+                        className={`align-middle ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'} hover:bg-indigo-50/40`}
+                      >
+                        <td className="max-w-[5rem] truncate font-medium text-slate-900" title={stub.name}>
+                          {stub.name}
+                        </td>
+                        <td
+                          className="max-w-[6.5rem] truncate text-left text-[10px] text-slate-700"
+                          title={projectLabel || undefined}
+                        >
+                          {projectLabel ? projectLabel : <span className="text-slate-400">—</span>}
+                        </td>
+                        <td className="max-w-[8rem] text-left align-top">
+                          <div
+                            className="line-clamp-2 break-words text-[10px] leading-snug text-slate-800"
+                            title={jdTitle ? `${jdTitle}${jobCodeDisp ? ` (${jobCodeDisp})` : ''}` : jobCodeDisp || undefined}
+                          >
+                            {jdTitle ? jdTitle : <span className="text-slate-400">—</span>}
+                          </div>
+                          {jobCodeDisp ? (
+                            <div className="mt-0.5 font-mono text-[9px] text-slate-400">{jobCodeDisp}</div>
+                          ) : null}
+                        </td>
+                        <td className="whitespace-nowrap text-slate-700">{gender}</td>
+                        <td className="tabular-nums text-slate-700">{row.age != null ? row.age : '—'}</td>
+                        <td className="tabular-nums text-slate-700">
+                          {row.work_experience_years != null ? row.work_experience_years : '—'}
+                        </td>
+                        <td className="max-w-[6.5rem] truncate font-mono text-[10px] text-slate-700" title={stub.phone || ''}>
+                          {stub.phone || <span className="text-slate-400">—</span>}
+                        </td>
+                        <td className="max-w-[4.5rem] truncate text-slate-700" title={String(row.major || '')}>
+                          {row.major?.trim() ? row.major : <span className="text-slate-400">—</span>}
+                        </td>
+                        <td className="max-w-[3.5rem] truncate text-slate-700" title={String(row.education || '')}>
+                          {row.education?.trim() ? row.education : <span className="text-slate-400">—</span>}
+                        </td>
+                        <td className="max-w-[6rem] text-left text-[10px] leading-snug text-slate-700">
+                          <span className="line-clamp-2 break-words">
+                            {String(row.profile_job_title || row.matched_job_title || '').trim() || (
+                              <span className="text-slate-400">—</span>
+                            )}
+                          </span>
+                        </td>
+                        <td>
+                          <LibraryTriCell v={mysqlTinyBoolTri(row.has_degree)} />
+                        </td>
+                        <td>
+                          <LibraryTriCell v={mysqlTinyBoolTri(row.is_unified_enrollment)} />
+                        </td>
+                        <td className="max-w-[5rem] truncate text-slate-700" title={String(row.expected_salary || '')}>
+                          {row.expected_salary?.trim() ? row.expected_salary : '—'}
+                        </td>
+                        <td>
+                          <LibraryTriCell v={mysqlTinyBoolTri(row.verifiable)} />
+                        </td>
+                        <td className="max-w-[5rem]">
+                          {row.recruitment_channel?.trim() ? (
+                            <span className="inline-flex max-w-full truncate rounded-full border border-teal-200 bg-teal-50 px-1.5 py-0.5 text-[10px] font-medium text-teal-800">
+                              {row.recruitment_channel.trim()}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">—</span>
+                          )}
+                        </td>
+                        <td>
+                          {uploaded === true ? (
+                            <span className="inline-flex rounded-full border border-teal-200 bg-teal-50 px-1.5 py-0.5 text-[10px] font-medium text-teal-800">
+                              已上传简历
+                            </span>
+                          ) : uploaded === false ? (
+                            <span className="text-slate-500">未上传</span>
+                          ) : (
+                            <span className="text-slate-400">—</span>
+                          )}
+                        </td>
+                        <td
+                          className="whitespace-nowrap font-mono tabular-nums text-[10px] text-slate-600"
+                          title={stub.uploadTimeFull || stub.uploadTime}
+                        >
+                          {stub.uploadTime}
+                        </td>
+                        <td className="text-right align-middle">
+                          <div className="inline-flex flex-col items-end gap-0.5">
+                            {hasFile ? (
+                              <>
+                                <button
+                                  type="button"
+                                  disabled={fileBusyId === stub.id}
+                                  onClick={() => void openResumeOriginalFile(stub, 'preview')}
+                                  className="inline-flex items-center gap-0.5 rounded border border-teal-200 bg-white px-1.5 py-0.5 text-[10px] text-teal-800 hover:bg-teal-50 disabled:opacity-50"
+                                >
+                                  <Eye className="h-3 w-3 shrink-0" aria-hidden />
+                                  预览
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={fileBusyId === stub.id}
+                                  onClick={() => void openResumeOriginalFile(stub, 'download')}
+                                  className="inline-flex items-center gap-0.5 rounded border border-teal-200 bg-white px-1.5 py-0.5 text-[10px] text-teal-800 hover:bg-teal-50 disabled:opacity-50"
+                                >
+                                  <Download className="h-3 w-3 shrink-0" aria-hidden />
+                                  下载
+                                </button>
+                              </>
+                            ) : (
+                              <span className="text-[10px] text-slate-400">无原件</span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => setProfileEditResume(stub)}
+                              className="inline-flex items-center gap-0.5 rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] text-slate-700 hover:bg-slate-50"
+                            >
+                              <UserPen className="h-3 w-3 shrink-0" aria-hidden />
+                              详情
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </div>
+        {apiBase && hasToken && filteredLibRows.length > 0 ? (
+          <ListPaginationBar
+            page={listPage}
+            pageSize={pageSize}
+            total={filteredLibRows.length}
+            onPageChange={setListPage}
+            onPageSizeChange={(n) => {
+              setPageSize(n);
+              setListPage(1);
+            }}
+          />
+        ) : null}
+      </div>
+
+      <AnimatePresence>
+        {profileEditResume ? (
+          <ResumeProfileEditDialog
+            key={profileEditResume.id}
+            resume={profileEditResume}
+            onClose={() => setProfileEditResume(null)}
+            onSaved={() => {
+              void loadLibrary();
+            }}
+          />
+        ) : null}
+      </AnimatePresence>
+    </div>
+  );
 }
 
 function ResumeScreeningView({
@@ -4998,15 +6517,7 @@ function ResumeScreeningView({
   const [screenListPage, setScreenListPage] = useState(1);
   const [screenPageSize, setScreenPageSize] = useState(10);
   const [reportResume, setReportResume] = useState<Resume | null>(null);
-  const [contactEditResume, setContactEditResume] = useState<Resume | null>(null);
-  const [contactDraft, setContactDraft] = useState({ name: '', phone: '' });
-  const [contactSaving, setContactSaving] = useState(false);
-  const [contactEditError, setContactEditError] = useState('');
   const [profileEditResume, setProfileEditResume] = useState<Resume | null>(null);
-  const [profileDraft, setProfileDraft] = useState<Record<string, string>>({});
-  const [profileLoading, setProfileLoading] = useState(false);
-  const [profileSaving, setProfileSaving] = useState(false);
-  const [profileError, setProfileError] = useState('');
   const [fileBusyId, setFileBusyId] = useState<string | null>(null);
   const fileInputModalRef = useRef<HTMLInputElement>(null);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
@@ -5127,6 +6638,7 @@ function ResumeScreeningView({
           has_original_file?: unknown
           resume_plaintext?: string | null
           uploader_username?: string | null
+          job_project_name?: string | null
           created_at: string | Date
         }>
         const mapped = rows.map((row) => mapScreeningRow(row));
@@ -5327,170 +6839,6 @@ function ResumeScreeningView({
     setScreenListPage((p) => Math.min(Math.max(1, p), tp));
   }, [filteredResumes.length, screenPageSize]);
 
-  const openContactEditModal = useCallback((resume: Resume) => {
-    setContactEditError('');
-    setContactDraft({ name: resume.name || '', phone: resume.phone || '' });
-    setContactEditResume(resume);
-  }, []);
-
-  const saveScreeningContact = useCallback(async () => {
-    if (!contactEditResume || !apiBase || !hasToken) return;
-    setContactSaving(true);
-    setContactEditError('');
-    try {
-      const r = await miniappApiFetch(`/api/admin/resume-screenings/${encodeURIComponent(contactEditResume.id)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          candidateName: contactDraft.name.trim(),
-          candidatePhone: contactDraft.phone.trim()
-        })
-      });
-      const j = (await r.json().catch(() => ({}))) as { message?: string };
-      if (!r.ok) throw new Error(j.message || `保存失败 ${r.status}`);
-      const nameNext = contactDraft.name.trim() || '候选人';
-      const phoneNext = contactDraft.phone.trim();
-      setReportResume((prev) =>
-        prev && prev.id === contactEditResume.id
-          ? { ...prev, name: nameNext, phone: phoneNext || undefined }
-          : prev
-      );
-      setContactEditResume(null);
-      loadScreenings();
-    } catch (e) {
-      setContactEditError(e instanceof Error ? e.message : '保存失败');
-    } finally {
-      setContactSaving(false);
-    }
-  }, [contactEditResume, contactDraft, apiBase, hasToken, loadScreenings]);
-
-  const openResumeProfileModal = useCallback(
-    async (resume: Resume) => {
-      if (!apiBase || !hasToken) return;
-      setProfileEditResume(resume);
-      setProfileError('');
-      setProfileLoading(true);
-      try {
-        const r = await miniappApiFetch(`/api/admin/resume-screenings/${encodeURIComponent(resume.id)}/profile`);
-        const j = (await r.json().catch(() => ({}))) as { data?: Record<string, unknown>; message?: string };
-        if (!r.ok) throw new Error(j.message || `加载失败 ${r.status}`);
-        const d = (j.data || {}) as Record<string, unknown>;
-        setProfileDraft({
-          candidate_name: String(d.candidate_name || resume.name || ''),
-          gender: String(d.gender || ''),
-          age: d.age == null ? '' : String(d.age),
-          work_experience_years: d.work_experience_years == null ? '' : String(d.work_experience_years),
-          job_title: String(d.job_title || ''),
-          school: String(d.school || ''),
-          candidate_phone: String(d.candidate_phone || resume.phone || ''),
-          email: String(d.email || ''),
-          current_address: String(d.current_address || ''),
-          current_company: String(d.current_company || ''),
-          major: String(d.major || ''),
-          education: String(d.education || ''),
-          graduation_date: String(d.graduation_date || ''),
-          arrival_time: String(d.arrival_time || ''),
-          id_number: String(d.id_number || ''),
-          is_third_party: d.is_third_party == null ? '' : String(d.is_third_party),
-          expected_salary: String(d.expected_salary || ''),
-          recruitment_channel: String(d.recruitment_channel || '').trim(),
-          has_degree: d.has_degree == null ? '' : String(d.has_degree),
-          is_unified_enrollment: d.is_unified_enrollment == null ? '' : String(d.is_unified_enrollment),
-          verifiable: d.verifiable == null ? '' : String(d.verifiable)
-        });
-      } catch (e) {
-        setProfileError(e instanceof Error ? e.message : '加载详情失败');
-      } finally {
-        setProfileLoading(false);
-      }
-    },
-    [apiBase, hasToken]
-  );
-
-  const saveResumeProfile = useCallback(async () => {
-    if (!profileEditResume || !apiBase || !hasToken) return;
-    const ch = String(profileDraft.recruitment_channel || '').trim();
-    if (!ch) {
-      setProfileError('请选择招聘渠道');
-      return;
-    }
-    if (!isStandardRecruitmentChannel(ch)) {
-      setProfileError('招聘渠道须为系统预设选项之一');
-      return;
-    }
-    setProfileSaving(true);
-    setProfileError('');
-    try {
-      const payload = {
-        candidate_name: String(profileDraft.candidate_name || '').trim(),
-        gender: String(profileDraft.gender || '').trim(),
-        age: String(profileDraft.age || '').trim() ? Number(profileDraft.age) : null,
-        work_experience_years: String(profileDraft.work_experience_years || '').trim()
-          ? Number(profileDraft.work_experience_years)
-          : null,
-        job_title: String(profileDraft.job_title || '').trim(),
-        school: String(profileDraft.school || '').trim(),
-        candidate_phone: String(profileDraft.candidate_phone || '').trim(),
-        email: String(profileDraft.email || '').trim(),
-        current_address: String(profileDraft.current_address || '').trim(),
-        current_company: String(profileDraft.current_company || '').trim(),
-        major: String(profileDraft.major || '').trim(),
-        education: String(profileDraft.education || '').trim(),
-        current_position: null,
-        graduation_date: String(profileDraft.graduation_date || '').trim(),
-        arrival_time: String(profileDraft.arrival_time || '').trim(),
-        id_number: String(profileDraft.id_number || '').trim(),
-        is_third_party:
-          String(profileDraft.is_third_party || '').trim() === ''
-            ? null
-            : Number(profileDraft.is_third_party) === 1
-              ? true
-              : Number(profileDraft.is_third_party) === 0
-                ? false
-                : null,
-        expected_salary: String(profileDraft.expected_salary || '').trim(),
-        recruitment_channel: String(profileDraft.recruitment_channel || '').trim(),
-        has_degree:
-          String(profileDraft.has_degree || '').trim() === ''
-            ? null
-            : Number(profileDraft.has_degree) === 1
-              ? true
-              : Number(profileDraft.has_degree) === 0
-                ? false
-                : null,
-        is_unified_enrollment:
-          String(profileDraft.is_unified_enrollment || '').trim() === ''
-            ? null
-            : Number(profileDraft.is_unified_enrollment) === 1
-              ? true
-              : Number(profileDraft.is_unified_enrollment) === 0
-                ? false
-                : null,
-        verifiable:
-          String(profileDraft.verifiable || '').trim() === ''
-            ? null
-            : Number(profileDraft.verifiable) === 1
-              ? true
-              : Number(profileDraft.verifiable) === 0
-                ? false
-                : null
-      };
-      const r = await miniappApiFetch(`/api/admin/resume-screenings/${encodeURIComponent(profileEditResume.id)}/profile`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const j = (await r.json().catch(() => ({}))) as { message?: string };
-      if (!r.ok) throw new Error(j.message || `保存失败 ${r.status}`);
-      setProfileEditResume(null);
-      loadScreenings();
-    } catch (e) {
-      setProfileError(e instanceof Error ? e.message : '保存失败');
-    } finally {
-      setProfileSaving(false);
-    }
-  }, [profileEditResume, apiBase, hasToken, profileDraft, loadScreenings]);
-
   const openResumeOriginalFile = useCallback(
     async (resume: Resume, mode: 'preview' | 'download') => {
       if (!apiBase || !hasToken) return;
@@ -5542,7 +6890,6 @@ function ResumeScreeningView({
         if (!r.ok) throw new Error(j.message || `删除失败 ${r.status}`);
         setScreeningSelection({});
         setReportResume((prev) => (prev && idSet.has(String(prev.id)) ? null : prev));
-        setContactEditResume((prev) => (prev && idSet.has(String(prev.id)) ? null : prev));
         setProfileEditResume((prev) => (prev && idSet.has(String(prev.id)) ? null : prev));
         loadScreenings();
       } catch (e) {
@@ -5795,30 +7142,68 @@ function ResumeScreeningView({
       .finally(() => setUploading(false));
   };
 
+  const screeningFilterCtrl =
+    'w-full rounded-md border border-slate-200 bg-white py-1 pl-2 pr-1.5 text-xs leading-normal text-slate-900 outline-none focus:ring-2 focus:ring-indigo-400/40 disabled:bg-slate-100';
+
   return (
-    <div className="space-y-4">
+    <div className="flex h-full min-h-0 flex-col gap-2 p-2 sm:gap-2 sm:p-3">
       {inviteBanner ? (
-        <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">{inviteBanner}</div>
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 sm:text-sm">{inviteBanner}</div>
       ) : null}
       {isRecruiter && !recruiterScopeLoading && recruiterJobCodes.length === 0 ? (
-        <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 sm:text-sm">
           当前账号未分配可操作岗位，请联系招聘经理在「岗位分配」中为对应岗位配置招聘人员（岗位负责人）。
         </div>
       ) : null}
       {isRecruitingManager && !inviteJobsLoading && inviteJobs.length === 0 && hasToken ? (
-        <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 sm:text-sm">
           当前账号未被设为任何项目的「项目招聘负责人」，因此没有可选项目与岗位。请交付经理或管理员在「项目管理」中将您加入对应项目的「项目招聘负责人」。
         </div>
       ) : null}
-      <div className="space-y-4">
-        <div className="space-y-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <div className="shrink-0 space-y-2.5">
           <div>
             <h1 className="text-xl font-bold text-slate-900">简历管理</h1>
-            <p className="mt-0.5 text-sm text-slate-500">项目决定拉取范围，其余条件在已加载数据上进一步筛选；上传请在弹窗内选择项目与目标岗位后提交文件。</p>
+            <p className="mt-1 text-xs leading-relaxed text-slate-500 sm:text-sm">
+              项目决定拉取范围，其余条件在已加载数据上进一步筛选；上传请在弹窗内选择项目与目标岗位后提交文件。
+            </p>
           </div>
-          <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-3 sm:p-4">
-            <h2 className="text-sm font-semibold text-slate-800">条件筛选</h2>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <form
+            className="rounded-lg border border-slate-200 bg-white px-2.5 py-2 shadow-sm"
+            title="项目决定数据拉取范围；点击搜索将重新拉取列表并应用筛选"
+            onSubmit={(e) => {
+              e.preventDefault();
+              setScreenListPage(1);
+              loadScreenings();
+            }}
+          >
+            <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-slate-100 pb-1.5">
+              <h2 className="text-xs font-semibold text-slate-800">条件筛选</h2>
+              <span className="hidden text-[11px] leading-snug text-slate-400 md:inline">
+                项目决定拉取范围 · 其余为本地筛选
+              </span>
+              <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                <button
+                  type="submit"
+                  className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white shadow-sm hover:bg-emerald-700"
+                >
+                  <Search className="h-3.5 w-3.5" aria-hidden />
+                  搜索
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    resetScreeningListFilters();
+                    setScreenListPage(1);
+                  }}
+                  className="inline-flex items-center gap-1 rounded-md bg-amber-500 px-2.5 py-1 text-xs font-medium text-white shadow-sm hover:bg-amber-600"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+                  重置
+                </button>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-x-2.5 gap-y-1.5 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-7 2xl:grid-cols-8">
               <div>
                 <label className="mb-0.5 block text-xs font-medium text-slate-600">项目</label>
                 <select
@@ -5833,7 +7218,7 @@ function ResumeScreeningView({
                     (isDeliveryManager &&
                       (!String(authProfile?.dept || '').trim() || String(authProfile?.dept || '').trim() === '-'))
                   }
-                  className="w-full rounded-lg border border-slate-200 py-2 px-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100"
+                  className={screeningFilterCtrl}
                 >
                   <option value="">
                     {isDeliveryManager
@@ -5859,7 +7244,7 @@ function ResumeScreeningView({
                   disabled={
                     !jobsForUploadSelect.length || inviteJobsLoading || recruiterScopeLoading || !inviteJobs.length
                   }
-                  className="w-full rounded-lg border border-slate-200 py-2 px-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100"
+                  className={`${screeningFilterCtrl} disabled:bg-slate-100`}
                 >
                   {!inviteJobs.length ? (
                     <option value="">暂无可用岗位，请联系管理员在系统中维护岗位信息</option>
@@ -5883,7 +7268,7 @@ function ResumeScreeningView({
                   value={sfName}
                   onChange={(e) => setSfName(e.target.value)}
                   placeholder="姓名"
-                  className="w-full rounded-lg border border-slate-200 py-2 px-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  className={screeningFilterCtrl}
                 />
               </div>
               <div>
@@ -5891,7 +7276,7 @@ function ResumeScreeningView({
                 <select
                   value={sfGender}
                   onChange={(e) => setSfGender(e.target.value as 'all' | '男' | '女')}
-                  className="w-full rounded-lg border border-slate-200 py-2 px-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  className={screeningFilterCtrl}
                 >
                   <option value="all">所有</option>
                   <option value="男">男</option>
@@ -5903,7 +7288,7 @@ function ResumeScreeningView({
                 <select
                   value={sfEdu}
                   onChange={(e) => setSfEdu(e.target.value)}
-                  className="w-full rounded-lg border border-slate-200 py-2 px-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  className={screeningFilterCtrl}
                 >
                   <option value="">所有</option>
                   <option value="高中">高中</option>
@@ -5917,7 +7302,7 @@ function ResumeScreeningView({
                 <select
                   value={sfHasDegree}
                   onChange={(e) => setSfHasDegree(e.target.value as 'all' | '1' | '0')}
-                  className="w-full rounded-lg border border-slate-200 py-2 px-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  className={screeningFilterCtrl}
                 >
                   <option value="all">所有</option>
                   <option value="1">是</option>
@@ -5929,7 +7314,7 @@ function ResumeScreeningView({
                 <select
                   value={sfUnified}
                   onChange={(e) => setSfUnified(e.target.value as 'all' | '1' | '0')}
-                  className="w-full rounded-lg border border-slate-200 py-2 px-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  className={screeningFilterCtrl}
                 >
                   <option value="all">所有</option>
                   <option value="1">是</option>
@@ -5941,7 +7326,7 @@ function ResumeScreeningView({
                 <select
                   value={sfVerifiable}
                   onChange={(e) => setSfVerifiable(e.target.value as 'all' | '1' | '0')}
-                  className="w-full rounded-lg border border-slate-200 py-2 px-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  className={screeningFilterCtrl}
                 >
                   <option value="all">所有</option>
                   <option value="1">是</option>
@@ -5953,7 +7338,7 @@ function ResumeScreeningView({
                 <select
                   value={sfChannel}
                   onChange={(e) => setSfChannel(e.target.value)}
-                  className="w-full rounded-lg border border-slate-200 py-2 px-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  className={screeningFilterCtrl}
                 >
                   <option value="">所有</option>
                   {RECRUITMENT_CHANNEL_OPTIONS.map((opt) => (
@@ -5969,7 +7354,7 @@ function ResumeScreeningView({
                   value={sfSalary}
                   onChange={(e) => setSfSalary(e.target.value)}
                   placeholder="包含即可"
-                  className="w-full rounded-lg border border-slate-200 py-2 px-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  className={screeningFilterCtrl}
                 />
               </div>
               <div>
@@ -5978,37 +7363,11 @@ function ResumeScreeningView({
                   value={sfKeyword}
                   onChange={(e) => setSfKeyword(e.target.value)}
                   placeholder="姓名、岗位、报告摘要等"
-                  className="w-full rounded-lg border border-slate-200 py-2 px-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  className={screeningFilterCtrl}
                 />
               </div>
-              <div className="flex flex-col justify-end">
-                <div className="flex flex-wrap items-center justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setScreenListPage(1);
-                      loadScreenings();
-                    }}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-700"
-                  >
-                    <Search className="h-4 w-4" />
-                    搜索
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      resetScreeningListFilters();
-                      setScreenListPage(1);
-                    }}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-amber-600"
-                  >
-                    <RotateCcw className="h-4 w-4" />
-                    重置
-                  </button>
-                </div>
-              </div>
             </div>
-          </div>
+          </form>
           <div className="flex flex-wrap items-center justify-end gap-2">
             <button
               type="button"
@@ -6021,7 +7380,7 @@ function ResumeScreeningView({
                 !hasToken ||
                 (isRecruiter && !recruiterScopeLoading && recruiterJobCodes.length === 0)
               }
-              className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
             >
               <UploadCloud className="h-4 w-4" />
               上传简历
@@ -6029,14 +7388,14 @@ function ResumeScreeningView({
           </div>
         </div>
 
-        <div className="min-w-0">
-          <div className="flex h-full min-w-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-            <div className="flex flex-row items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 sm:px-6 sm:py-4">
-              <h3 className="font-bold text-slate-900">简历列表</h3>
-              <span className="shrink-0 text-xs text-slate-500 sm:text-sm">当前列表 {filteredResumes.length} 条</span>
+        <div className="min-h-0 min-w-0 flex-1">
+          <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+            <div className="flex shrink-0 flex-row items-center justify-between gap-2 border-b border-slate-100 px-3 py-2 sm:px-4">
+              <h3 className="text-sm font-bold text-slate-900">简历列表</h3>
+              <span className="shrink-0 text-xs text-slate-500">当前列表 {filteredResumes.length} 条</span>
             </div>
             {apiBase && hasToken && pagedResumes.length > 0 ? (
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/60 px-4 py-2 sm:px-6">
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/60 px-3 py-2 sm:px-4">
                 <span className="text-xs text-slate-600">
                   已选{' '}
                   <span className="font-semibold tabular-nums text-slate-800">
@@ -6069,9 +7428,9 @@ function ResumeScreeningView({
                 </button>
               </div>
             ) : null}
-            <div className="flex-1 space-y-3 overflow-x-hidden overflow-y-auto p-2 sm:p-4">
+            <div className="min-h-0 flex-1 space-y-2 overflow-x-hidden overflow-y-auto p-2 sm:p-3">
               {screenListError ? (
-                <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">{screenListError}</div>
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">{screenListError}</div>
               ) : null}
               {!apiBase || !hasToken ? (
                 <p className="text-sm text-slate-500">
@@ -6086,8 +7445,8 @@ function ResumeScreeningView({
                 </p>
               ) : null}
               {pagedResumes.length > 0 ? (
-                <div className="max-w-full overflow-x-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-                  <table className="w-full table-fixed text-left text-sm text-slate-800">
+                <div className="max-w-full overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+                  <table className="min-w-[66rem] w-full table-fixed text-left text-sm text-slate-800">
                     <thead className="bg-slate-50/95 text-slate-600 border-b border-slate-200 text-xs sticky top-0 z-10">
                       <tr>
                         <th className="w-9 px-1 py-3 text-center">
@@ -6120,22 +7479,24 @@ function ResumeScreeningView({
                             className="h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                           />
                         </th>
-                        <th className="w-[14%] px-2 py-3 font-medium">候选人</th>
-                        <th className="w-[10%] px-2 py-3 font-medium">手机</th>
-                        <th className="w-[15%] px-2 py-3 font-medium">匹配岗位</th>
-                        <th className="w-[7%] px-2 py-3 font-medium text-center">匹配分</th>
-                        <th className="w-[11%] px-2 py-3 font-medium">AI 结论</th>
+                        <th className="w-[11%] py-3 pl-1.5 pr-0 font-medium">候选人</th>
+                        <th className="w-[10%] py-3 pl-0 pr-1 font-medium">项目</th>
+                        <th className="w-[9%] px-1 py-3 font-medium">手机</th>
+                        <th className="w-[12%] py-3 pl-1 pr-0 font-medium">匹配岗位</th>
+                        <th className="w-[6%] py-3 pl-0 pr-1 text-center font-medium">匹配分</th>
+                        <th className="w-[7%] min-w-[4.5rem] max-w-[6.5rem] px-1 py-3 font-medium">AI 结论</th>
                         <th className="w-[9%] px-2 py-3 font-medium">流程</th>
-                        <th className="w-[8%] px-2 py-3 font-medium">上传人</th>
-                        <th className="w-[9%] px-2 py-3 font-medium">上传时间</th>
-                        <th className="w-[8.5rem] min-w-[8.5rem] max-w-[10rem] px-1 py-3 font-medium text-right">操作</th>
+                        <th className="w-[7%] px-2 py-3 font-medium">上传人</th>
+                        <th className="w-[6.25rem] min-w-[6.25rem] max-w-[6.25rem] shrink-0 px-1 py-3 font-medium whitespace-nowrap">
+                          上传时间
+                        </th>
+                        <th className="w-[12.5rem] min-w-[12.5rem] max-w-none shrink-0 border-l border-slate-200 bg-slate-50/95 pl-3 pr-2 py-3 font-medium text-right whitespace-nowrap">
+                          操作
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {pagedResumes.map((resume, idx) => {
-                        const currentUser = String(authProfile?.username || '').trim().toLowerCase();
-                        const uploader = String(resume.uploaderUsername || '').trim().toLowerCase();
-                        const canEditContact = Boolean(currentUser && uploader && currentUser === uploader);
                         const uploaderLabel = uploaderDisplayFromUsers(resume.uploaderUsername, screeningHrUsers);
                         const rid = String(resume.id);
                         return (
@@ -6157,49 +7518,28 @@ function ResumeScreeningView({
                                   className="h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                                 />
                               </td>
-                              <td className="max-w-0 px-2 py-2.5">
-                                <div className="flex items-start gap-2">
+                              <td className="max-w-0 py-2.5 pl-1.5 pr-0">
+                                <div className="flex items-start gap-1.5">
                                   <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[11px] font-semibold text-indigo-700">
                                     {String(resume.name || '候').trim().slice(0, 1)}
                                   </span>
                                   <div className="min-w-0 flex-1">
-                                    <div className="flex min-w-0 items-center gap-1">
-                                      <div className="truncate font-semibold leading-tight text-slate-900">{resume.name}</div>
-                                      {canEditContact ? (
-                                        <button
-                                          type="button"
-                                          onClick={() => openContactEditModal(resume)}
-                                          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-indigo-600"
-                                          title="修改姓名和手机号"
-                                          aria-label="修改姓名和手机号"
-                                        >
-                                          <Pencil className="h-3.5 w-3.5" />
-                                        </button>
-                                      ) : null}
-                                    </div>
+                                    <div className="truncate font-semibold leading-tight text-slate-900">{resume.name}</div>
                                   </div>
                                 </div>
                               </td>
-                              <td className="max-w-0 px-2 py-3 font-mono text-xs text-slate-700">
-                                <div className="inline-flex min-w-0 max-w-full items-center gap-1">
-                                  <span className="truncate">{resume.phone || <span className="text-slate-400">—</span>}</span>
-                                  {canEditContact ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => openContactEditModal(resume)}
-                                      className="inline-flex h-5 w-5 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-indigo-600"
-                                      title="修改姓名和手机号"
-                                      aria-label="修改姓名和手机号"
-                                    >
-                                      <Pencil className="h-3.5 w-3.5" />
-                                    </button>
-                                  ) : null}
+                              <td className="max-w-0 py-2.5 pl-0 pr-1 text-xs text-slate-700">
+                                <div className="truncate" title={resume.projectName || ''}>
+                                  {resume.projectName || <span className="text-slate-400">—</span>}
                                 </div>
                               </td>
-                              <td className="max-w-0 px-2 py-3 text-xs leading-snug text-slate-700">
+                              <td className="max-w-0 px-1 py-3 font-mono text-xs text-slate-700">
+                                <span className="truncate block">{resume.phone || <span className="text-slate-400">—</span>}</span>
+                              </td>
+                              <td className="max-w-0 py-3 pl-1 pr-0 text-xs leading-snug text-slate-700">
                                 <div className="line-clamp-3 break-words">{resume.job}</div>
                               </td>
-                              <td className="px-2 py-3 text-center tabular-nums">
+                              <td className="py-3 pl-0 pr-1 text-center tabular-nums">
                                 <span
                                   className={`inline-flex min-w-10 justify-center rounded-md px-2 py-1 text-xs font-semibold ${
                                     resume.matchScore >= 80
@@ -6212,8 +7552,11 @@ function ResumeScreeningView({
                                   {resume.matchScore}
                                 </span>
                               </td>
-                              <td className="max-w-0 px-2 py-3 text-xs leading-snug text-slate-600">
-                                <span className="inline-block max-w-full truncate rounded-md bg-slate-100 px-1.5 py-0.5 text-slate-700">
+                              <td className="max-w-0 min-w-0 px-1 py-2.5 text-[10px] leading-tight text-slate-600">
+                                <span
+                                  className="block w-full truncate rounded bg-slate-100 px-1 py-0.5 text-center font-medium text-slate-700"
+                                  title={resume.status}
+                                >
                                   {resume.status}
                                 </span>
                               </td>
@@ -6231,11 +7574,20 @@ function ResumeScreeningView({
                                   {uploaderLabel}
                                 </div>
                               </td>
-                              <td className="max-w-0 px-2 py-3 text-xs tabular-nums text-slate-500">
-                                <div className="line-clamp-2 break-all">{resume.uploadTime}</div>
+                              <td className="w-[6.25rem] min-w-[6.25rem] max-w-[6.25rem] shrink-0 px-1 py-3 text-xs tabular-nums text-slate-500">
+                                <span
+                                  className="block whitespace-nowrap font-mono text-[11px] tracking-tight"
+                                  title={resume.uploadTimeFull || resume.uploadTime}
+                                >
+                                  {resume.uploadTime}
+                                </span>
                               </td>
-                              <td className="px-1 py-2 text-right align-middle">
-                                <div className="inline-flex flex-wrap items-center justify-end gap-1">
+                              <td
+                                className={`w-[12.5rem] min-w-[12.5rem] max-w-none shrink-0 border-l border-slate-200 py-2 pl-3 pr-2 text-right align-middle whitespace-nowrap ${
+                                  idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/90'
+                                }`}
+                              >
+                                <div className="inline-flex flex-nowrap items-center justify-end gap-1">
                                   <button
                                     type="button"
                                     onClick={() => setReportResume(resume)}
@@ -6247,7 +7599,7 @@ function ResumeScreeningView({
                                   </button>
                                   <button
                                     type="button"
-                                    onClick={() => void openResumeProfileModal(resume)}
+                                    onClick={() => setProfileEditResume(resume)}
                                     className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-400/35"
                                     title="简历详情"
                                     aria-label="简历详情"
@@ -6485,96 +7837,6 @@ function ResumeScreeningView({
       </AnimatePresence>
 
       <AnimatePresence>
-        {contactEditResume ? (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[62] flex items-center justify-center p-4 bg-slate-900/50"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="contact-edit-modal-title"
-            onClick={() => !contactSaving && setContactEditResume(null)}
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.96, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.96, y: 8 }}
-              transition={{ duration: 0.2 }}
-              className="bg-white rounded-xl shadow-xl border border-slate-200 w-full max-w-md flex flex-col"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="flex items-start justify-between gap-4 px-6 py-4 border-b border-slate-100">
-                <div>
-                  <h3 id="contact-edit-modal-title" className="text-lg font-bold text-slate-900">修改姓名与手机号</h3>
-                  <p className="mt-0.5 text-xs text-slate-500">{contactEditResume.job || '—'}</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => !contactSaving && setContactEditResume(null)}
-                  className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
-                  aria-label="关闭"
-                  disabled={contactSaving}
-                >
-                  <XCircle className="w-5 h-5" />
-                </button>
-              </div>
-              <div className="px-6 py-4 space-y-3">
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-600">姓名</label>
-                  <input
-                    type="text"
-                    value={contactDraft.name}
-                    onChange={(e) => setContactDraft((d) => ({ ...d, name: e.target.value }))}
-                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
-                    placeholder="请输入候选人姓名"
-                    disabled={contactSaving}
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-600">手机号</label>
-                  <input
-                    type="tel"
-                    inputMode="numeric"
-                    value={contactDraft.phone}
-                    onChange={(e) => setContactDraft((d) => ({ ...d, phone: e.target.value }))}
-                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
-                    placeholder="可留空"
-                    disabled={contactSaving}
-                  />
-                  <p className="mt-1 text-[11px] text-slate-500">11 位大陆手机号会自动规范化，留空表示清空。</p>
-                </div>
-                {contactEditError ? <p className="text-xs text-red-600">{contactEditError}</p> : null}
-              </div>
-              <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 rounded-b-xl flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (!contactSaving) {
-                      setContactEditResume(null);
-                      setContactEditError('');
-                    }
-                  }}
-                  className={btnSecondarySm}
-                  disabled={contactSaving}
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void saveScreeningContact()}
-                  className={btnSaveSm}
-                  disabled={contactSaving}
-                >
-                  {contactSaving ? '保存中…' : '保存'}
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        ) : null}
-      </AnimatePresence>
-
-      <AnimatePresence>
         {inviteModal ? (
           <motion.div
             initial={{ opacity: 0 }}
@@ -6650,302 +7912,14 @@ function ResumeScreeningView({
 
       <AnimatePresence>
         {profileEditResume ? (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[63] flex items-center justify-center p-4 bg-slate-900/50"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="resume-profile-title"
-            onClick={() => !profileSaving && setProfileEditResume(null)}
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.96, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.96, y: 8 }}
-              transition={{ duration: 0.2 }}
-              className="bg-white rounded-xl shadow-xl border border-slate-200 w-full max-w-2xl max-h-[85vh] flex flex-col"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-                <h3 id="resume-profile-title" className="text-lg font-bold text-slate-900">简历详情编辑</h3>
-                <button
-                  type="button"
-                  onClick={() => !profileSaving && setProfileEditResume(null)}
-                  className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
-                >
-                  <XCircle className="w-5 h-5" />
-                </button>
-              </div>
-              <div className="px-6 py-4 overflow-y-auto space-y-3">
-                {profileLoading ? (
-                  <p className="text-sm text-slate-500">加载中...</p>
-                ) : (
-                  <>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                      <label className="text-xs text-slate-600">
-                        姓名
-                        <input
-                          value={String(profileDraft.candidate_name || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, candidate_name: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
-                        />
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        性别
-                        <select
-                          value={String(profileDraft.gender || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, gender: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm bg-white"
-                        >
-                          <option value="">请选择</option>
-                          <option value="男">男</option>
-                          <option value="女">女</option>
-                        </select>
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        年龄
-                        <input
-                          value={String(profileDraft.age || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, age: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
-                        />
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        <span className="text-red-500" aria-hidden>
-                          *
-                        </span>
-                        招聘渠道
-                        <select
-                          value={String(profileDraft.recruitment_channel || '').trim()}
-                          onChange={(e) =>
-                            setProfileDraft((d) => ({ ...d, recruitment_channel: e.target.value }))
-                          }
-                          className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm"
-                          required
-                        >
-                          <option value="">请选择</option>
-                          {(() => {
-                            const rawCh = String(profileDraft.recruitment_channel || '').trim();
-                            if (!rawCh || isStandardRecruitmentChannel(rawCh)) return null;
-                            return (
-                              <option value={rawCh}>{rawCh}（请改为标准项）</option>
-                            );
-                          })()}
-                          {RECRUITMENT_CHANNEL_OPTIONS.map((opt) => (
-                            <option key={opt} value={opt}>
-                              {opt}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        是否第三方
-                        <select
-                          value={String(profileDraft.is_third_party || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, is_third_party: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm bg-white"
-                        >
-                          <option value="">请选择</option>
-                          <option value="0">否</option>
-                          <option value="1">是</option>
-                        </select>
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        工作年限
-                        <input
-                          value={String(profileDraft.work_experience_years || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, work_experience_years: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
-                        />
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        当前公司
-                        <input
-                          value={String(profileDraft.current_company || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, current_company: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
-                          placeholder="现任或最近工作单位"
-                        />
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        职位
-                        <select
-                          value={String(profileDraft.job_title || '').trim()}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, job_title: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm"
-                        >
-                          <option value="">请选择</option>
-                          {(() => {
-                            const rawJt = String(profileDraft.job_title || '').trim();
-                            if (!rawJt || isStandardProfileJobTitle(rawJt)) return null;
-                            return (
-                              <option value={rawJt}>
-                                {rawJt}（请改为标准项）
-                              </option>
-                            );
-                          })()}
-                          {PROFILE_JOB_ROLE_BASE_OPTIONS.map((base) => (
-                            <option key={base} value={base}>
-                              {base}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        学校
-                        <input
-                          value={String(profileDraft.school || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, school: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
-                        />
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        手机号
-                        <input
-                          value={String(profileDraft.candidate_phone || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, candidate_phone: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
-                        />
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        邮箱
-                        <input
-                          value={String(profileDraft.email || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, email: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
-                        />
-                      </label>
-                      <label className="text-xs text-slate-600 sm:col-span-2">
-                        现住址
-                        <input
-                          value={String(profileDraft.current_address || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, current_address: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
-                        />
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        专业
-                        <input
-                          value={String(profileDraft.major || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, major: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
-                        />
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        学历
-                        <select
-                          value={String(profileDraft.education || '').trim()}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, education: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm"
-                        >
-                          <option value="">请选择</option>
-                          {(() => {
-                            const rawEdu = String(profileDraft.education || '').trim();
-                            if (!rawEdu || isStandardProfileEducation(rawEdu)) return null;
-                            return (
-                              <option value={rawEdu}>
-                                {rawEdu}（请改为标准项）
-                              </option>
-                            );
-                          })()}
-                          {PROFILE_EDUCATION_OPTIONS.map((opt) => (
-                            <option key={opt} value={opt}>
-                              {opt}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        是否有学位
-                        <select
-                          value={String(profileDraft.has_degree || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, has_degree: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm bg-white"
-                        >
-                          <option value="">请选择</option>
-                          <option value="0">否</option>
-                          <option value="1">是</option>
-                        </select>
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        是否统招
-                        <select
-                          value={String(profileDraft.is_unified_enrollment || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, is_unified_enrollment: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm bg-white"
-                        >
-                          <option value="">请选择</option>
-                          <option value="0">否</option>
-                          <option value="1">是</option>
-                        </select>
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        毕业时间
-                        <input
-                          value={String(profileDraft.graduation_date || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, graduation_date: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
-                          placeholder="yyyy-MM-dd"
-                        />
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        到岗时间
-                        <input
-                          value={String(profileDraft.arrival_time || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, arrival_time: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
-                        />
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        是否可查
-                        <select
-                          value={String(profileDraft.verifiable || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, verifiable: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm bg-white"
-                        >
-                          <option value="">请选择</option>
-                          <option value="0">否</option>
-                          <option value="1">是</option>
-                        </select>
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        证件号码
-                        <input
-                          value={String(profileDraft.id_number || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, id_number: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
-                        />
-                      </label>
-                      <label className="text-xs text-slate-600">
-                        期望薪资
-                        <input
-                          value={String(profileDraft.expected_salary || '')}
-                          onChange={(e) => setProfileDraft((d) => ({ ...d, expected_salary: e.target.value }))}
-                          className="mt-1 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm"
-                        />
-                      </label>
-                    </div>
-                  </>
-                )}
-                {profileError ? <p className="text-xs text-red-600">{profileError}</p> : null}
-              </div>
-              <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 flex justify-end gap-2 rounded-b-xl">
-                <button type="button" className={btnSecondarySm} onClick={() => setProfileEditResume(null)} disabled={profileSaving}>
-                  取消
-                </button>
-                <button
-                  type="button"
-                  className={btnSaveSm}
-                  onClick={() => void saveResumeProfile()}
-                  disabled={profileSaving || profileLoading}
-                >
-                  {profileSaving ? '保存中…' : '保存详情'}
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
+          <ResumeProfileEditDialog
+            key={profileEditResume.id}
+            resume={profileEditResume}
+            onClose={() => setProfileEditResume(null)}
+            onSaved={() => {
+              void loadScreenings();
+            }}
+          />
         ) : null}
       </AnimatePresence>
 
@@ -7096,6 +8070,10 @@ function ApplicationManagementView({
     resumeDimensionScores: Record<string, number>
     /** 流程阶段：简历筛查完成 / 已发邀请 / AI面试完成 … */
     status: string
+    /** 与面试报告 passed 对应：面试通过 / 面试未通过 / 暂无面试结论 … */
+    interviewOutcome: string
+    /** 上传简历账号对应姓名（无映射时显示登录名） */
+    referrerLabel: string
     /** 岗位配置的招聘人员（姓名列表） */
     recruitersLabel: string
   }>>([])
@@ -7127,11 +8105,16 @@ function ApplicationManagementView({
   const loadRows = useCallback(() => {
     setLoading(true)
     setErr('')
-    void Promise.all([miniappApiFetch('/api/admin/resume-screenings'), fetch('/api/projects')])
-      .then(async ([screeningRes, projectsRes]) => {
+    void Promise.all([
+      miniappApiFetch('/api/admin/resume-screenings'),
+      fetch('/api/projects'),
+      fetch('/api/users')
+    ])
+      .then(async ([screeningRes, projectsRes, usersRes]) => {
         const j = (await screeningRes.json()) as { data?: unknown[]; message?: string }
         if (!screeningRes.ok) throw new Error(j.message || `加载失败 ${screeningRes.status}`)
         const data = Array.isArray(j.data) ? j.data : []
+        const hrUsers = usersRes.ok ? usersFromApiPayload(await usersRes.json().catch(() => [])) : []
         const mapped = data.map((x) => {
           const row = x as Record<string, unknown>
           const resumeMatch = Math.max(0, Math.min(100, Number(row.match_score) || 0))
@@ -7154,6 +8137,11 @@ function ApplicationManagementView({
               : null
           const hasInterviewReport = hasUpdated || ivParsed !== null
           const { flowStage } = deriveScreeningFlowLabels(row as Record<string, unknown>)
+          const interviewOutcome = deriveApplicationListInterviewOutcome(
+            hasInterviewReport,
+            row.interview_passed,
+            flowStage
+          )
           const interviewScore = ivParsed
           const scoreForFilter =
             hasInterviewReport && interviewScore !== null ? interviewScore : resumeMatch
@@ -7178,6 +8166,8 @@ function ApplicationManagementView({
             hasInterviewReport,
             resumeDimensionScores: pickResumeDimensionScores(parsedEval, d),
             status: flowStage,
+            interviewOutcome,
+            referrerLabel: uploaderDisplayFromUsers(String(row.uploader_username ?? ''), hrUsers),
             recruitersLabel: '—'
           }
         })
@@ -7279,7 +8269,9 @@ function ApplicationManagementView({
         row.jobTitle.toLowerCase().includes(kw) ||
         row.jobCode.toLowerCase().includes(kw) ||
         row.projectName.toLowerCase().includes(kw) ||
-        row.recruitersLabel.toLowerCase().includes(kw)
+        row.recruitersLabel.toLowerCase().includes(kw) ||
+        row.referrerLabel.toLowerCase().includes(kw) ||
+        row.interviewOutcome.toLowerCase().includes(kw)
       if (!hit) return false
     }
     if (statusFilter && row.status !== statusFilter) return false
@@ -7438,7 +8430,7 @@ function ApplicationManagementView({
             <input
               value={keyword}
               onChange={(e) => setKeyword(e.target.value)}
-              placeholder="搜索候选人/项目/岗位/编码"
+              placeholder="搜索候选人、推荐人、状态、项目、岗位、编码"
               className="md:col-span-2 border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
             />
             <select
@@ -7470,15 +8462,17 @@ function ApplicationManagementView({
           <div className="border-b border-slate-100 px-4 py-3 text-sm text-red-600 sm:px-6">{err}</div>
         ) : null}
         <div className="overflow-x-auto overscroll-x-contain">
-          <table className="w-full min-w-[72rem] text-left text-sm">
+          <table className="w-full min-w-[86rem] text-left text-sm">
             <thead className="border-b border-slate-200 bg-white text-slate-600">
               <tr>
                 <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">候选人</th>
+                <th className="min-w-[5.5rem] px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">推荐人</th>
                 <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">项目</th>
                 <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">岗位名称</th>
                 <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">简历分</th>
                 <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">简历维度</th>
                 <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">面试分</th>
+                <th className="min-w-[6.5rem] px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">状态</th>
                 <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">阶段</th>
                 <th className="min-w-[7rem] px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">招聘人员</th>
                 <th className="px-3 py-3 text-right text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">面试报告</th>
@@ -7487,13 +8481,13 @@ function ApplicationManagementView({
             <tbody className="divide-y divide-slate-100">
               {loading ? (
                 <tr>
-                  <td className="px-3 py-8 text-slate-500 sm:px-6" colSpan={9}>
+                  <td className="px-3 py-8 text-slate-500 sm:px-6" colSpan={11}>
                     加载中...
                   </td>
                 </tr>
               ) : filteredRows.length === 0 ? (
                 <tr>
-                  <td className="px-3 py-8 text-slate-500 sm:px-6" colSpan={9}>
+                  <td className="px-3 py-8 text-slate-500 sm:px-6" colSpan={11}>
                     暂无数据，请先在「简历管理」中上传简历
                   </td>
                 </tr>
@@ -7502,6 +8496,12 @@ function ApplicationManagementView({
                   <tr key={row.id} className="transition-colors hover:bg-slate-50">
                     <td className="whitespace-nowrap px-3 py-3 font-bold text-slate-900 sm:px-6 sm:py-4">
                       {row.candidateName}
+                    </td>
+                    <td
+                      className="max-w-[8rem] truncate px-3 py-3 text-slate-600 sm:max-w-[10rem] sm:px-6 sm:py-4"
+                      title={row.referrerLabel}
+                    >
+                      {row.referrerLabel}
                     </td>
                     <td className="max-w-[10rem] px-3 py-3 text-slate-600 sm:max-w-[12.5rem] sm:px-6 sm:py-4" title={row.projectName}>
                       <span className="line-clamp-2">{row.projectName}</span>
@@ -7541,6 +8541,24 @@ function ApplicationManagementView({
                       ) : (
                         <span className="text-slate-400">—</span>
                       )}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                      <span
+                        className={`inline-block max-w-[9rem] truncate rounded px-2 py-1 text-xs font-medium ${
+                          row.interviewOutcome === '面试通过'
+                            ? 'bg-emerald-100 text-emerald-900'
+                            : row.interviewOutcome === '面试未通过'
+                              ? 'bg-rose-100 text-rose-900'
+                              : row.interviewOutcome === '待完成面试'
+                                ? 'bg-amber-100 text-amber-900'
+                                : row.interviewOutcome === '结论待定'
+                                  ? 'bg-violet-50 text-violet-900'
+                                  : 'bg-slate-100 text-slate-700'
+                        }`}
+                        title={row.interviewOutcome}
+                      >
+                        {row.interviewOutcome}
+                      </span>
                     </td>
                     <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
                       <span

@@ -12,6 +12,7 @@ INSERT INTO menus (id, name, type, icon, path, parent_id, level) VALUES
   ('job-query', '岗位分配', '菜单', 'UserCog', '/recruitment/jobs', 'projects', 1),
   ('recruitment', '招聘管理', '目录', 'Users', '/recruitment', NULL, 0),
   ('resume-screening', '简历筛查', '菜单', 'FileText', '/recruitment/resume', 'recruitment', 1),
+  ('resume-library', '简历库', '菜单', 'FolderOpen', '/recruitment/resume-library', 'recruitment', 1),
   ('application-mgmt', '初面管理', '菜单', 'UserCheck', '/recruitment/applications', 'recruitment', 1),
   ('system', '系统管理', '目录', 'Settings', '/system', NULL, 0),
   ('sys-dept', '部门管理', '菜单', 'Network', '/system/dept', 'system', 1),
