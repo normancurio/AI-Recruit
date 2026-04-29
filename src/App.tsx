@@ -13,7 +13,9 @@ import {
 } from './adminSession';
 import {
   STANDARD_JOB_LEVELS,
-  STANDARD_JOB_ROLE_BASES,
+  FALLBACK_STANDARD_JOB_ROLE_BASES,
+  setStandardJobRoleBasesFromDb,
+  getStandardJobRoleBases,
   normalizeJobLevel,
   normalizeJobTitle,
   matchRoleBaseFromJobTitle,
@@ -24,7 +26,7 @@ import {
 } from '../shared/jobTaxonomy';
 import { 
   Building2, Briefcase, Users, FileText, UserCheck, 
-  Settings, Network, UserCog, Shield, Menu as MenuIcon,
+  Settings, Network, UserCog, Shield, Tags, Menu as MenuIcon,
   Search, Plus, UploadCloud, BrainCircuit, ChevronDown,
   ChevronRight, ChevronLeft, MoreHorizontal, CheckCircle2, XCircle,
   LogOut, Bell, LayoutDashboard, FolderOpen, Bot,
@@ -116,7 +118,8 @@ const ADMIN_ROLE_MENU_OPTIONS: { group: string; items: { id: string; label: stri
       { id: 'sys-dept', label: '部门管理' },
       { id: 'sys-user', label: '用户管理' },
       { id: 'sys-role', label: '角色管理' },
-      { id: 'sys-menu', label: '菜单管理' }
+      { id: 'sys-menu', label: '菜单管理' },
+      { id: 'sys-job-role-bases', label: '标准岗位' }
     ]
   }
 ];
@@ -159,6 +162,27 @@ function collectNavIds(nav: NavItem[]): string[] {
     }
   }
   return out
+}
+
+/** 标准岗位序列（与库表同步；Provider 在登录后主布局） */
+const JobRoleBasesContext = React.createContext<{
+  bases: string[]
+  refreshJobRoleBases: () => void
+}>({
+  bases: [...FALLBACK_STANDARD_JOB_ROLE_BASES],
+  refreshJobRoleBases: () => {}
+})
+
+function useJobRoleBasesList(): string[] {
+  return React.useContext(JobRoleBasesContext).bases
+}
+
+function useRefreshJobRoleBases(): () => void {
+  return React.useContext(JobRoleBasesContext).refreshJobRoleBases
+}
+
+function sortJobRoleBasesZh(list: readonly string[]): string[] {
+  return [...list].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'))
 }
 
 /** 登录后统一：主按钮靛蓝实心，次要按钮白底描边深字 */
@@ -232,7 +256,8 @@ const NAV_TEMPLATE: NavItem[] = [
       { id: 'sys-dept', title: '部门管理', icon: <Network className="w-4 h-4" /> },
       { id: 'sys-user', title: '用户管理', icon: <UserCog className="w-4 h-4" /> },
       { id: 'sys-role', title: '角色管理', icon: <Shield className="w-4 h-4" /> },
-      { id: 'sys-menu', title: '菜单管理', icon: <MenuIcon className="w-4 h-4" /> }
+      { id: 'sys-menu', title: '菜单管理', icon: <MenuIcon className="w-4 h-4" /> },
+      { id: 'sys-job-role-bases', title: '标准岗位', icon: <Tags className="w-4 h-4" /> }
     ]
   }
 ]
@@ -785,6 +810,36 @@ export default function App() {
     setAuthProfile(getAdminLoginProfile());
   }, [authTick]);
 
+  const [jobRoleBasesList, setJobRoleBasesList] = useState<string[]>(() => [...FALLBACK_STANDARD_JOB_ROLE_BASES]);
+  const jobRoleBasesSorted = useMemo(() => sortJobRoleBasesZh(jobRoleBasesList), [jobRoleBasesList]);
+
+  const refreshJobRoleBasesFromApi = useCallback(() => {
+    if (!miniappApiBase || !hasAdminApiCredentials()) return;
+    void miniappApiFetch('/api/admin/job-role-bases?namesOnly=1')
+      .then(async (r) => {
+        const j = (await r.json().catch(() => ({}))) as { data?: string[]; message?: string };
+        if (!r.ok) return;
+        const arr = Array.isArray(j.data) ? j.data.map((x) => String(x || '').trim()).filter(Boolean) : [];
+        if (arr.length > 0) {
+          setStandardJobRoleBasesFromDb(arr);
+          setJobRoleBasesList(arr);
+        }
+      })
+      .catch(() => {});
+  }, [miniappApiBase]);
+
+  useEffect(() => {
+    refreshJobRoleBasesFromApi();
+  }, [refreshJobRoleBasesFromApi, authTick]);
+
+  const jobRoleBasesCtxValue = useMemo(
+    () => ({
+      bases: jobRoleBasesSorted,
+      refreshJobRoleBases: refreshJobRoleBasesFromApi
+    }),
+    [jobRoleBasesSorted, refreshJobRoleBasesFromApi]
+  );
+
   /** 交付经理会话缺少「所属部门」时，从用户管理同源接口回填（兼容旧 session、或曾未下发 dept） */
   useEffect(() => {
     const p = authProfile;
@@ -944,6 +999,7 @@ export default function App() {
       case 'sys-user': return <SystemUserView currentRole={currentRole} authProfile={authProfile} />;
       case 'sys-role': return <SystemRoleView />;
       case 'sys-menu': return <SystemMenuView />;
+      case 'sys-job-role-bases': return <SystemJobRoleBasesView />;
       default: return <div className="p-8 text-slate-500">模块开发中...</div>;
     }
   };
@@ -1185,6 +1241,7 @@ export default function App() {
           </main>
         </div>
       ) : (
+      <JobRoleBasesContext.Provider value={jobRoleBasesCtxValue}>
       <div className="min-h-screen min-h-[100dvh] bg-slate-50 flex">
       {mobileNavOpen ? (
         <div
@@ -1355,6 +1412,7 @@ export default function App() {
         </div>
       </main>
     </div>
+      </JobRoleBasesContext.Provider>
       )}
     </>
   );
@@ -1461,6 +1519,8 @@ function ProjectManagementView({
   const [pjRecruiterPickDept, setPjRecruiterPickDept] = useState('');
   const [pjRecruiterPickUsername, setPjRecruiterPickUsername] = useState('');
   const [projectJobLockId, setProjectJobLockId] = useState<string | null>(null);
+  const [projectListPage, setProjectListPage] = useState(1);
+  const [projectPageSize, setProjectPageSize] = useState(10);
 
   const loadProjects = useCallback(() => {
     void fetch('/api/projects')
@@ -1675,6 +1735,25 @@ function ProjectManagementView({
     if (!dmDeptReady) return [];
     return filterProjectsForDeliveryManagerScope(projects, dmUserDept);
   }, [projects, role, dmDeptReady, dmUserDept, authProfile]);
+
+  const pagedListProjects = useMemo(() => {
+    const start = (projectListPage - 1) * projectPageSize;
+    return listProjects.slice(start, start + projectPageSize);
+  }, [listProjects, projectListPage, projectPageSize]);
+
+  useEffect(() => {
+    const tp = Math.max(1, Math.ceil(listProjects.length / projectPageSize) || 1);
+    setProjectListPage((p) => Math.min(Math.max(1, p), tp));
+  }, [listProjects.length, projectPageSize]);
+
+  useEffect(() => {
+    if (!expandedProject) return;
+    const start = (projectListPage - 1) * projectPageSize;
+    const slice = listProjects.slice(start, start + projectPageSize);
+    if (!slice.some((p) => p.id === expandedProject)) {
+      setExpandedProject(null);
+    }
+  }, [expandedProject, projectListPage, projectPageSize, listProjects]);
 
   const jobFormDeptOptions = useMemo(
     () => (role === 'admin' ? depts : scopedDeptsForProjectForm),
@@ -1941,15 +2020,20 @@ function ProjectManagementView({
           ) : null}
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          {listProjects.map((project) => {
+        <div className="flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex shrink-0 flex-row items-center justify-between gap-2 border-b border-slate-100 px-4 py-2.5 sm:px-5">
+            <h2 className="text-sm font-bold text-slate-900">项目列表</h2>
+            <span className="shrink-0 text-xs text-slate-500">共 {listProjects.length} 个</span>
+          </div>
+          <div className="grid grid-cols-1 gap-5 p-4 sm:p-5 lg:grid-cols-2">
+          {pagedListProjects.map((project) => {
             const code = (project.projectCode || project.id || '').trim() || project.id;
             const members = project.memberCount ?? 0;
             const desc = (project.description || '').trim();
             return (
               <div
                 key={project.id}
-                className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col"
+                className="flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"
               >
                 <div className="p-6 flex-1">
                   <div className="flex items-start justify-between gap-3 mb-4">
@@ -2129,6 +2213,18 @@ function ProjectManagementView({
               </div>
             );
           })}
+          </div>
+          <ListPaginationBar
+            page={projectListPage}
+            pageSize={projectPageSize}
+            total={listProjects.length}
+            countUnit="个"
+            onPageChange={setProjectListPage}
+            onPageSizeChange={(n) => {
+              setProjectPageSize(n);
+              setProjectListPage(1);
+            }}
+          />
         </div>
       )}
 
@@ -2980,7 +3076,7 @@ function tryComposeBatchJobTitle(job: Job, levelNorm: StandardJobLevelResolved):
     .map((s) => s.replace(/\s/g, '').toLowerCase())
     .find(Boolean);
   if (!compact) return null;
-  for (const b of [...STANDARD_JOB_ROLE_BASES].sort((a, c) => c.length - a.length)) {
+  for (const b of [...getStandardJobRoleBases()].sort((a, c) => c.length - a.length)) {
     if (compact === b.replace(/\s/g, '').toLowerCase()) {
       const c = composeStandardJobTitle(levelNorm, b);
       if (c) return c;
@@ -3193,6 +3289,7 @@ function JobEditorModal({
   /** single 模式下可选的一线招聘人员列表（可跨部门） */
   recruiterStaffOptions?: User[];
 }) {
+  const jobRoleBaseOptions = useJobRoleBasesList();
   const [jdGenerating, setJdGenerating] = useState(false);
   useEffect(() => {
     if (!jobForm) setJdGenerating(false);
@@ -3401,7 +3498,7 @@ function JobEditorModal({
                   <option value="" disabled>
                     请选择岗位
                   </option>
-                  {STANDARD_JOB_ROLE_BASES.map((b) => (
+                  {jobRoleBaseOptions.map((b) => (
                     <option key={b} value={b}>
                       {b}
                     </option>
@@ -3732,6 +3829,8 @@ function JobQueryView({
   const [recruiterPickUsername, setRecruiterPickUsername] = useState('');
   /** 岗位列表按所属项目筛选，空为全部 */
   const [jobQueryProjectFilter, setJobQueryProjectFilter] = useState('');
+  const [jobQueryListPage, setJobQueryListPage] = useState(1);
+  const [jobQueryPageSize, setJobQueryPageSize] = useState(10);
   /** 招聘经理：批量分配时勾选的岗位码 job_code */
   const [rmBatchSelectedJobCodes, setRmBatchSelectedJobCodes] = useState<string[]>([]);
   const [rmBatchAssignOpen, setRmBatchAssignOpen] = useState(false);
@@ -3872,6 +3971,16 @@ function JobQueryView({
     return rows.filter((r) => String(r.job.project_id || '').trim() === fid);
   }, [rows, jobQueryProjectFilter]);
 
+  const pagedJobQueryRows = useMemo(() => {
+    const start = (jobQueryListPage - 1) * jobQueryPageSize;
+    return filteredJobQueryRows.slice(start, start + jobQueryPageSize);
+  }, [filteredJobQueryRows, jobQueryListPage, jobQueryPageSize]);
+
+  useEffect(() => {
+    const tp = Math.max(1, Math.ceil(filteredJobQueryRows.length / jobQueryPageSize) || 1);
+    setJobQueryListPage((p) => Math.min(Math.max(1, p), tp));
+  }, [filteredJobQueryRows.length, jobQueryPageSize]);
+
   const rmEditableFilteredRows = useMemo(() => {
     if (currentRole !== 'recruiting_manager') return [] as JobAssignmentRow[];
     return filteredJobQueryRows.filter((r) => {
@@ -3881,6 +3990,12 @@ function JobQueryView({
       return recruitingManagerCanEditJob(r.job, authProfile, p);
     });
   }, [currentRole, filteredJobQueryRows, authProfile, projectOptions]);
+
+  const pagedRmEditableRows = useMemo(() => {
+    if (currentRole !== 'recruiting_manager') return [] as JobAssignmentRow[];
+    const editableIds = new Set(rmEditableFilteredRows.map((r) => r.job.id));
+    return pagedJobQueryRows.filter((r) => editableIds.has(r.job.id));
+  }, [currentRole, pagedJobQueryRows, rmEditableFilteredRows]);
 
   const rmBatchRecruiterGroups = useMemo(
     () =>
@@ -3913,15 +4028,16 @@ function JobQueryView({
 
   useEffect(() => {
     setRmBatchSelectedJobCodes([]);
+    setJobQueryListPage(1);
   }, [jobQueryProjectFilter]);
 
   useEffect(() => {
     const el = rmBatchSelectAllRef.current;
     if (!el || currentRole !== 'recruiting_manager') return;
-    const n = rmEditableFilteredRows.length;
-    const sel = rmEditableFilteredRows.filter((r) => rmBatchSelectedJobCodes.includes(r.job.id)).length;
+    const n = pagedRmEditableRows.length;
+    const sel = pagedRmEditableRows.filter((r) => rmBatchSelectedJobCodes.includes(r.job.id)).length;
     el.indeterminate = sel > 0 && sel < n;
-  }, [currentRole, rmEditableFilteredRows, rmBatchSelectedJobCodes]);
+  }, [currentRole, pagedRmEditableRows, rmBatchSelectedJobCodes]);
 
   useEffect(() => {
     if (!rmBatchAssignOpen) setRmBatchError('');
@@ -4158,7 +4274,7 @@ function JobQueryView({
   };
 
   const toggleRmBatchSelectAllVisible = () => {
-    const ids = rmEditableFilteredRows.map((r) => r.job.id);
+    const ids = pagedRmEditableRows.map((r) => r.job.id);
     if (!ids.length) return;
     const allOn = ids.every((id) => rmBatchSelectedJobCodes.includes(id));
     if (allOn) {
@@ -4275,6 +4391,12 @@ function JobQueryView({
         <div className="px-6 py-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="flex flex-wrap items-center gap-3 min-w-0">
             <h2 className="text-base font-bold text-slate-900 shrink-0">岗位列表</h2>
+            {rows.length > 0 ? (
+              <span className="text-sm text-slate-500 tabular-nums">
+                共 <strong className="font-semibold text-slate-800">{filteredJobQueryRows.length}</strong> 条
+                {String(jobQueryProjectFilter || '').trim() ? '（当前项目筛选）' : ''}
+              </span>
+            ) : null}
             <label className="flex items-center gap-2 text-sm text-slate-600 min-w-0">
               <span className="shrink-0">项目</span>
               <select
@@ -4311,7 +4433,8 @@ function JobQueryView({
               </span>
               <span className="text-slate-400 hidden sm:inline">·</span>
               <span className="text-slate-500">
-                当前列表可勾选 <strong className="text-slate-800">{rmEditableFilteredRows.length}</strong> 条（您在「项目招聘负责人」中的项目）
+                可勾选共 <strong className="text-slate-800 tabular-nums">{rmEditableFilteredRows.length}</strong> 条（您为「项目招聘负责人」的项目）；本页可勾选{' '}
+                <strong className="text-slate-800 tabular-nums">{pagedRmEditableRows.length}</strong> 条
               </span>
             </div>
             <div className="flex flex-wrap gap-2 shrink-0">
@@ -4319,12 +4442,12 @@ function JobQueryView({
                 type="button"
                 className={btnSecondarySm}
                 onClick={toggleRmBatchSelectAllVisible}
-                disabled={!rmEditableFilteredRows.length}
+                disabled={!pagedRmEditableRows.length}
               >
-                {rmEditableFilteredRows.length > 0 &&
-                rmEditableFilteredRows.every((r) => rmBatchSelectedJobCodes.includes(r.job.id))
-                  ? '取消全选（当前列表）'
-                  : '全选（当前列表）'}
+                {pagedRmEditableRows.length > 0 &&
+                pagedRmEditableRows.every((r) => rmBatchSelectedJobCodes.includes(r.job.id))
+                  ? '取消全选（本页）'
+                  : '全选（本页）'}
               </button>
               <button
                 type="button"
@@ -4356,14 +4479,14 @@ function JobQueryView({
                       ref={rmBatchSelectAllRef}
                       type="checkbox"
                       checked={
-                        rmEditableFilteredRows.length > 0 &&
-                        rmEditableFilteredRows.every((r) => rmBatchSelectedJobCodes.includes(r.job.id))
+                        pagedRmEditableRows.length > 0 &&
+                        pagedRmEditableRows.every((r) => rmBatchSelectedJobCodes.includes(r.job.id))
                       }
                       onChange={toggleRmBatchSelectAllVisible}
-                      disabled={!rmEditableFilteredRows.length}
+                      disabled={!pagedRmEditableRows.length}
                       className="rounded border-slate-300"
-                      title="全选或取消当前列表中您可编辑的岗位"
-                      aria-label="全选当前列表可编辑岗位"
+                      title="全选或取消本页表格中您可编辑的岗位"
+                      aria-label="全选本页可编辑岗位"
                     />
                   </th>
                 ) : null}
@@ -4400,7 +4523,7 @@ function JobQueryView({
                   </td>
                 </tr>
               ) : (
-                filteredJobQueryRows.map(({ job, projectName, projectDept, projectStatus }) => {
+                pagedJobQueryRows.map(({ job, projectName, projectDept, projectStatus }) => {
                   const screenN = job.screeningCount ?? 0;
                   const hcDemand = job.demand != null && Number.isFinite(Number(job.demand)) ? String(job.demand) : '—';
                   const deliveryOwner = deliveryManagersByProjectDept(projectDept, jobFormUsers);
@@ -4546,6 +4669,18 @@ function JobQueryView({
             </tbody>
           </table>
         </div>
+        {filteredJobQueryRows.length > 0 ? (
+          <ListPaginationBar
+            page={jobQueryListPage}
+            pageSize={jobQueryPageSize}
+            total={filteredJobQueryRows.length}
+            onPageChange={setJobQueryListPage}
+            onPageSizeChange={(n) => {
+              setJobQueryPageSize(n);
+              setJobQueryListPage(1);
+            }}
+          />
+        ) : null}
       </div>
 
       <JobEditorModal
@@ -4595,7 +4730,7 @@ function JobQueryView({
                 <div className="px-5 py-3 text-sm text-slate-600 border-b border-slate-50 leading-relaxed">
                   将为已选的 <strong className="text-slate-900">{rmBatchSelectedJobCodes.length}</strong> 个岗位
                   写入您下方勾选的<strong className="text-indigo-700">本部门招聘专员</strong>；各岗位由其他招聘负责人添加的专员会
-                  <strong className="text-slate-800">自动保留</strong>。各岗位其它信息不变。可先按「项目」筛选再全选。
+                  <strong className="text-slate-800">自动保留</strong>。各岗位其它信息不变。可先按「项目」筛选，再用「全选（本页）」或逐条勾选（支持跨页累积已选）。
                 </div>
                 <div className="px-5 py-3 overflow-y-auto flex-1 space-y-3 min-h-0">
                   {rmBatchError ? (
@@ -5081,13 +5216,16 @@ function ListPaginationBar({
   pageSize,
   total,
   onPageChange,
-  onPageSizeChange
+  onPageSizeChange,
+  countUnit = '条'
 }: {
   page: number
   pageSize: number
   total: number
   onPageChange: (p: number) => void
   onPageSizeChange: (n: number) => void
+  /** 列表项量词，如「条」「个」；用于「共 N …」「每页 n …」「第 a–b …」 */
+  countUnit?: string
 }) {
   const totalPages = Math.max(1, Math.ceil(total / pageSize) || 1)
   const safePage = Math.min(Math.max(1, page), totalPages)
@@ -5104,15 +5242,17 @@ function ListPaginationBar({
         >
           {[10, 20, 50].map((n) => (
             <option key={n} value={n}>
-              {n} 条
+              {n} {countUnit}
             </option>
           ))}
         </select>
-        <span className="text-slate-500">共 {total} 条</span>
+        <span className="text-slate-500">
+          共 {total} {countUnit}
+        </span>
       </div>
       <div className="flex items-center gap-2">
         <span className="text-slate-500 hidden sm:inline">
-          {total === 0 ? '无数据' : `第 ${from}–${to} 条`}
+          {total === 0 ? '无数据' : `第 ${from}–${to} ${countUnit}`}
         </span>
         <button
           type="button"
@@ -5168,19 +5308,15 @@ function isStandardProfileArrivalTime(v: string): boolean {
   return (PROFILE_ARRIVAL_TIME_OPTIONS as readonly string[]).includes(v);
 }
 
-/** 与 shared/jobTaxonomy STANDARD_JOB_ROLE_BASE_SET 一致，供简历详情「职位」下拉校验 */
-const PROFILE_JOB_ROLE_BASE_SET = new Set<string>(STANDARD_JOB_ROLE_BASES as readonly string[]);
-
-const PROFILE_JOB_ROLE_BASE_OPTIONS = [...STANDARD_JOB_ROLE_BASES].sort((a, b) =>
-  a.localeCompare(b, 'zh-Hans-CN')
-);
-
-function isStandardProfileJobTitle(v: string): boolean {
-  return PROFILE_JOB_ROLE_BASE_SET.has(v);
+function isStandardProfileJobTitleIn(v: string, allowed: readonly string[]): boolean {
+  return new Set(allowed).has(String(v || '').trim());
 }
 
 /** 简历详情编辑：附件所示全部必填项校验（保存前） */
-function validateResumeProfileDraftComplete(d: Record<string, string>): string | null {
+function validateResumeProfileDraftComplete(
+  d: Record<string, string>,
+  allowedJobTitles: readonly string[]
+): string | null {
   const name = String(d.candidate_name || '').trim();
   if (!name) return '请填写姓名';
   const gender = String(d.gender || '').trim();
@@ -5200,7 +5336,7 @@ function validateResumeProfileDraftComplete(d: Record<string, string>): string |
   if (!Number.isFinite(wyn) || wyn < 0 || wyn > 60) return '请填写有效工作年限（0–60 年）';
   const jt = String(d.job_title || '').trim();
   if (!jt) return '请选择岗位';
-  if (!isStandardProfileJobTitle(jt)) return '岗位须为系统预设选项之一';
+  if (!isStandardProfileJobTitleIn(jt, allowedJobTitles)) return '岗位须为系统预设选项之一';
   const phone = String(d.candidate_phone || '').replace(/\s/g, '');
   if (!phone) return '请填写手机号';
   if (!/^1\d{10}$/.test(phone)) return '请填写有效中国大陆手机号';
@@ -5302,7 +5438,8 @@ function emptyResumeLibraryFilters() {
     candidate: '',
     gender: 'all' as 'all' | '男' | '女',
     education: '',
-    jobCode: '',
+    /** 标准职位序列，空为不过滤；与详情「职位」下拉同源 */
+    jobTitle: '',
     hasDegree: 'all' as 'all' | '1' | '0',
     unified: 'all' as 'all' | '1' | '0',
     salary: '',
@@ -5360,6 +5497,7 @@ function ResumeProfileEditDialog({
   onClose: () => void
   onSaved: () => void
 }) {
+  const jobRoleOptions = useJobRoleBasesList()
   const apiBase = resolveMiniappApiBase()
   const hasToken = hasAdminApiCredentials()
   const [profileDraft, setProfileDraft] = useState<Record<string, string>>({})
@@ -5420,7 +5558,7 @@ function ResumeProfileEditDialog({
 
   const saveResumeProfile = useCallback(async () => {
     if (!resume || !apiBase || !hasToken) return
-    const ve = validateResumeProfileDraftComplete(profileDraft)
+    const ve = validateResumeProfileDraftComplete(profileDraft, jobRoleOptions)
     if (ve) {
       setProfileError(ve)
       return
@@ -5496,7 +5634,7 @@ function ResumeProfileEditDialog({
     } finally {
       setProfileSaving(false)
     }
-  }, [resume, apiBase, hasToken, profileDraft, onClose, onSaved])
+  }, [resume, apiBase, hasToken, profileDraft, jobRoleOptions, onClose, onSaved])
 
   if (!resume) return null
 
@@ -5625,10 +5763,10 @@ function ResumeProfileEditDialog({
                     <option value="">请选择</option>
                     {(() => {
                       const rawJt = String(profileDraft.job_title || '').trim()
-                      if (!rawJt || isStandardProfileJobTitle(rawJt)) return null
+                      if (!rawJt || isStandardProfileJobTitleIn(rawJt, jobRoleOptions)) return null
                       return <option value={rawJt}>{rawJt}（请改为标准项）</option>
                     })()}
-                    {PROFILE_JOB_ROLE_BASE_OPTIONS.map((base) => (
+                    {jobRoleOptions.map((base) => (
                       <option key={base} value={base}>
                         {base}
                       </option>
@@ -5834,7 +5972,7 @@ function LibraryTriCell({ v }: { v: boolean | null }) {
       </span>
     );
   }
-  return <span className="text-slate-400">—</span>;
+  return <span className="text-slate-300">—</span>;
 }
 
 function ResumeLibraryView({
@@ -5849,12 +5987,12 @@ function ResumeLibraryView({
   const apiBase = resolveMiniappApiBase();
   const hasToken = hasAdminApiCredentials();
   void sessRev;
+  const libJobRoleOptions = useJobRoleBasesList();
 
   const [libRows, setLibRows] = useState<ResumeLibraryApiRow[]>([]);
   const [libError, setLibError] = useState('');
   const [listPage, setListPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
-  const [resumeProjectFilter, setResumeProjectFilter] = useState('');
   const [inviteJobs, setInviteJobs] = useState<
     { job_code: string; title: string; department: string; project_id?: string | null }[]
   >([]);
@@ -5862,7 +6000,6 @@ function ResumeLibraryView({
   const [screeningProjects, setScreeningProjects] = useState<
     { id: string; name: string; dept?: string; recruitmentLeads?: string[] }[]
   >([]);
-  const [projectsLoading, setProjectsLoading] = useState(false);
   const [inviteBanner, setInviteBanner] = useState('');
   const [profileEditResume, setProfileEditResume] = useState<Resume | null>(null);
   const [fileBusyId, setFileBusyId] = useState<string | null>(null);
@@ -5875,6 +6012,18 @@ function ResumeLibraryView({
   const [deliveryHistoryError, setDeliveryHistoryError] = useState('');
   const [libFilterDraft, setLibFilterDraft] = useState<ResumeLibraryFilters>(() => emptyResumeLibraryFilters());
   const [libFilterApplied, setLibFilterApplied] = useState<ResumeLibraryFilters>(() => emptyResumeLibraryFilters());
+  const [libFilterMoreOpen, setLibFilterMoreOpen] = useState(false);
+
+  const libAdvancedFilterCount = useMemo(() => {
+    const d = libFilterApplied;
+    let n = 0;
+    if (d.hasDegree !== 'all') n += 1;
+    if (d.unified !== 'all') n += 1;
+    if (d.verifiable !== 'all') n += 1;
+    if (d.salary.trim()) n += 1;
+    if (d.channel.trim()) n += 1;
+    return n;
+  }, [libFilterApplied]);
 
   const { codes: recruiterJobCodes, loading: recruiterScopeLoading } = useRecruiterScopedJobCodes(
     currentRole,
@@ -5885,48 +6034,11 @@ function ResumeLibraryView({
   const isRecruitingManager = currentRole === 'recruiting_manager';
   const recruiterCodeSet = useMemo(() => new Set(recruiterJobCodes), [recruiterJobCodes]);
 
-  const projectFilterOptions = useMemo(() => {
-    let base = screeningProjects;
-    if (isRecruitingManager) {
-      base = base.filter((p) => p.id && namesListContainsIdentity(p.recruitmentLeads, authProfile));
-    }
-    if (isDeliveryManager) {
-      const ud = String(authProfile?.dept || '').trim();
-      if (!ud || ud === '-') return [];
-      base = base.filter((p) => p.id && deptNamesMatch(ud, String(p.dept || '')));
-    }
-    if (!isRecruiter) return base;
-    if (inviteJobs.length === 0) return [];
-    const pidSet = new Set(inviteJobs.map((j) => String(j.project_id || '').trim()).filter(Boolean));
-    if (pidSet.size === 0) return [];
-    return base.filter((p) => pidSet.has(p.id));
-  }, [authProfile, isDeliveryManager, isRecruiter, isRecruitingManager, inviteJobs, screeningProjects]);
-
-  useEffect(() => {
-    setResumeProjectFilter((prev) => {
-      if (prev === '_null') return '';
-      if (!prev) return prev;
-      if (projectFilterOptions.some((p) => p.id === prev)) return prev;
-      return '';
-    });
-  }, [projectFilterOptions]);
-
-  /** 与简历管理岗位下拉一致：按当前「项目」筛选可选岗位 */
-  const jobsForLibSelect = useMemo(() => {
-    const pid = resumeProjectFilter.trim();
-    if (!pid) return inviteJobs;
-    if (pid === '_null') {
-      return inviteJobs.filter((j) => !String(j.project_id ?? '').trim());
-    }
-    return inviteJobs.filter((j) => String(j.project_id ?? '').trim() === pid);
-  }, [inviteJobs, resumeProjectFilter]);
-
   useEffect(() => {
     if (!apiBase || !hasToken) {
       setScreeningProjects([]);
       return;
     }
-    setProjectsLoading(true);
     void miniappApiFetch('/api/admin/projects')
       .then(async (r) => {
         const j = (await r.json()) as { data?: { id: string; name?: string }[]; message?: string };
@@ -5951,8 +6063,7 @@ function ResumeLibraryView({
         });
         setScreeningProjects(list.filter((x) => x.id));
       })
-      .catch(() => setScreeningProjects([]))
-      .finally(() => setProjectsLoading(false));
+      .catch(() => setScreeningProjects([]));
   }, [apiBase, hasToken, sessRev]);
 
   useEffect(() => {
@@ -6057,11 +6168,7 @@ function ResumeLibraryView({
       return;
     }
     setLibError('');
-    const url =
-      resumeProjectFilter.trim().length > 0
-        ? `/api/admin/resume-library?projectId=${encodeURIComponent(resumeProjectFilter.trim())}`
-        : '/api/admin/resume-library';
-    void miniappApiFetch(url)
+    void miniappApiFetch('/api/admin/resume-library')
       .then(async (r) => {
         const j = (await r.json()) as { data?: ResumeLibraryApiRow[]; message?: string };
         if (!r.ok) throw new Error(j.message || 'load failed');
@@ -6071,7 +6178,7 @@ function ResumeLibraryView({
         setLibRows([]);
         setLibError('简历库数据暂时无法加载，请稍后重试或联系管理员检查库表是否已升级。');
       });
-  }, [apiBase, hasToken, resumeProjectFilter, sessRev]);
+  }, [apiBase, hasToken, sessRev]);
 
   useEffect(() => {
     loadLibrary();
@@ -6122,9 +6229,16 @@ function ResumeLibraryView({
     if (f.education.trim()) {
       list = list.filter((r) => resumeLibraryEducationMatches(String(r.education || ''), f.education.trim()));
     }
-    const jc = f.jobCode.trim();
-    if (jc) {
-      list = list.filter((r) => String(r.job_code || '').trim() === jc);
+    const jt = String(f.jobTitle || '').trim();
+    if (jt) {
+      const target = normalizeJobTitle(jt);
+      if (target) {
+        list = list.filter((r) => {
+          const a = normalizeJobTitle(String(r.profile_job_title || ''))
+          const b = normalizeJobTitle(String(r.matched_job_title || ''))
+          return a === target || b === target || a.includes(target) || b.includes(target)
+        })
+      }
     }
     list = list.filter((r) => {
       const hd = mysqlTinyBoolTri(r.has_degree);
@@ -6182,7 +6296,7 @@ function ResumeLibraryView({
 
   useEffect(() => {
     setListPage(1);
-  }, [resumeProjectFilter, isRecruiter, isDeliveryManager, isRecruitingManager]);
+  }, [isRecruiter, isDeliveryManager, isRecruitingManager]);
 
   const pagedRows = useMemo(() => {
     const start = (listPage - 1) * pageSize;
@@ -6228,7 +6342,9 @@ function ResumeLibraryView({
   );
 
   const libFilterCtrl =
-    'w-full rounded-md border border-slate-200 bg-white py-1 pl-2 pr-1.5 text-xs leading-normal text-slate-900 outline-none focus:ring-2 focus:ring-indigo-400/40 disabled:bg-slate-100';
+    'w-full min-h-[2.25rem] rounded-md border border-slate-200 bg-white py-1.5 pl-2 pr-1.5 text-xs leading-normal text-slate-900 outline-none focus:ring-2 focus:ring-indigo-400/40 disabled:bg-slate-100';
+  const libFilterLabel = 'mb-1 block text-[11px] font-medium text-slate-500';
+  const libTableEmpty = 'text-slate-300';
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-2 p-2 sm:gap-2 sm:p-3">
@@ -6242,16 +6358,16 @@ function ResumeLibraryView({
       ) : null}
 
       <form
-        className="shrink-0 rounded-lg border border-slate-200 bg-white px-2.5 py-2 shadow-sm"
-        title="项目决定数据拉取范围；筛选条件需点击搜索后生效"
+        className="shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2.5 shadow-sm"
+        title="筛选条件需点击「搜索」后生效"
         onSubmit={(e) => {
           e.preventDefault();
           handleResumeLibrarySearch();
         }}
       >
-        <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-slate-100 pb-1.5">
+        <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-slate-100 pb-2">
           <h2 className="text-xs font-semibold text-slate-800">条件筛选</h2>
-          <span className="hidden text-[11px] leading-snug text-slate-400 md:inline">项目决定拉取范围 · 与简历管理权限一致</span>
+          <span className="hidden text-[11px] leading-snug text-slate-400 md:inline">与简历管理权限一致</span>
           <div className="ml-auto flex shrink-0 items-center gap-1.5">
             <button
               type="submit"
@@ -6270,41 +6386,9 @@ function ResumeLibraryView({
             </button>
           </div>
         </div>
-        <div className="grid grid-cols-2 gap-x-2.5 gap-y-1.5 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-7 2xl:grid-cols-8">
-          <div>
-            <label className="mb-0.5 block text-xs font-medium text-slate-600">项目</label>
-            <select
-              value={resumeProjectFilter}
-              onChange={(e) => setResumeProjectFilter(e.target.value)}
-              disabled={
-                !apiBase ||
-                !hasToken ||
-                projectsLoading ||
-                recruiterScopeLoading ||
-                (isRecruiter && recruiterJobCodes.length === 0) ||
-                (isDeliveryManager &&
-                  (!String(authProfile?.dept || '').trim() || String(authProfile?.dept || '').trim() === '-'))
-              }
-              className={libFilterCtrl}
-            >
-              <option value="">
-                {isDeliveryManager
-                  ? '本部门全部项目'
-                  : isRecruitingManager
-                    ? '我的负责项目（全部）'
-                    : isRecruiter && recruiterJobCodes.length === 0
-                      ? '暂无分配岗位'
-                      : '全部项目'}
-              </option>
-              {projectFilterOptions.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="mb-0.5 block text-xs font-medium text-slate-600">候选人</label>
+        <div className="grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-3 lg:grid-cols-5">
+          <div className="min-w-0">
+            <label className={libFilterLabel}>候选人</label>
             <input
               value={libFilterDraft.candidate}
               onChange={(e) => setLibFilterDraft((d) => ({ ...d, candidate: e.target.value }))}
@@ -6312,8 +6396,8 @@ function ResumeLibraryView({
               className={libFilterCtrl}
             />
           </div>
-          <div>
-            <label className="mb-0.5 block text-xs font-medium text-slate-600">性别</label>
+          <div className="min-w-0">
+            <label className={libFilterLabel}>性别</label>
             <select
               value={libFilterDraft.gender}
               onChange={(e) =>
@@ -6326,8 +6410,8 @@ function ResumeLibraryView({
               <option value="女">女</option>
             </select>
           </div>
-          <div>
-            <label className="mb-0.5 block text-xs font-medium text-slate-600">学历</label>
+          <div className="min-w-0">
+            <label className={libFilterLabel}>学历</label>
             <select
               value={libFilterDraft.education}
               onChange={(e) => setLibFilterDraft((d) => ({ ...d, education: e.target.value }))}
@@ -6340,101 +6424,23 @@ function ResumeLibraryView({
               <option value="研究生">研究生</option>
             </select>
           </div>
-          <div>
-            <label className="mb-0.5 block text-xs font-medium text-slate-600">岗位</label>
+          <div className="min-w-0">
+            <label className={libFilterLabel}>职位</label>
             <select
-              value={libFilterDraft.jobCode}
-              onChange={(e) => setLibFilterDraft((d) => ({ ...d, jobCode: e.target.value }))}
-              disabled={!inviteJobs.length || inviteJobsLoading || recruiterScopeLoading}
-              className={`${libFilterCtrl} disabled:bg-slate-100`}
-            >
-              {!inviteJobs.length ? (
-                <option value="">暂无可用岗位</option>
-              ) : jobsForLibSelect.length === 0 ? (
-                <option value="">当前项目下暂无岗位</option>
-              ) : (
-                <>
-                  <option value="">所有</option>
-                  {jobsForLibSelect.map((j) => (
-                    <option key={j.job_code} value={j.job_code}>
-                      {j.title} ({j.job_code})
-                    </option>
-                  ))}
-                </>
-              )}
-            </select>
-          </div>
-          <div>
-            <label className="mb-0.5 block text-xs font-medium text-slate-600">是否有学位</label>
-            <select
-              value={libFilterDraft.hasDegree}
-              onChange={(e) =>
-                setLibFilterDraft((d) => ({ ...d, hasDegree: e.target.value as ResumeLibraryFilters['hasDegree'] }))
-              }
-              className={libFilterCtrl}
-            >
-              <option value="all">所有</option>
-              <option value="1">是</option>
-              <option value="0">否</option>
-            </select>
-          </div>
-          <div>
-            <label className="mb-0.5 block text-xs font-medium text-slate-600">是否统招</label>
-            <select
-              value={libFilterDraft.unified}
-              onChange={(e) =>
-                setLibFilterDraft((d) => ({ ...d, unified: e.target.value as ResumeLibraryFilters['unified'] }))
-              }
-              className={libFilterCtrl}
-            >
-              <option value="all">所有</option>
-              <option value="1">是</option>
-              <option value="0">否</option>
-            </select>
-          </div>
-          <div>
-            <label className="mb-0.5 block text-xs font-medium text-slate-600">期望薪资</label>
-            <input
-              value={libFilterDraft.salary}
-              onChange={(e) => setLibFilterDraft((d) => ({ ...d, salary: e.target.value }))}
-              placeholder="包含即可"
-              className={libFilterCtrl}
-            />
-          </div>
-          <div>
-            <label className="mb-0.5 block text-xs font-medium text-slate-600">是否可查</label>
-            <select
-              value={libFilterDraft.verifiable}
-              onChange={(e) =>
-                setLibFilterDraft((d) => ({
-                  ...d,
-                  verifiable: e.target.value as ResumeLibraryFilters['verifiable']
-                }))
-              }
-              className={libFilterCtrl}
-            >
-              <option value="all">所有</option>
-              <option value="1">是</option>
-              <option value="0">否</option>
-            </select>
-          </div>
-          <div>
-            <label className="mb-0.5 block text-xs font-medium text-slate-600">招聘渠道</label>
-            <select
-              value={libFilterDraft.channel}
-              onChange={(e) => setLibFilterDraft((d) => ({ ...d, channel: e.target.value }))}
+              value={libFilterDraft.jobTitle}
+              onChange={(e) => setLibFilterDraft((d) => ({ ...d, jobTitle: e.target.value }))}
               className={libFilterCtrl}
             >
               <option value="">所有</option>
-              {RECRUITMENT_CHANNEL_OPTIONS.map((opt) => (
+              {libJobRoleOptions.map((opt) => (
                 <option key={opt} value={opt}>
                   {opt}
                 </option>
               ))}
             </select>
           </div>
-          <div>
-            <label className="mb-0.5 block text-xs font-medium text-slate-600">关键词</label>
+          <div className="min-w-0 sm:col-span-3 lg:col-span-1">
+            <label className={libFilterLabel}>关键词</label>
             <input
               value={libFilterDraft.keyword}
               onChange={(e) => setLibFilterDraft((d) => ({ ...d, keyword: e.target.value }))}
@@ -6442,6 +6448,99 @@ function ResumeLibraryView({
               className={libFilterCtrl}
             />
           </div>
+        </div>
+        <div className="mt-2 border-t border-slate-100 pt-2">
+          <button
+            type="button"
+            onClick={() => setLibFilterMoreOpen((o) => !o)}
+            className="inline-flex items-center gap-1.5 rounded-md py-1 pl-0.5 pr-2 text-[11px] font-medium text-slate-600 hover:bg-slate-50"
+            aria-expanded={libFilterMoreOpen}
+          >
+            {libFilterMoreOpen ? (
+              <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-500" aria-hidden />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-500" aria-hidden />
+            )}
+            更多条件
+            {libAdvancedFilterCount > 0 ? (
+              <span className="rounded-full bg-teal-100 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-teal-800">
+                {libAdvancedFilterCount}
+              </span>
+            ) : null}
+          </button>
+          {libFilterMoreOpen ? (
+            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-3 lg:grid-cols-5">
+              <div className="min-w-0">
+                <label className={libFilterLabel}>是否有学位</label>
+                <select
+                  value={libFilterDraft.hasDegree}
+                  onChange={(e) =>
+                    setLibFilterDraft((d) => ({ ...d, hasDegree: e.target.value as ResumeLibraryFilters['hasDegree'] }))
+                  }
+                  className={libFilterCtrl}
+                >
+                  <option value="all">所有</option>
+                  <option value="1">是</option>
+                  <option value="0">否</option>
+                </select>
+              </div>
+              <div className="min-w-0">
+                <label className={libFilterLabel}>是否统招</label>
+                <select
+                  value={libFilterDraft.unified}
+                  onChange={(e) =>
+                    setLibFilterDraft((d) => ({ ...d, unified: e.target.value as ResumeLibraryFilters['unified'] }))
+                  }
+                  className={libFilterCtrl}
+                >
+                  <option value="all">所有</option>
+                  <option value="1">是</option>
+                  <option value="0">否</option>
+                </select>
+              </div>
+              <div className="min-w-0">
+                <label className={libFilterLabel}>期望薪资</label>
+                <input
+                  value={libFilterDraft.salary}
+                  onChange={(e) => setLibFilterDraft((d) => ({ ...d, salary: e.target.value }))}
+                  placeholder="子串匹配，如 15k、10-15"
+                  className={libFilterCtrl}
+                />
+              </div>
+              <div className="min-w-0">
+                <label className={libFilterLabel}>是否可查</label>
+                <select
+                  value={libFilterDraft.verifiable}
+                  onChange={(e) =>
+                    setLibFilterDraft((d) => ({
+                      ...d,
+                      verifiable: e.target.value as ResumeLibraryFilters['verifiable']
+                    }))
+                  }
+                  className={libFilterCtrl}
+                >
+                  <option value="all">所有</option>
+                  <option value="1">是</option>
+                  <option value="0">否</option>
+                </select>
+              </div>
+              <div className="min-w-0 sm:col-span-2 lg:col-span-1">
+                <label className={libFilterLabel}>招聘渠道</label>
+                <select
+                  value={libFilterDraft.channel}
+                  onChange={(e) => setLibFilterDraft((d) => ({ ...d, channel: e.target.value }))}
+                  className={libFilterCtrl}
+                >
+                  <option value="">所有</option>
+                  {RECRUITMENT_CHANNEL_OPTIONS.map((opt) => (
+                    <option key={opt} value={opt}>
+                      {opt}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          ) : null}
         </div>
       </form>
 
@@ -6460,23 +6559,17 @@ function ResumeLibraryView({
             <p className="text-sm text-slate-500">请先完成管理端登录。</p>
           ) : null}
           {apiBase && hasToken && !libError && scopedLibRows.length === 0 ? (
-            <p className="text-sm text-slate-500">
-              {resumeProjectFilter.trim()
-                ? '当前项目筛选下暂无记录。'
-                : '暂无简历库记录；筛查入库后将显示结构化字段。'}
-            </p>
+            <p className="text-sm text-slate-500">暂无简历库记录；筛查入库后将显示结构化字段。</p>
           ) : null}
           {apiBase && hasToken && !libError && scopedLibRows.length > 0 && filteredLibRows.length === 0 ? (
             <p className="text-sm text-slate-500">当前筛选条件下暂无记录，可调整条件后点击「搜索」。</p>
           ) : null}
           {pagedRows.length > 0 ? (
             <div className="max-w-full overflow-x-auto rounded-lg border border-slate-200">
-              <table className="w-full min-w-[89rem] border-collapse text-center text-[11px] text-slate-800 [&_th]:px-0.5 [&_th]:py-1.5 [&_td]:px-0.5 [&_td]:py-1">
+              <table className="w-full min-w-[52rem] border-collapse text-center text-[11px] text-slate-800 [&_th]:px-0.5 [&_th]:py-2 [&_td]:px-0.5 [&_td]:py-1.5">
                 <thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50/95 text-[10px] font-medium text-slate-600">
                   <tr>
                     <th>姓名</th>
-                    <th className="whitespace-nowrap">所属项目</th>
-                    <th className="min-w-[6.5rem] whitespace-normal leading-tight">JD 岗位名称</th>
                     <th>性别</th>
                     <th>年龄</th>
                     <th className="whitespace-nowrap">工作经验</th>
@@ -6491,7 +6584,7 @@ function ResumeLibraryView({
                     <th className="whitespace-nowrap">招聘渠道</th>
                     <th className="whitespace-nowrap">上传简历</th>
                     <th className="whitespace-nowrap">上传时间</th>
-                    <th className="w-[4.5rem] text-right">操作</th>
+                    <th className="w-[6.5rem] whitespace-nowrap text-right">操作</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -6502,15 +6595,6 @@ function ResumeLibraryView({
                     const uploaded =
                       hasFile || Number(row.resume_uploaded) === 1 ? true : Number(row.resume_uploaded) === 0 ? false : null;
                     const gender = String(row.gender || '').trim() || '未知';
-                    const projectLabel =
-                      row.job_project_name != null && String(row.job_project_name).trim()
-                        ? String(row.job_project_name).trim()
-                        : '';
-                    const jdTitle =
-                      String(row.job_list_title || '').trim() ||
-                      String(row.matched_job_title || '').trim() ||
-                      '';
-                    const jobCodeDisp = String(row.job_code || '').trim();
                     return (
                       <tr
                         key={rid}
@@ -6519,41 +6603,30 @@ function ResumeLibraryView({
                         <td className="max-w-[5rem] truncate font-medium text-slate-900" title={stub.name}>
                           {stub.name}
                         </td>
-                        <td
-                          className="max-w-[6.5rem] truncate text-left text-[10px] text-slate-700"
-                          title={projectLabel || undefined}
-                        >
-                          {projectLabel ? projectLabel : <span className="text-slate-400">—</span>}
-                        </td>
-                        <td className="max-w-[8rem] text-left align-top">
-                          <div
-                            className="line-clamp-2 break-words text-[10px] leading-snug text-slate-800"
-                            title={jdTitle ? `${jdTitle}${jobCodeDisp ? ` (${jobCodeDisp})` : ''}` : jobCodeDisp || undefined}
-                          >
-                            {jdTitle ? jdTitle : <span className="text-slate-400">—</span>}
-                          </div>
-                          {jobCodeDisp ? (
-                            <div className="mt-0.5 font-mono text-[9px] text-slate-400">{jobCodeDisp}</div>
-                          ) : null}
-                        </td>
                         <td className="whitespace-nowrap text-slate-700">{gender}</td>
-                        <td className="tabular-nums text-slate-700">{row.age != null ? row.age : '—'}</td>
                         <td className="tabular-nums text-slate-700">
-                          {row.work_experience_years != null ? row.work_experience_years : '—'}
+                          {row.age != null ? row.age : <span className={libTableEmpty}>—</span>}
+                        </td>
+                        <td className="tabular-nums text-slate-700">
+                          {row.work_experience_years != null ? (
+                            row.work_experience_years
+                          ) : (
+                            <span className={libTableEmpty}>—</span>
+                          )}
                         </td>
                         <td className="max-w-[6.5rem] truncate font-mono text-[10px] text-slate-700" title={stub.phone || ''}>
-                          {stub.phone || <span className="text-slate-400">—</span>}
+                          {stub.phone || <span className={libTableEmpty}>—</span>}
                         </td>
                         <td className="max-w-[4.5rem] truncate text-slate-700" title={String(row.major || '')}>
-                          {row.major?.trim() ? row.major : <span className="text-slate-400">—</span>}
+                          {row.major?.trim() ? row.major : <span className={libTableEmpty}>—</span>}
                         </td>
                         <td className="max-w-[3.5rem] truncate text-slate-700" title={String(row.education || '')}>
-                          {row.education?.trim() ? row.education : <span className="text-slate-400">—</span>}
+                          {row.education?.trim() ? row.education : <span className={libTableEmpty}>—</span>}
                         </td>
                         <td className="max-w-[6rem] text-left text-[10px] leading-snug text-slate-700">
                           <span className="line-clamp-2 break-words">
                             {String(row.profile_job_title || row.matched_job_title || '').trim() || (
-                              <span className="text-slate-400">—</span>
+                              <span className={libTableEmpty}>—</span>
                             )}
                           </span>
                         </td>
@@ -6564,7 +6637,7 @@ function ResumeLibraryView({
                           <LibraryTriCell v={mysqlTinyBoolTri(row.is_unified_enrollment)} />
                         </td>
                         <td className="max-w-[5rem] truncate text-slate-700" title={String(row.expected_salary || '')}>
-                          {row.expected_salary?.trim() ? row.expected_salary : '—'}
+                          {row.expected_salary?.trim() ? row.expected_salary : <span className={libTableEmpty}>—</span>}
                         </td>
                         <td>
                           <LibraryTriCell v={mysqlTinyBoolTri(row.verifiable)} />
@@ -6575,7 +6648,7 @@ function ResumeLibraryView({
                               {row.recruitment_channel.trim()}
                             </span>
                           ) : (
-                            <span className="text-slate-400">—</span>
+                            <span className={libTableEmpty}>—</span>
                           )}
                         </td>
                         <td>
@@ -6586,7 +6659,7 @@ function ResumeLibraryView({
                           ) : uploaded === false ? (
                             <span className="text-slate-500">未上传</span>
                           ) : (
-                            <span className="text-slate-400">—</span>
+                            <span className={libTableEmpty}>—</span>
                           )}
                         </td>
                         <td
@@ -6596,46 +6669,44 @@ function ResumeLibraryView({
                           {stub.uploadTime}
                         </td>
                         <td className="text-right align-middle">
-                          <div className="inline-flex flex-col items-end gap-0.5">
-                            {hasFile ? (
-                              <>
-                                <button
-                                  type="button"
-                                  disabled={fileBusyId === stub.id}
-                                  onClick={() => void openResumeOriginalFile(stub, 'preview')}
-                                  className="inline-flex items-center gap-0.5 rounded border border-teal-200 bg-white px-1.5 py-0.5 text-[10px] text-teal-800 hover:bg-teal-50 disabled:opacity-50"
-                                >
-                                  <Eye className="h-3 w-3 shrink-0" aria-hidden />
-                                  预览
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={fileBusyId === stub.id}
-                                  onClick={() => void openResumeOriginalFile(stub, 'download')}
-                                  className="inline-flex items-center gap-0.5 rounded border border-teal-200 bg-white px-1.5 py-0.5 text-[10px] text-teal-800 hover:bg-teal-50 disabled:opacity-50"
-                                >
-                                  <Download className="h-3 w-3 shrink-0" aria-hidden />
-                                  下载
-                                </button>
-                              </>
-                            ) : (
-                              <span className="text-[10px] text-slate-400">无原件</span>
-                            )}
+                          <div className="inline-flex flex-row flex-wrap items-center justify-end gap-0.5">
+                            <button
+                              type="button"
+                              disabled={!hasFile || fileBusyId === stub.id}
+                              onClick={() => void openResumeOriginalFile(stub, 'preview')}
+                              title={hasFile ? '预览简历' : '暂无原件'}
+                              aria-label="预览简历"
+                              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-teal-200 bg-white text-teal-800 hover:bg-teal-50 disabled:cursor-not-allowed disabled:border-slate-100 disabled:text-slate-300 disabled:hover:bg-white"
+                            >
+                              <Eye className="h-3.5 w-3.5" aria-hidden />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={!hasFile || fileBusyId === stub.id}
+                              onClick={() => void openResumeOriginalFile(stub, 'download')}
+                              title={hasFile ? '下载原件' : '暂无原件'}
+                              aria-label="下载原件"
+                              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-teal-200 bg-white text-teal-800 hover:bg-teal-50 disabled:cursor-not-allowed disabled:border-slate-100 disabled:text-slate-300 disabled:hover:bg-white"
+                            >
+                              <Download className="h-3.5 w-3.5" aria-hidden />
+                            </button>
                             <button
                               type="button"
                               onClick={() => setProfileEditResume(stub)}
-                              className="inline-flex items-center gap-0.5 rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] text-slate-700 hover:bg-slate-50"
+                              title="编辑详情"
+                              aria-label="编辑详情"
+                              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                             >
-                              <UserPen className="h-3 w-3 shrink-0" aria-hidden />
-                              详情
+                              <UserPen className="h-3.5 w-3.5" aria-hidden />
                             </button>
                             <button
                               type="button"
                               onClick={() => openDeliveryHistory(row)}
-                              className="inline-flex items-center gap-0.5 rounded border border-indigo-200 bg-white px-1.5 py-0.5 text-[10px] text-indigo-800 hover:bg-indigo-50"
+                              title="投递历史"
+                              aria-label="投递历史"
+                              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-indigo-200 bg-white text-indigo-800 hover:bg-indigo-50"
                             >
-                              <History className="h-3 w-3 shrink-0" aria-hidden />
-                              投递历史
+                              <History className="h-3.5 w-3.5" aria-hidden />
                             </button>
                           </div>
                         </td>
@@ -6815,7 +6886,18 @@ function ResumeScreeningView({
   const [sfChannel, setSfChannel] = useState('');
   const [sfSalary, setSfSalary] = useState('');
   const [sfKeyword, setSfKeyword] = useState('');
+  const [screenFilterMoreOpen, setScreenFilterMoreOpen] = useState(false);
   const [screeningHrUsers, setScreeningHrUsers] = useState<User[]>([]);
+
+  const screenAdvancedFilterCount = useMemo(() => {
+    let n = 0;
+    if (sfHasDegree !== 'all') n += 1;
+    if (sfUnified !== 'all') n += 1;
+    if (sfVerifiable !== 'all') n += 1;
+    if (sfChannel.trim()) n += 1;
+    if (sfSalary.trim()) n += 1;
+    return n;
+  }, [sfHasDegree, sfUnified, sfVerifiable, sfChannel, sfSalary]);
   const { codes: recruiterJobCodes, loading: recruiterScopeLoading } = useRecruiterScopedJobCodes(
     currentRole,
     authProfile
@@ -7424,7 +7506,8 @@ function ResumeScreeningView({
   };
 
   const screeningFilterCtrl =
-    'w-full rounded-md border border-slate-200 bg-white py-1 pl-2 pr-1.5 text-xs leading-normal text-slate-900 outline-none focus:ring-2 focus:ring-indigo-400/40 disabled:bg-slate-100';
+    'w-full min-h-[2.25rem] rounded-md border border-slate-200 bg-white py-1.5 pl-2 pr-1.5 text-xs leading-normal text-slate-900 outline-none focus:ring-2 focus:ring-indigo-400/40 disabled:bg-slate-100';
+  const screeningFilterLabel = 'mb-1 block text-[11px] font-medium text-slate-500';
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-2 p-2 sm:gap-2 sm:p-3">
@@ -7450,7 +7533,7 @@ function ResumeScreeningView({
             </p>
           </div>
           <form
-            className="rounded-lg border border-slate-200 bg-white px-2.5 py-2 shadow-sm"
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 shadow-sm"
             title="项目决定数据拉取范围；点击搜索将重新拉取列表并应用筛选"
             onSubmit={(e) => {
               e.preventDefault();
@@ -7458,7 +7541,7 @@ function ResumeScreeningView({
               loadScreenings();
             }}
           >
-            <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-slate-100 pb-1.5">
+            <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-slate-100 pb-2">
               <h2 className="text-xs font-semibold text-slate-800">条件筛选</h2>
               <span className="hidden text-[11px] leading-snug text-slate-400 md:inline">
                 项目决定拉取范围 · 其余为本地筛选
@@ -7484,9 +7567,9 @@ function ResumeScreeningView({
                 </button>
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-x-2.5 gap-y-1.5 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-7 2xl:grid-cols-8">
-              <div>
-                <label className="mb-0.5 block text-xs font-medium text-slate-600">项目</label>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-3 lg:grid-cols-6">
+              <div className="min-w-0">
+                <label className={screeningFilterLabel}>项目</label>
                 <select
                   value={resumeProjectFilter}
                   onChange={(e) => setResumeProjectFilter(e.target.value)}
@@ -7517,8 +7600,8 @@ function ResumeScreeningView({
                   ))}
                 </select>
               </div>
-              <div>
-                <label className="mb-0.5 block text-xs font-medium text-slate-600">岗位</label>
+              <div className="min-w-0">
+                <label className={screeningFilterLabel}>岗位</label>
                 <select
                   value={selectedJobCode}
                   onChange={(e) => setSelectedJobCode(e.target.value)}
@@ -7543,8 +7626,8 @@ function ResumeScreeningView({
                   )}
                 </select>
               </div>
-              <div>
-                <label className="mb-0.5 block text-xs font-medium text-slate-600">候选人</label>
+              <div className="min-w-0">
+                <label className={screeningFilterLabel}>候选人</label>
                 <input
                   value={sfName}
                   onChange={(e) => setSfName(e.target.value)}
@@ -7552,8 +7635,8 @@ function ResumeScreeningView({
                   className={screeningFilterCtrl}
                 />
               </div>
-              <div>
-                <label className="mb-0.5 block text-xs font-medium text-slate-600">性别</label>
+              <div className="min-w-0">
+                <label className={screeningFilterLabel}>性别</label>
                 <select
                   value={sfGender}
                   onChange={(e) => setSfGender(e.target.value as 'all' | '男' | '女')}
@@ -7564,8 +7647,8 @@ function ResumeScreeningView({
                   <option value="女">女</option>
                 </select>
               </div>
-              <div>
-                <label className="mb-0.5 block text-xs font-medium text-slate-600">学历</label>
+              <div className="min-w-0">
+                <label className={screeningFilterLabel}>学历</label>
                 <select
                   value={sfEdu}
                   onChange={(e) => setSfEdu(e.target.value)}
@@ -7578,68 +7661,8 @@ function ResumeScreeningView({
                   <option value="研究生">研究生</option>
                 </select>
               </div>
-              <div>
-                <label className="mb-0.5 block text-xs font-medium text-slate-600">是否有学位</label>
-                <select
-                  value={sfHasDegree}
-                  onChange={(e) => setSfHasDegree(e.target.value as 'all' | '1' | '0')}
-                  className={screeningFilterCtrl}
-                >
-                  <option value="all">所有</option>
-                  <option value="1">是</option>
-                  <option value="0">否</option>
-                </select>
-              </div>
-              <div>
-                <label className="mb-0.5 block text-xs font-medium text-slate-600">是否统招</label>
-                <select
-                  value={sfUnified}
-                  onChange={(e) => setSfUnified(e.target.value as 'all' | '1' | '0')}
-                  className={screeningFilterCtrl}
-                >
-                  <option value="all">所有</option>
-                  <option value="1">是</option>
-                  <option value="0">否</option>
-                </select>
-              </div>
-              <div>
-                <label className="mb-0.5 block text-xs font-medium text-slate-600">是否可查</label>
-                <select
-                  value={sfVerifiable}
-                  onChange={(e) => setSfVerifiable(e.target.value as 'all' | '1' | '0')}
-                  className={screeningFilterCtrl}
-                >
-                  <option value="all">所有</option>
-                  <option value="1">是</option>
-                  <option value="0">否</option>
-                </select>
-              </div>
-              <div>
-                <label className="mb-0.5 block text-xs font-medium text-slate-600">招聘渠道</label>
-                <select
-                  value={sfChannel}
-                  onChange={(e) => setSfChannel(e.target.value)}
-                  className={screeningFilterCtrl}
-                >
-                  <option value="">所有</option>
-                  {RECRUITMENT_CHANNEL_OPTIONS.map((opt) => (
-                    <option key={opt} value={opt}>
-                      {opt}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="mb-0.5 block text-xs font-medium text-slate-600">期望薪资</label>
-                <input
-                  value={sfSalary}
-                  onChange={(e) => setSfSalary(e.target.value)}
-                  placeholder="包含即可"
-                  className={screeningFilterCtrl}
-                />
-              </div>
-              <div>
-                <label className="mb-0.5 block text-xs font-medium text-slate-600">关键词</label>
+              <div className="min-w-0 sm:col-span-2 lg:col-span-1">
+                <label className={screeningFilterLabel}>关键词</label>
                 <input
                   value={sfKeyword}
                   onChange={(e) => setSfKeyword(e.target.value)}
@@ -7647,6 +7670,90 @@ function ResumeScreeningView({
                   className={screeningFilterCtrl}
                 />
               </div>
+            </div>
+            <div className="mt-2 border-t border-slate-100 pt-2">
+              <button
+                type="button"
+                onClick={() => setScreenFilterMoreOpen((o) => !o)}
+                className="inline-flex items-center gap-1.5 rounded-md py-1 pl-0.5 pr-2 text-[11px] font-medium text-slate-600 hover:bg-slate-50"
+                aria-expanded={screenFilterMoreOpen}
+              >
+                {screenFilterMoreOpen ? (
+                  <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-500" aria-hidden />
+                ) : (
+                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-500" aria-hidden />
+                )}
+                更多条件
+                {screenAdvancedFilterCount > 0 ? (
+                  <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-emerald-900">
+                    {screenAdvancedFilterCount}
+                  </span>
+                ) : null}
+              </button>
+              {screenFilterMoreOpen ? (
+                <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-3 lg:grid-cols-5">
+                  <div className="min-w-0">
+                    <label className={screeningFilterLabel}>是否有学位</label>
+                    <select
+                      value={sfHasDegree}
+                      onChange={(e) => setSfHasDegree(e.target.value as 'all' | '1' | '0')}
+                      className={screeningFilterCtrl}
+                    >
+                      <option value="all">所有</option>
+                      <option value="1">是</option>
+                      <option value="0">否</option>
+                    </select>
+                  </div>
+                  <div className="min-w-0">
+                    <label className={screeningFilterLabel}>是否统招</label>
+                    <select
+                      value={sfUnified}
+                      onChange={(e) => setSfUnified(e.target.value as 'all' | '1' | '0')}
+                      className={screeningFilterCtrl}
+                    >
+                      <option value="all">所有</option>
+                      <option value="1">是</option>
+                      <option value="0">否</option>
+                    </select>
+                  </div>
+                  <div className="min-w-0">
+                    <label className={screeningFilterLabel}>是否可查</label>
+                    <select
+                      value={sfVerifiable}
+                      onChange={(e) => setSfVerifiable(e.target.value as 'all' | '1' | '0')}
+                      className={screeningFilterCtrl}
+                    >
+                      <option value="all">所有</option>
+                      <option value="1">是</option>
+                      <option value="0">否</option>
+                    </select>
+                  </div>
+                  <div className="min-w-0">
+                    <label className={screeningFilterLabel}>招聘渠道</label>
+                    <select
+                      value={sfChannel}
+                      onChange={(e) => setSfChannel(e.target.value)}
+                      className={screeningFilterCtrl}
+                    >
+                      <option value="">所有</option>
+                      {RECRUITMENT_CHANNEL_OPTIONS.map((opt) => (
+                        <option key={opt} value={opt}>
+                          {opt}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="min-w-0 sm:col-span-2 lg:col-span-1">
+                    <label className={screeningFilterLabel}>期望薪资</label>
+                    <input
+                      value={sfSalary}
+                      onChange={(e) => setSfSalary(e.target.value)}
+                      placeholder="子串匹配，如 15k、10-15"
+                      className={screeningFilterCtrl}
+                    />
+                  </div>
+                </div>
+              ) : null}
             </div>
           </form>
           <div className="flex flex-wrap items-center justify-end gap-2">
@@ -9183,6 +9290,182 @@ function recruitmentDeptOptionsForProjectLeads(depts: Dept[], userDeptName: stri
   return recruitmentOrdered.filter((d) => allowed.has(d.id));
 }
 
+type JobRoleBaseAdminRow = { id: string; name: string; sort_order: number; enabled: 0 | 1 };
+
+function SystemJobRoleBasesView() {
+  const refreshGlobal = useRefreshJobRoleBases();
+  const [rows, setRows] = useState<JobRoleBaseAdminRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState('');
+  const [newName, setNewName] = useState('');
+  const [adding, setAdding] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setErr('');
+    try {
+      const r = await miniappApiFetch('/api/admin/job-role-bases');
+      const j = (await r.json().catch(() => ({}))) as { data?: JobRoleBaseAdminRow[]; message?: string };
+      if (!r.ok) throw new Error(j.message || '加载失败');
+      setRows((j.data || []) as JobRoleBaseAdminRow[]);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : '加载失败');
+      setRows([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const addRow = async () => {
+    const t = newName.trim();
+    if (!t) return;
+    setAdding(true);
+    try {
+      const r = await miniappApiFetch('/api/admin/job-role-bases', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: t })
+      });
+      const j = (await r.json().catch(() => ({}))) as { message?: string };
+      if (!r.ok) throw new Error(j.message || '添加失败');
+      setNewName('');
+      await load();
+      refreshGlobal();
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : '添加失败');
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const toggleEnabled = async (row: JobRoleBaseAdminRow) => {
+    const next = row.enabled === 1 ? 0 : 1;
+    try {
+      const r = await miniappApiFetch(`/api/admin/job-role-bases/${encodeURIComponent(row.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next })
+      });
+      const j = (await r.json().catch(() => ({}))) as { message?: string };
+      if (!r.ok) throw new Error(j.message || '更新失败');
+      await load();
+      refreshGlobal();
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : '更新失败');
+    }
+  };
+
+  const delRow = async (row: JobRoleBaseAdminRow) => {
+    if (
+      !window.confirm(
+        `确定删除标准岗位「${row.name}」？历史数据中的文本不受影响，但表单中不可再选此项。`
+      )
+    )
+      return;
+    try {
+      const r = await miniappApiFetch(`/api/admin/job-role-bases/${encodeURIComponent(row.id)}`, {
+        method: 'DELETE'
+      });
+      const j = (await r.json().catch(() => ({}))) as { message?: string };
+      if (!r.ok) throw new Error(j.message || '删除失败');
+      await load();
+      refreshGlobal();
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : '删除失败');
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold text-slate-900">标准岗位</h1>
+        <p className="mt-1 max-w-3xl text-sm text-slate-600 leading-relaxed">
+          维护「岗位序列」名称（不含初级/中级等前缀）。与岗位分配中的岗位下拉、简历详情与简历库的「职位」选项一致；仅<strong>管理员</strong>可在此增删改。首次部署若表为空，服务启动时会用内置清单自动种子数据。
+        </p>
+      </div>
+      {err ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">{err}</div>
+      ) : null}
+      <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-end">
+        <div className="min-w-0 flex-1">
+          <label className="mb-1 block text-xs font-medium text-slate-600">新增岗位名称</label>
+          <input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            placeholder="例如：MES工程师（2～255 字，首尾空格会去除）"
+            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-200"
+          />
+        </div>
+        <button
+          type="button"
+          disabled={adding || !newName.trim()}
+          onClick={() => void addRow()}
+          className={btnPrimarySmFlex}
+        >
+          {adding ? '添加中…' : '添加'}
+        </button>
+      </div>
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-100 px-4 py-3">
+          <h2 className="text-base font-bold text-slate-900">岗位列表</h2>
+        </div>
+        {loading ? (
+          <p className="px-4 py-10 text-center text-sm text-slate-500">加载中…</p>
+        ) : rows.length === 0 ? (
+          <p className="px-4 py-10 text-center text-sm text-slate-500">暂无数据；请确认已执行迁移 SQL 且 API 服务已重启。</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[520px] text-left text-sm">
+              <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                <tr>
+                  <th className="px-4 py-3 font-medium">名称</th>
+                  <th className="px-4 py-3 font-medium whitespace-nowrap">排序</th>
+                  <th className="px-4 py-3 font-medium whitespace-nowrap">启用</th>
+                  <th className="px-4 py-3 font-medium text-right whitespace-nowrap">操作</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {rows.map((row) => (
+                  <tr key={row.id} className="hover:bg-slate-50/80">
+                    <td className="px-4 py-3 font-medium text-slate-900">{row.name}</td>
+                    <td className="px-4 py-3 tabular-nums text-slate-600">{row.sort_order}</td>
+                    <td className="px-4 py-3">
+                      <button
+                        type="button"
+                        onClick={() => void toggleEnabled(row)}
+                        className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${
+                          row.enabled === 1
+                            ? 'border-teal-200 bg-teal-50 text-teal-800'
+                            : 'border-slate-200 bg-slate-100 text-slate-600'
+                        }`}
+                      >
+                        {row.enabled === 1 ? '已启用' : '已停用'}
+                      </button>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <button
+                        type="button"
+                        onClick={() => void delRow(row)}
+                        className="text-xs font-medium text-red-600 hover:text-red-800"
+                      >
+                        删除
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function normalizeDeptFormType(s: string | undefined): '交付' | '招聘' | '其他' {
   const t = String(s || '').trim();
   if (t === '交付' || t === '招聘' || t === '其他') return t;
@@ -10661,7 +10944,8 @@ const SYSTEM_MENU_ICON_OPTIONS = [
   'LayoutDashboard',
   'Network',
   'Shield',
-  'UserCog'
+  'UserCog',
+  'Tags'
 ] as const;
 
 function SystemMenuView() {
@@ -10745,6 +11029,8 @@ function SystemMenuView() {
         return <Shield className="w-4 h-4" />;
       case 'UserCog':
         return <UserCog className="w-4 h-4" />;
+      case 'Tags':
+        return <Tags className="w-4 h-4" />;
       default:
         return <MenuIcon className="w-4 h-4" />;
     }

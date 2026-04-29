@@ -15,7 +15,9 @@ import {
   jobLevelValidationMessage,
   jobTitleValidationMessage,
   normalizeExtractedJobTitleForDisplay,
-  STANDARD_JOB_ROLE_BASE_SET,
+  FALLBACK_STANDARD_JOB_ROLE_BASES,
+  setStandardJobRoleBasesFromDb,
+  getStandardJobRoleBaseSet,
   matchRoleBaseFromJobTitle
 } from '../shared/jobTaxonomy'
 
@@ -23,9 +25,10 @@ import {
 function matchJobTitleToStandardProfileOption(raw: string): string | null {
   const t = normalizeExtractedJobTitleForDisplay(String(raw || ''))
   if (!t) return null
-  if (STANDARD_JOB_ROLE_BASE_SET.has(t)) return t
+  const set = getStandardJobRoleBaseSet()
+  if (set.has(t)) return t
   const base = matchRoleBaseFromJobTitle(t, '')
-  if (base && STANDARD_JOB_ROLE_BASE_SET.has(base)) return base
+  if (base && set.has(base)) return base
   return null
 }
 import { mysqlConnectionTimezoneOptions, wireMysqlSessionTimezone } from '../shared/mysqlSessionTimezone'
@@ -83,6 +86,39 @@ const mysqlPool = mysql.createPool({
   ...mysqlConnectionTimezoneOptions
 })
 wireMysqlSessionTimezone(mysqlPool)
+
+/** 标准岗位序列：与表 standard_job_role_bases 同步到 shared 内存，供 compose / 校验 */
+async function refreshStandardJobRoleBasesCache(): Promise<void> {
+  try {
+    const [cntRows] = await mysqlPool.query<RowDataPacket[]>('SELECT COUNT(*) AS n FROM standard_job_role_bases LIMIT 1')
+    const n = Number((cntRows[0] as { n?: unknown })?.n ?? 0)
+    if (n === 0) {
+      let order = 10
+      for (const name of FALLBACK_STANDARD_JOB_ROLE_BASES) {
+        await mysqlPool.query(
+          'INSERT IGNORE INTO standard_job_role_bases (name, sort_order, enabled) VALUES (?, ?, 1)',
+          [name, order]
+        )
+        order += 10
+      }
+    }
+    const [rows] = await mysqlPool.query<RowDataPacket[]>(
+      'SELECT name FROM standard_job_role_bases WHERE enabled = 1 ORDER BY sort_order ASC, id ASC'
+    )
+    const names = (rows || [])
+      .map((r) => String((r as { name?: unknown }).name || '').trim())
+      .filter(Boolean)
+    setStandardJobRoleBasesFromDb(names)
+  } catch (e: unknown) {
+    const code = (e as { code?: string })?.code
+    if (code === 'ER_NO_SUCH_TABLE') {
+      setStandardJobRoleBasesFromDb([])
+      return
+    }
+    console.warn('[standard_job_role_bases] refresh', (e as Error)?.message)
+    setStandardJobRoleBasesFromDb([])
+  }
+}
 
 /** 管理端演示库（HR users 等），与 MYSQL_DATABASE 业务库分离 */
 const mysqlAdminPool = mysql.createPool({
@@ -3573,6 +3609,187 @@ app.get('/api/admin/resume-library/:id/delivery-history', async (req, res) => {
   res.json({ data })
 })
 
+app.get('/api/admin/job-role-bases', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const namesOnly = String(req.query.namesOnly ?? '').trim() === '1'
+  try {
+    let [rows] = await mysqlPool.query<RowDataPacket[]>(
+      namesOnly
+        ? 'SELECT name FROM standard_job_role_bases WHERE enabled = 1 ORDER BY sort_order ASC, id ASC'
+        : 'SELECT id, name, sort_order, enabled FROM standard_job_role_bases ORDER BY sort_order ASC, id ASC'
+    )
+    if (!(rows || []).length) {
+      await refreshStandardJobRoleBasesCache()
+      ;[rows] = await mysqlPool.query<RowDataPacket[]>(
+        namesOnly
+          ? 'SELECT name FROM standard_job_role_bases WHERE enabled = 1 ORDER BY sort_order ASC, id ASC'
+          : 'SELECT id, name, sort_order, enabled FROM standard_job_role_bases ORDER BY sort_order ASC, id ASC'
+      )
+    }
+    if (namesOnly) {
+      const names = (rows || [])
+        .map((r) => String((r as { name?: unknown }).name || '').trim())
+        .filter(Boolean)
+      setStandardJobRoleBasesFromDb(names)
+      return res.json({ data: names })
+    }
+    const data = (rows || []).map((r) => ({
+      id: jsonSafeMysqlCell((r as { id?: unknown }).id),
+      name: String((r as { name?: unknown }).name || '').trim(),
+      sort_order: Number((r as { sort_order?: unknown }).sort_order) || 0,
+      enabled: Number((r as { enabled?: unknown }).enabled) === 1 ? 1 : 0
+    }))
+    const enabledNames = data.filter((d) => d.enabled === 1).map((d) => d.name)
+    setStandardJobRoleBasesFromDb(enabledNames)
+    res.json({ data })
+  } catch (e: unknown) {
+    const code = (e as { code?: string })?.code
+    if (code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({
+        message: '缺少标准岗位表，请执行 server/migration_standard_job_role_bases.sql 后重启服务'
+      })
+    }
+    console.error('[GET /api/admin/job-role-bases]', e)
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.post('/api/admin/job-role-bases', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const token = extractAdminRequestToken(req)
+  const actor = await loadAdminSessionActor(token)
+  if (!actor || actor.uiRole !== 'admin') {
+    return res.status(403).json({ message: '仅管理员可维护标准岗位' })
+  }
+  const nameNorm = normalizeJobTitle(String(req.body?.name ?? '').trim())
+  if (!nameNorm) {
+    return res.status(400).json({ message: '岗位名称须为 2～255 个字符（首尾空格会去除）' })
+  }
+  const soRaw = req.body?.sortOrder ?? req.body?.sort_order
+  let sortOrder: number | null = null
+  if (soRaw !== undefined && soRaw !== null && String(soRaw).trim() !== '') {
+    const n = Math.floor(Number(soRaw))
+    if (Number.isFinite(n)) sortOrder = n
+  }
+  try {
+    let orderVal = sortOrder
+    if (orderVal == null) {
+      const [mx] = await mysqlPool.query<RowDataPacket[]>(
+        'SELECT COALESCE(MAX(sort_order), 0) AS m FROM standard_job_role_bases'
+      )
+      orderVal = Number((mx[0] as { m?: unknown })?.m ?? 0) + 10
+    }
+    const [hdr] = await mysqlPool.query<ResultSetHeader>(
+      'INSERT INTO standard_job_role_bases (name, sort_order, enabled) VALUES (?, ?, 1)',
+      [nameNorm, orderVal]
+    )
+    await refreshStandardJobRoleBasesCache()
+    res.json({ ok: true, id: jsonSafeMysqlCell(hdr.insertId) })
+  } catch (e: unknown) {
+    const err = e as { code?: string; errno?: number; message?: string }
+    if (err.code === 'ER_DUP_ENTRY' || err.errno === 1062) {
+      return res.status(400).json({ message: '该岗位名称已存在' })
+    }
+    if (err.code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({ message: '缺少标准岗位表，请执行迁移 SQL' })
+    }
+    console.error('[POST /api/admin/job-role-bases]', e)
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.patch('/api/admin/job-role-bases/:id', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const token = extractAdminRequestToken(req)
+  const actor = await loadAdminSessionActor(token)
+  if (!actor || actor.uiRole !== 'admin') {
+    return res.status(403).json({ message: '仅管理员可维护标准岗位' })
+  }
+  const idTok = String(req.params.id || '').trim()
+  if (!/^\d{1,20}$/.test(idTok)) {
+    return res.status(400).json({ message: 'invalid id' })
+  }
+  const hasName = req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'name')
+  const hasSort =
+    req.body != null &&
+    (Object.prototype.hasOwnProperty.call(req.body, 'sortOrder') ||
+      Object.prototype.hasOwnProperty.call(req.body, 'sort_order'))
+  const hasEnabled = req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'enabled')
+  if (!hasName && !hasSort && !hasEnabled) {
+    return res.status(400).json({ message: '请提供 name、sortOrder 或 enabled' })
+  }
+  const fields: string[] = []
+  const vals: unknown[] = []
+  if (hasName) {
+    const nameNorm = normalizeJobTitle(String(req.body.name ?? '').trim())
+    if (!nameNorm) {
+      return res.status(400).json({ message: '岗位名称须为 2～255 个字符' })
+    }
+    fields.push('name = ?')
+    vals.push(nameNorm)
+  }
+  if (hasSort) {
+    const raw = req.body.sortOrder ?? req.body.sort_order
+    const n = Math.floor(Number(raw))
+    if (!Number.isFinite(n)) {
+      return res.status(400).json({ message: 'sortOrder 无效' })
+    }
+    fields.push('sort_order = ?')
+    vals.push(n)
+  }
+  if (hasEnabled) {
+    const en = Number(req.body.enabled)
+    if (en !== 0 && en !== 1) {
+      return res.status(400).json({ message: 'enabled 须为 0 或 1' })
+    }
+    fields.push('enabled = ?')
+    vals.push(en)
+  }
+  vals.push(idTok)
+  try {
+    const [hdr] = await mysqlPool.query<ResultSetHeader>(
+      `UPDATE standard_job_role_bases SET ${fields.join(', ')} WHERE id = ?`,
+      vals
+    )
+    if (!hdr.affectedRows) {
+      return res.status(404).json({ message: '记录不存在' })
+    }
+    await refreshStandardJobRoleBasesCache()
+    res.json({ ok: true })
+  } catch (e: unknown) {
+    const err = e as { code?: string; errno?: number }
+    if (err.code === 'ER_DUP_ENTRY' || err.errno === 1062) {
+      return res.status(400).json({ message: '该岗位名称已存在' })
+    }
+    console.error('[PATCH /api/admin/job-role-bases/:id]', e)
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.delete('/api/admin/job-role-bases/:id', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const token = extractAdminRequestToken(req)
+  const actor = await loadAdminSessionActor(token)
+  if (!actor || actor.uiRole !== 'admin') {
+    return res.status(403).json({ message: '仅管理员可维护标准岗位' })
+  }
+  const idTok = String(req.params.id || '').trim()
+  if (!/^\d{1,20}$/.test(idTok)) {
+    return res.status(400).json({ message: 'invalid id' })
+  }
+  try {
+    const [hdr] = await mysqlPool.query<ResultSetHeader>('DELETE FROM standard_job_role_bases WHERE id = ?', [idTok])
+    if (!hdr.affectedRows) {
+      return res.status(404).json({ message: '记录不存在' })
+    }
+    await refreshStandardJobRoleBasesCache()
+    res.json({ ok: true })
+  } catch (e) {
+    console.error('[DELETE /api/admin/job-role-bases/:id]', e)
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
 app.patch('/api/admin/resume-screenings/:id', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const idRaw = String(req.params.id || '').trim()
@@ -6066,6 +6283,9 @@ app.listen(port, listenHost, () => {
     `[startup-check] TRTC env: ${trtcOk ? 'OK' : 'MISSING'} | TRTC_SDK_APP_ID=${trtcSdkAppId || 0} | TRTC_SDK_SECRET_KEY=${maskSecret(
       trtcSecret
     )}`
+  )
+  void refreshStandardJobRoleBasesCache().catch((e) =>
+    console.warn('[startup-check] standard_job_role_bases cache:', (e as Error)?.message || e)
   )
   if (flowLogEnabled) {
     console.log('[startup-check] FLOW_LOG=1 → 终端会输出 [flow] 步骤与 [api] 请求摘要（/api/health 除外）')

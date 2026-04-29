@@ -199,7 +199,8 @@ INSERT INTO menus (id, name, type, icon, path, parent_id, level) VALUES
   ('sys-dept', '部门管理', '菜单', 'Network', '/system/dept', 'system', 1),
   ('sys-user', '用户管理', '菜单', 'UserCog', '/system/users', 'system', 1),
   ('sys-role', '角色管理', '菜单', 'Shield', '/system/roles', 'system', 1),
-  ('sys-menu', '菜单管理', '菜单', 'Menu', '/system/menus', 'system', 1)
+  ('sys-menu', '菜单管理', '菜单', 'Menu', '/system/menus', 'system', 1),
+  ('sys-job-role-bases', '标准岗位', '菜单', 'Tags', '/system/job-role-bases', 'system', 1)
 ON DUPLICATE KEY UPDATE
   name = VALUES(name),
   type = VALUES(type),

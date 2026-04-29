@@ -1,6 +1,7 @@
 /**
  * 岗位「级别」与「岗位序列」规范：前后端共用，保证写入一致、筛选可比。
- * 级别一般为：初级、中级、高级、资深；管理端表单中岗位序列为下拉，落库 title = 级别 + 序列。
+ * 标准岗位序列优先从库表 `standard_job_role_bases` 加载（见 server 与前端登录后同步）；
+ * 表不可用或尚无启用项时回退到 FALLBACK_STANDARD_JOB_ROLE_BASES。
  */
 
 /** 与业务约定一致的标准职级 */
@@ -29,8 +30,11 @@ const LEVEL_ALIASES: Record<string, StandardJobLevel> = {
   '总监/负责人': '资深'
 }
 
-/** 标准岗位序列（不含级别前缀），与常见招聘系统岗位下拉对齐 */
-export const STANDARD_JOB_ROLE_BASES = [
+/**
+ * 内置默认岗位序列（表为空或 API 未加载时的回退；与 migration 后首启种子一致）。
+ * 新增/调整岗位请优先在管理端「标准岗位」维护；此处仅作兜底与冷启动种子源。
+ */
+export const FALLBACK_STANDARD_JOB_ROLE_BASES: readonly string[] = [
   'JAVA 开发工程师',
   'H5 (React&Vue)',
   '测试工程师',
@@ -91,7 +95,6 @@ export const STANDARD_JOB_ROLE_BASES = [
   '应用程序开发',
   '风控研发',
   '技术支持',
-  /** 与上图清单互补、仍常见的序列 */
   '后端开发工程师',
   '全栈工程师',
   'Go 开发工程师',
@@ -106,7 +109,6 @@ export const STANDARD_JOB_ROLE_BASES = [
   '市场专员',
   '财务专员',
   '行政专员',
-  /** 机械 / 机器人 / 电气 / 成本等业务岗位 */
   '机械设计岗',
   '产品工程师/机械工程师',
   '机器人应用工程师',
@@ -116,20 +118,38 @@ export const STANDARD_JOB_ROLE_BASES = [
   '软件算法岗'
 ] as const
 
-export const STANDARD_JOB_ROLE_BASE_SET = new Set<string>(STANDARD_JOB_ROLE_BASES as readonly string[])
+let _standardJobRoleBasesOverride: string[] | null = null
+
+/** Node/浏览器：用库表拉取结果覆盖内存中的标准序列；传空数组表示清除覆盖并回退到 FALLBACK */
+export function setStandardJobRoleBasesFromDb(names: string[]): void {
+  const cleaned = names.map((x) => String(x || '').trim()).filter(Boolean)
+  _standardJobRoleBasesOverride = cleaned.length > 0 ? cleaned : null
+}
+
+export function getStandardJobRoleBases(): string[] {
+  if (_standardJobRoleBasesOverride && _standardJobRoleBasesOverride.length > 0) {
+    return [..._standardJobRoleBasesOverride]
+  }
+  return [...FALLBACK_STANDARD_JOB_ROLE_BASES]
+}
+
+export function getStandardJobRoleBaseSet(): Set<string> {
+  return new Set(getStandardJobRoleBases())
+}
 
 /** 反推编辑表单中的岗位序列：优先与库里的 level 列组合匹配，否则尝试任意标准级别前缀 */
 export function matchRoleBaseFromJobTitle(title: string, levelRaw: string): string | null {
   const t = normalizeJobTitle(String(title || ''))
   if (!t) return null
-  const bases = [...STANDARD_JOB_ROLE_BASES].sort((a, b) => b.length - a.length)
+  const bases = [...getStandardJobRoleBases()].sort((a, b) => b.length - a.length)
+  const baseSet = getStandardJobRoleBaseSet()
   const levelNorm = normalizeJobLevel(levelRaw)
   if (levelNorm) {
     const combined = `${levelNorm}`
     if (t.startsWith(combined)) {
       const rest = t.slice(combined.length)
       const restNorm = normalizeJobTitle(rest)
-      if (restNorm && STANDARD_JOB_ROLE_BASE_SET.has(restNorm)) return restNorm
+      if (restNorm && baseSet.has(restNorm)) return restNorm
     }
   }
   for (const lv of STANDARD_JOB_LEVELS) {
@@ -137,17 +157,17 @@ export function matchRoleBaseFromJobTitle(title: string, levelRaw: string): stri
     if (t.startsWith(p)) {
       const rest = t.slice(p.length)
       const restNorm = normalizeJobTitle(rest)
-      if (restNorm && STANDARD_JOB_ROLE_BASE_SET.has(restNorm)) return restNorm
+      if (restNorm && baseSet.has(restNorm)) return restNorm
     }
   }
-  if (STANDARD_JOB_ROLE_BASE_SET.has(t)) return t
+  if (baseSet.has(t)) return t
   return null
 }
 
 /** 写入库的规范岗位全称 */
 export function composeStandardJobTitle(level: StandardJobLevel, roleBaseRaw: string): string | null {
   const base = normalizeJobTitle(String(roleBaseRaw || ''))
-  if (!base || !STANDARD_JOB_ROLE_BASE_SET.has(base)) return null
+  if (!base || !getStandardJobRoleBaseSet().has(base)) return null
   const out = `${level}${base}`
   if (out.length > 255) return null
   return out
@@ -201,9 +221,10 @@ export function normalizeExtractedJobTitleForDisplay(raw: string): string {
     .trim()
     .replace(/\s+/g, ' ')
   if (!t) return ''
-  if (STANDARD_JOB_ROLE_BASE_SET.has(t)) return t
+  const baseSet = getStandardJobRoleBaseSet()
+  if (baseSet.has(t)) return t
   const compact = t.replace(/\s/g, '')
-  for (const b of [...STANDARD_JOB_ROLE_BASES].sort((a, b) => b.length - a.length)) {
+  for (const b of [...getStandardJobRoleBases()].sort((a, b) => b.length - a.length)) {
     if (compact === b.replace(/\s/g, '')) return b
   }
   return t.length <= 255 ? t : t.slice(0, 255)
@@ -211,5 +232,5 @@ export function normalizeExtractedJobTitleForDisplay(raw: string): string {
 
 /** 简历详情「职位」下拉：仅标准岗位序列（不含初级/中级等级别前缀），有序 */
 export function buildStandardProfileJobRoleBaseOptions(): string[] {
-  return [...STANDARD_JOB_ROLE_BASES].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'))
+  return [...getStandardJobRoleBases()].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'))
 }
