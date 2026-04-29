@@ -29,7 +29,7 @@ import {
   ChevronRight, ChevronLeft, MoreHorizontal, CheckCircle2, XCircle,
   LogOut, Bell, LayoutDashboard, FolderOpen, Bot,
   Clock, Calendar, Pencil, Trash2, Loader2, KeyRound, Sparkles, UserRound, Lock, X, RotateCcw,
-  FileBarChart, UserPen, CalendarCheck, Eye, Download
+  FileBarChart, UserPen, CalendarCheck, Eye, Download, History
 } from 'lucide-react';
 
 /**
@@ -5250,6 +5250,15 @@ type ResumeLibraryApiRow = {
   resume_uploaded?: unknown
 }
 
+type ResumeDeliveryHistoryApiRow = {
+  id: number | string
+  job_code: string
+  matched_job_title: string | null
+  job_list_title?: string | null
+  job_project_name?: string | null
+  created_at: string | Date
+}
+
 function resumeStubFromLibraryRow(row: ResumeLibraryApiRow): Resume {
   const created = row.created_at
   const uploadTimeFull = formatScreeningUploadTimeFull(created)
@@ -5857,6 +5866,13 @@ function ResumeLibraryView({
   const [inviteBanner, setInviteBanner] = useState('');
   const [profileEditResume, setProfileEditResume] = useState<Resume | null>(null);
   const [fileBusyId, setFileBusyId] = useState<string | null>(null);
+  const [deliveryHistoryModal, setDeliveryHistoryModal] = useState<{
+    screeningId: string;
+    candidateLabel: string;
+  } | null>(null);
+  const [deliveryHistoryRows, setDeliveryHistoryRows] = useState<ResumeDeliveryHistoryApiRow[]>([]);
+  const [deliveryHistoryLoading, setDeliveryHistoryLoading] = useState(false);
+  const [deliveryHistoryError, setDeliveryHistoryError] = useState('');
   const [libFilterDraft, setLibFilterDraft] = useState<ResumeLibraryFilters>(() => emptyResumeLibraryFilters());
   const [libFilterApplied, setLibFilterApplied] = useState<ResumeLibraryFilters>(() => emptyResumeLibraryFilters());
 
@@ -6060,6 +6076,26 @@ function ResumeLibraryView({
   useEffect(() => {
     loadLibrary();
   }, [loadLibrary]);
+
+  const openDeliveryHistory = useCallback((row: ResumeLibraryApiRow) => {
+    const sid = String(row.id);
+    const label = pickCandidateDisplayName(String(row.candidate_name || ''), undefined);
+    setDeliveryHistoryModal({ screeningId: sid, candidateLabel: label });
+    setDeliveryHistoryError('');
+    setDeliveryHistoryLoading(true);
+    setDeliveryHistoryRows([]);
+    void miniappApiFetch(`/api/admin/resume-library/${encodeURIComponent(sid)}/delivery-history`)
+      .then(async (r) => {
+        const j = (await r.json()) as { data?: ResumeDeliveryHistoryApiRow[]; message?: string };
+        if (!r.ok) throw new Error(j.message || '加载失败');
+        setDeliveryHistoryRows(j.data || []);
+      })
+      .catch((e: unknown) => {
+        setDeliveryHistoryError(e instanceof Error ? e.message : '加载失败');
+        setDeliveryHistoryRows([]);
+      })
+      .finally(() => setDeliveryHistoryLoading(false));
+  }, []);
 
   const scopedLibRows = useMemo(() => {
     let list = libRows;
@@ -6593,6 +6629,14 @@ function ResumeLibraryView({
                               <UserPen className="h-3 w-3 shrink-0" aria-hidden />
                               详情
                             </button>
+                            <button
+                              type="button"
+                              onClick={() => openDeliveryHistory(row)}
+                              className="inline-flex items-center gap-0.5 rounded border border-indigo-200 bg-white px-1.5 py-0.5 text-[10px] text-indigo-800 hover:bg-indigo-50"
+                            >
+                              <History className="h-3 w-3 shrink-0" aria-hidden />
+                              投递历史
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -6627,6 +6671,93 @@ function ResumeLibraryView({
               void loadLibrary();
             }}
           />
+        ) : null}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {deliveryHistoryModal ? (
+          <motion.div
+            key="delivery-history"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4"
+            role="presentation"
+            onClick={() => setDeliveryHistoryModal(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.96, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.96, opacity: 0 }}
+              className="flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="delivery-history-title"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex shrink-0 items-start justify-between gap-2 border-b border-slate-100 px-4 py-3">
+                <div className="min-w-0">
+                  <h3 id="delivery-history-title" className="text-sm font-bold text-slate-900">
+                    投递历史
+                  </h3>
+                  <p className="mt-0.5 truncate text-xs text-slate-600" title={deliveryHistoryModal.candidateLabel}>
+                    {deliveryHistoryModal.candidateLabel}
+                  </p>
+                  <p className="mt-1 text-[11px] leading-snug text-slate-500">
+                    展示同一候选人在各项目/岗位下的筛查投递记录；仅包含您有权限查看的岗位。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDeliveryHistoryModal(null)}
+                  className="rounded-lg p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+                  aria-label="关闭"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+                {deliveryHistoryLoading ? (
+                  <div className="flex items-center gap-2 py-8 text-sm text-slate-600">
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                    加载中…
+                  </div>
+                ) : deliveryHistoryError ? (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                    {deliveryHistoryError}
+                  </div>
+                ) : deliveryHistoryRows.length === 0 ? (
+                  <p className="py-6 text-center text-sm text-slate-500">暂无投递记录。</p>
+                ) : (
+                  <ul className="space-y-3">
+                    {deliveryHistoryRows.map((h) => {
+                      const jd =
+                        String(h.job_list_title || '').trim() ||
+                        String(h.matched_job_title || '').trim() ||
+                        '—';
+                      const proj =
+                        h.job_project_name != null && String(h.job_project_name).trim()
+                          ? String(h.job_project_name).trim()
+                          : '—';
+                      const when = formatScreeningUploadTimeFull(h.created_at).trim() || String(h.created_at || '');
+                      const jc = String(h.job_code || '').trim();
+                      return (
+                        <li
+                          key={String(h.id)}
+                          className="rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2 text-left text-[11px] text-slate-800"
+                        >
+                          <div className="font-mono tabular-nums text-[10px] text-slate-500">{when}</div>
+                          <div className="mt-1 font-medium text-slate-900">{proj}</div>
+                          <div className="mt-0.5 leading-snug text-slate-700">{jd}</div>
+                          {jc ? <div className="mt-0.5 font-mono text-[10px] text-slate-500">{jc}</div> : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
         ) : null}
       </AnimatePresence>
     </div>
@@ -10598,6 +10729,8 @@ function SystemMenuView() {
         return <Search className="w-4 h-4" />;
       case 'FileText':
         return <FileText className="w-4 h-4" />;
+      case 'FolderOpen':
+        return <FolderOpen className="w-4 h-4" />;
       case 'UserCheck':
         return <UserCheck className="w-4 h-4" />;
       case 'Settings':

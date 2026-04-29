@@ -2799,6 +2799,19 @@ async function assertCanDeleteResumeScreening(
   return { ok: false, message: '当前角色无删除权限' }
 }
 
+/** 与简历库/删除权限一致：某 job_code 下的筛查数据当前登录者是否可见（含环境/旧版令牌视为全量） */
+async function jobCodesVisibleToAdminToken(token: string, jobCodes: string[]): Promise<Set<string>> {
+  const uniq = [...new Set(jobCodes.map((x) => String(x || '').trim()).filter(Boolean))]
+  const allowed = new Set<string>()
+  await Promise.all(
+    uniq.map(async (jc) => {
+      const gate = await assertCanDeleteResumeScreening(token, jc)
+      if (gate.ok) allowed.add(jc)
+    })
+  )
+  return allowed
+}
+
 /**
  * 筛查主键 id（库中为 BIGINT）：规范为十进制数字串，供 IN (...) 与 JSON 安全下发；
  * 丢弃非法值；对超过 Number.MAX_SAFE_INTEGER 的 id 仅接受字符串形态，避免前端 Number 精度丢失导致删不掉。
@@ -3422,6 +3435,142 @@ app.get('/api/admin/resume-library', async (req, res) => {
     console.error('[GET /api/admin/resume-library]', (e as { message?: string })?.message, e)
     res.status(500).json({ message: 'db error' })
   }
+})
+
+app.get('/api/admin/resume-library/:id/delivery-history', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const idTok = normalizeResumeScreeningPkToken(req.params.id)
+  if (!idTok) {
+    return res.status(400).json({ message: 'invalid id' })
+  }
+  const token = extractAdminRequestToken(req)
+  const projJoin = resumeScreeningsProjectJoinSql()
+  const baseSelect = `SELECT s.id,
+              s.job_code,
+              s.matched_job_title,
+              CAST(DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS CHAR(32)) AS created_at,
+              TRIM(COALESCE(pn.name, '')) AS job_project_name,
+              TRIM(COALESCE(jn.title, '')) AS job_list_title
+       FROM resume_screenings s
+       ${projJoin}`
+
+  type AnchorRow = {
+    id?: unknown
+    job_code?: unknown
+    candidate_phone?: unknown
+    candidate_name?: unknown
+    candidate_id?: unknown
+  }
+
+  let includeCid = true
+  let anchor: AnchorRow | undefined
+  for (;;) {
+    try {
+      const cols = includeCid
+        ? 's.id, s.job_code, s.candidate_phone, s.candidate_name, s.candidate_id'
+        : 's.id, s.job_code, s.candidate_phone, s.candidate_name'
+      const [arows] = await mysqlPool.query<RowDataPacket[]>(
+        `SELECT ${cols} FROM resume_screenings s WHERE s.id = ? LIMIT 1`,
+        [idTok]
+      )
+      anchor = arows[0] as AnchorRow | undefined
+      break
+    } catch (e: unknown) {
+      if (includeCid && isMissingMysqlColumn(e, 'candidate_id')) {
+        includeCid = false
+        continue
+      }
+      const code = (e as { code?: string })?.code
+      if (code === 'ER_NO_SUCH_TABLE') {
+        return res.status(503).json({ message: 'resume_screenings 表未创建' })
+      }
+      console.error('[GET /api/admin/resume-library/:id/delivery-history] anchor', e)
+      return res.status(500).json({ message: 'db error' })
+    }
+  }
+
+  if (!anchor) {
+    return res.status(404).json({ message: '记录不存在' })
+  }
+  const anchorJob = String(anchor.job_code || '').trim()
+  const anchorGate = await assertCanDeleteResumeScreening(token, anchorJob)
+  if (anchorGate.ok === false) {
+    return res.status(403).json({ message: anchorGate.message || '无权查看该记录的投递历史' })
+  }
+
+  let rows: RowDataPacket[] = []
+  try {
+    const cidRaw = includeCid ? anchor.candidate_id : null
+    const cidStr =
+      cidRaw != null && String(cidRaw).trim() !== '' && String(cidRaw).trim() !== '0'
+        ? String(cidRaw).trim()
+        : null
+
+    if (includeCid && cidStr) {
+      const [srows] = await mysqlPool.query<RowDataPacket[]>(
+        `${baseSelect}
+         WHERE s.candidate_id = ?
+         ORDER BY s.created_at DESC, s.id DESC
+         LIMIT 200`,
+        [cidStr]
+      )
+      rows = srows || []
+    } else {
+      const phoneTrim = String(anchor.candidate_phone || '').trim()
+      const nameTrim = String(anchor.candidate_name || '').trim()
+      if (phoneTrim && nameTrim) {
+        const [srows] = await mysqlPool.query<RowDataPacket[]>(
+          `${baseSelect}
+           WHERE TRIM(COALESCE(s.candidate_phone, '')) <> ''
+             AND TRIM(s.candidate_phone) = ?
+             AND LOWER(TRIM(s.candidate_name)) = LOWER(?)
+           ORDER BY s.created_at DESC, s.id DESC
+           LIMIT 200`,
+          [phoneTrim, nameTrim]
+        )
+        rows = srows || []
+      } else {
+        const [srows] = await mysqlPool.query<RowDataPacket[]>(
+          `${baseSelect}
+           WHERE s.id = ?
+           LIMIT 1`,
+          [idTok]
+        )
+        rows = srows || []
+      }
+    }
+  } catch (e: unknown) {
+    const code = (e as { code?: string })?.code
+    if (code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({ message: 'resume_screenings 表未创建' })
+    }
+    console.error('[GET /api/admin/resume-library/:id/delivery-history]', e)
+    return res.status(500).json({ message: 'db error' })
+  }
+
+  const jobCodes = (rows || []).map((r) => String((r as { job_code?: unknown }).job_code || '').trim()).filter(Boolean)
+  const allowed = await jobCodesVisibleToAdminToken(token, jobCodes)
+  const filtered = (rows || []).filter((r) => allowed.has(String((r as { job_code?: unknown }).job_code || '').trim()))
+
+  const data = filtered.map((r) => ({
+    id: jsonSafeMysqlCell((r as { id?: unknown }).id),
+    job_code: String((r as { job_code?: unknown }).job_code || '').trim(),
+    matched_job_title:
+      (r as { matched_job_title?: unknown }).matched_job_title != null
+        ? String((r as { matched_job_title?: unknown }).matched_job_title)
+        : null,
+    job_list_title:
+      (r as { job_list_title?: unknown }).job_list_title != null
+        ? String((r as { job_list_title?: unknown }).job_list_title).trim() || null
+        : null,
+    job_project_name:
+      (r as { job_project_name?: unknown }).job_project_name != null
+        ? String((r as { job_project_name?: unknown }).job_project_name).trim() || null
+        : null,
+    created_at: resumeScreeningCreatedAtForResponse((r as { created_at?: unknown }).created_at)
+  }))
+
+  res.json({ data })
 })
 
 app.patch('/api/admin/resume-screenings/:id', async (req, res) => {
