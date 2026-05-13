@@ -4935,7 +4935,9 @@ function resumeDimensionEvidenceText(
     .join('；')
 }
 
-/** 流程：AI 筛查 → 发面试邀请 → 候选人答题/面试 → 面试报告；与 pipeline_stage、interview_reports 关联展示 */
+/** 流程：AI 筛查 → 发面试邀请 → 候选人答题/面试 → 面试报告；与 pipeline_stage、interview_reports 关联展示。初面管理「阶段」筛选项同下文案且与服务端 flowStage 一致。 */
+const APPLICATION_SCREENING_FLOW_STAGES = ['简历筛查完成', '已发面试邀请', 'AI面试完成'] as const
+
 function deriveScreeningFlowLabels(row: Record<string, unknown>): { flowStage: string; aiConclusion: string } {
   const aiConclusion = String(row.status ?? '').trim() || '—'
   const ivRaw = row.interview_overall_score
@@ -5362,6 +5364,8 @@ function validateResumeProfileDraftComplete(
 
 type ResumeLibraryApiRow = {
   id: number | string
+  /** 同人主档 id；多岗位投递会共用同一 candidate_id */
+  candidate_id?: number | string | null
   candidate_name: string
   candidate_phone?: string | null
   matched_job_title: string | null
@@ -5384,6 +5388,8 @@ type ResumeLibraryApiRow = {
   verifiable?: unknown
   recruitment_channel?: string | null
   resume_uploaded?: unknown
+  /** 上传筛查记录的管理端账号，用于无手机时的同人弱指纹 */
+  uploader_username?: string | null
 }
 
 type ResumeDeliveryHistoryApiRow = {
@@ -5485,6 +5491,95 @@ function resumeLibraryTriFilter(sel: 'all' | '1' | '0', v: boolean | null): bool
   if (v === true) return sel === '1'
   if (v === false) return sel === '0'
   return false
+}
+
+/**
+ * 与 server/index.ts 中 normalizeCnMobile 一致：仅识别大陆 11 位；用于简历库同人分组。
+ */
+function normalizeCnMobileForResumeLibraryMerge(raw: string): string | null {
+  const d = String(raw || '').replace(/\D/g, '')
+  if (/^1[3-9]\d{9}$/.test(d)) return d
+  if (d.length === 13 && d.startsWith('86')) {
+    const rest = d.slice(2)
+    if (/^1[3-9]\d{9}$/.test(rest)) return rest
+  }
+  return null
+}
+
+/**
+ * 简历库同人合并键：手机可识别时最稳；否则 candidate_id；再否则用语义+上传账号弱指纹（模型未抽出手机、多岗位多次投递仍合并为一行）。
+ */
+function resumeLibraryPersonMergeKey(row: ResumeLibraryApiRow): string {
+  const name = String(row.candidate_name || '')
+    .trim()
+    .toLowerCase()
+  const phoneNorm = normalizeCnMobileForResumeLibraryMerge(String(row.candidate_phone || ''))
+  if (phoneNorm && name.length > 0) {
+    return `pn:${phoneNorm}|${name}`
+  }
+  const cid = row.candidate_id
+  if (cid != null && String(cid).trim() !== '' && String(cid) !== '0') {
+    return `cid:${String(cid)}`
+  }
+  const uploader = String(row.uploader_username ?? '')
+    .trim()
+    .toLowerCase()
+  const gender = String(row.gender ?? '').trim()
+  const age =
+    row.age == null || !Number.isFinite(Number(row.age)) ? '' : String(Math.trunc(Number(row.age)))
+  const wy =
+    row.work_experience_years == null || !Number.isFinite(Number(row.work_experience_years))
+      ? ''
+      : String(Math.trunc(Number(row.work_experience_years)))
+  const major = String(row.major ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+  if (name.length >= 2) {
+    return `fp:${name}|${gender}|${age}|${wy}|${major}|${uploader}`
+  }
+  return `sid:${row.id}`
+}
+
+function compareResumeLibraryRowIdDesc(a: ResumeLibraryApiRow, b: ResumeLibraryApiRow): number {
+  const na = Number(a.id)
+  const nb = Number(b.id)
+  if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) {
+    return nb - na
+  }
+  return String(b.id).localeCompare(String(a.id))
+}
+
+/**
+ * 合并「同一人多次投递不同岗位」产生的多行：保留最新一条筛查（id 最大），并记录合并条数供角标展示。
+ * 分组键：规范化手机+姓名、candidate_id，或无手机时的结构化弱指纹（与列表接口返回字段一致）。
+ */
+function mergeResumeLibraryRowsByPerson(rows: ResumeLibraryApiRow[]): {
+  merged: ResumeLibraryApiRow[]
+  clusterSizeByRepId: Map<string, number>
+} {
+  const groups = new Map<string, ResumeLibraryApiRow[]>()
+  for (const r of rows) {
+    const k = resumeLibraryPersonMergeKey(r)
+    const g = groups.get(k)
+    if (g) g.push(r)
+    else groups.set(k, [r])
+  }
+  const clusterSizeByRepId = new Map<string, number>()
+  const merged: ResumeLibraryApiRow[] = []
+  for (const arr of groups.values()) {
+    if (arr.length === 1) {
+      merged.push(arr[0])
+      clusterSizeByRepId.set(String(arr[0].id), 1)
+      continue
+    }
+    const sorted = [...arr].sort(compareResumeLibraryRowIdDesc)
+    const rep = sorted[0]
+    merged.push(rep)
+    clusterSizeByRepId.set(String(rep.id), arr.length)
+  }
+  merged.sort(compareResumeLibraryRowIdDesc)
+  return { merged, clusterSizeByRepId }
 }
 
 /** 与简历管理共用：详情编辑弹框（加载 /api/admin/resume-screenings/:id/profile、PATCH 保存） */
@@ -6265,6 +6360,7 @@ function ResumeLibraryView({
         const blob = [
           r.candidate_name,
           r.candidate_phone,
+          r.uploader_username,
           position,
           r.job_code,
           r.job_project_name,
@@ -6281,6 +6377,11 @@ function ResumeLibraryView({
     }
     return list;
   }, [scopedLibRows, libFilterApplied]);
+
+  const { viewLibRows, libClusterSizeByRepId } = useMemo(() => {
+    const { merged, clusterSizeByRepId } = mergeResumeLibraryRowsByPerson(filteredLibRows);
+    return { viewLibRows: merged, libClusterSizeByRepId: clusterSizeByRepId };
+  }, [filteredLibRows]);
 
   const handleResumeLibrarySearch = useCallback(() => {
     setLibFilterApplied({ ...libFilterDraft });
@@ -6300,13 +6401,13 @@ function ResumeLibraryView({
 
   const pagedRows = useMemo(() => {
     const start = (listPage - 1) * pageSize;
-    return filteredLibRows.slice(start, start + pageSize);
-  }, [filteredLibRows, listPage, pageSize]);
+    return viewLibRows.slice(start, start + pageSize);
+  }, [viewLibRows, listPage, pageSize]);
 
   useEffect(() => {
-    const tp = Math.max(1, Math.ceil(filteredLibRows.length / pageSize) || 1);
+    const tp = Math.max(1, Math.ceil(viewLibRows.length / pageSize) || 1);
     setListPage((p) => Math.min(Math.max(1, p), tp));
-  }, [filteredLibRows.length, pageSize]);
+  }, [viewLibRows.length, pageSize]);
 
   const openResumeOriginalFile = useCallback(
     async (resume: Resume, mode: 'preview' | 'download') => {
@@ -6545,10 +6646,19 @@ function ResumeLibraryView({
       </form>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex shrink-0 flex-row items-center justify-between gap-2 border-b border-slate-100 px-3 py-2 sm:px-4">
-          <h3 className="text-sm font-bold text-slate-900">简历库</h3>
+        <div className="flex shrink-0 flex-row flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-3 py-2 sm:px-4">
+          <div className="min-w-0">
+            <h3 className="text-sm font-bold text-slate-900">简历库</h3>
+            <p className="mt-0.5 text-[11px] leading-snug text-slate-500 sm:text-xs">
+              同一人多次投递不同岗位会合并为一行（保留最新一条）；无手机号时按姓名与简历解析字段等识别。点「投递历史」查看全部岗位。
+            </p>
+          </div>
           <span className="shrink-0 text-xs text-slate-500">
-            {inviteJobsLoading ? '同步岗位…' : `当前列表 ${filteredLibRows.length} 条`}
+            {inviteJobsLoading
+              ? '同步岗位…'
+              : filteredLibRows.length !== viewLibRows.length
+                ? `当前 ${viewLibRows.length} 人（${filteredLibRows.length} 条投递已合并）`
+                : `当前 ${viewLibRows.length} 条`}
           </span>
         </div>
         <div className="min-h-0 flex-1 overflow-auto p-2 sm:p-3">
@@ -6600,8 +6710,18 @@ function ResumeLibraryView({
                         key={rid}
                         className={`align-middle ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'} hover:bg-indigo-50/40`}
                       >
-                        <td className="max-w-[5rem] truncate font-medium text-slate-900" title={stub.name}>
-                          {stub.name}
+                        <td className="max-w-[9rem] font-medium text-slate-900" title={stub.name}>
+                          <div className="flex items-center justify-center gap-1">
+                            <span className="min-w-0 truncate">{stub.name}</span>
+                            {(libClusterSizeByRepId.get(rid) ?? 1) > 1 ? (
+                              <span
+                                className="shrink-0 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-semibold tabular-nums text-amber-900"
+                                title="该候选人有多条岗位投递，已合并展示；点「投递历史」查看全部岗位"
+                              >
+                                多岗×{libClusterSizeByRepId.get(rid)}
+                              </span>
+                            ) : null}
+                          </div>
                         </td>
                         <td className="whitespace-nowrap text-slate-700">{gender}</td>
                         <td className="tabular-nums text-slate-700">
@@ -6718,11 +6838,11 @@ function ResumeLibraryView({
             </div>
           ) : null}
         </div>
-        {apiBase && hasToken && filteredLibRows.length > 0 ? (
+        {apiBase && hasToken && viewLibRows.length > 0 ? (
           <ListPaginationBar
             page={listPage}
             pageSize={pageSize}
-            total={filteredLibRows.length}
+            total={viewLibRows.length}
             onPageChange={setListPage}
             onPageSizeChange={(n) => {
               setPageSize(n);
@@ -6868,6 +6988,8 @@ function ResumeScreeningView({
   const [screenListError, setScreenListError] = useState('');
   const [screenListPage, setScreenListPage] = useState(1);
   const [screenPageSize, setScreenPageSize] = useState(10);
+  /** 服务端分页：符合筛选条件的总条数 */
+  const [screenListTotal, setScreenListTotal] = useState(0);
   const [reportResume, setReportResume] = useState<Resume | null>(null);
   const [profileEditResume, setProfileEditResume] = useState<Resume | null>(null);
   const [fileBusyId, setFileBusyId] = useState<string | null>(null);
@@ -6952,32 +7074,39 @@ function ResumeScreeningView({
     return inviteJobs.filter((j) => String(j.project_id ?? '').trim() === pid);
   }, [inviteJobs, resumeProjectFilter]);
 
-  const projectNameByJobCode = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const j of inviteJobs) {
-      const jc = String(j.job_code || '').trim();
-      if (!jc) continue;
-      const pid = String(j.project_id || '').trim();
-      const p = pid ? screeningProjects.find((x) => x.id === pid) : null;
-      m.set(jc, (p?.name && p.name.trim()) || pid || '');
-    }
-    return m;
-  }, [inviteJobs, screeningProjects]);
-
   const loadScreenings = useCallback(() => {
     if (!apiBase || !hasToken) {
       setResumes([]);
       setScreenListError('');
+      setScreenListTotal(0);
       return;
     }
     setScreenListError('');
-    const screeningUrl =
-      resumeProjectFilter.trim().length > 0
-        ? `/api/admin/resume-screenings?projectId=${encodeURIComponent(resumeProjectFilter.trim())}`
-        : '/api/admin/resume-screenings';
+    const sp = new URLSearchParams();
+    if (resumeProjectFilter.trim()) sp.set('projectId', resumeProjectFilter.trim());
+    sp.set('page', String(screenListPage));
+    sp.set('pageSize', String(screenPageSize));
+    const jcSel = String(selectedJobCode || '').trim();
+    if (jcSel) {
+      sp.set('jobCode', jcSel);
+      const selJob = inviteJobs.find((j) => String(j.job_code || '').trim() === jcSel);
+      const jt = String(selJob?.title || '').trim();
+      if (jt) sp.set('jobTitle', jt);
+    }
+    const cand = sfName.trim();
+    if (cand) sp.set('candidate', cand);
+    if (sfGender !== 'all') sp.set('gender', sfGender);
+    if (sfEdu.trim()) sp.set('education', sfEdu.trim());
+    if (sfHasDegree !== 'all') sp.set('hasDegree', sfHasDegree);
+    if (sfUnified !== 'all') sp.set('unified', sfUnified);
+    if (sfVerifiable !== 'all') sp.set('verifiable', sfVerifiable);
+    if (sfChannel.trim()) sp.set('channel', sfChannel.trim());
+    if (sfSalary.trim()) sp.set('salary', sfSalary.trim());
+    if (sfKeyword.trim()) sp.set('keyword', sfKeyword.trim());
+    const screeningUrl = `/api/admin/resume-screenings?${sp.toString()}`;
     void miniappApiFetch(screeningUrl)
       .then(async (r) => {
-        const j = (await r.json()) as { data?: unknown[]; message?: string }
+        const j = (await r.json()) as { data?: unknown[]; total?: number; message?: string };
         if (!r.ok) throw new Error(j.message || 'load failed');
         const rows = (j.data || []) as Array<{
           id: number | string
@@ -7003,37 +7132,34 @@ function ResumeScreeningView({
           uploader_username?: string | null
           job_project_name?: string | null
           created_at: string | Date
-        }>
+        }>;
+        setScreenListTotal(Math.max(0, Math.floor(Number(j.total) || 0)));
         const mapped = rows.map((row) => mapScreeningRow(row));
-        const allowDmJobs = new Set(
-          inviteJobs.map((j) => String(j.job_code || '').trim()).filter(Boolean)
-        );
-        let list = mapped;
-        if (isRecruiter) {
-          list = mapped.filter((x) => x.jobCode && recruiterCodeSet.has(String(x.jobCode)));
-        } else if (isDeliveryManager) {
-          if (allowDmJobs.size === 0) list = [];
-          else list = mapped.filter((x) => x.jobCode && allowDmJobs.has(String(x.jobCode)));
-        } else if (isRecruitingManager) {
-          if (allowDmJobs.size === 0) list = [];
-          else list = mapped.filter((x) => x.jobCode && allowDmJobs.has(String(x.jobCode)));
-        }
-        setResumes(list);
+        setResumes(mapped);
       })
       .catch(() => {
         setResumes([]);
+        setScreenListTotal(0);
         setScreenListError('筛查记录暂时无法加载，请稍后重试或联系管理员检查系统是否已升级、网络是否正常。');
       });
   }, [
     apiBase,
     hasToken,
-    isRecruiter,
-    isDeliveryManager,
-    isRecruitingManager,
-    inviteJobs,
-    recruiterCodeSet,
     sessRev,
-    resumeProjectFilter
+    resumeProjectFilter,
+    screenListPage,
+    screenPageSize,
+    selectedJobCode,
+    inviteJobs,
+    sfName,
+    sfGender,
+    sfEdu,
+    sfHasDegree,
+    sfUnified,
+    sfVerifiable,
+    sfChannel,
+    sfSalary,
+    sfKeyword
   ]);
 
   useEffect(() => {
@@ -7083,124 +7209,10 @@ function ResumeScreeningView({
     setScreeningSelection({});
   }, []);
 
-  const filteredResumes = useMemo(() => {
-    const tri = (sel: 'all' | '1' | '0', v: boolean | null | undefined) => {
-      if (sel === 'all') return true;
-      if (v === true) return sel === '1';
-      if (v === false) return sel === '0';
-      return false;
-    };
-    const code = String(selectedJobCode || '').trim();
-    let list = resumes;
-    if (code) {
-      const selectedJob = inviteJobs.find((j) => String(j.job_code || '').trim() === code);
-      const selectedTitle = String(selectedJob?.title || '').trim();
-      list = list.filter((r) => {
-        const rc = String(r.jobCode || '').trim();
-        if (rc && rc === code) return true;
-        const rn = String(r.job || '').trim();
-        if (!rn) return false;
-        if (rn === code) return true;
-        if (selectedTitle && (rn === selectedTitle || rn.includes(selectedTitle) || selectedTitle.includes(rn))) {
-          return true;
-        }
-        return false;
-      });
-    }
-    const nameQ = sfName.trim().toLowerCase();
-    if (nameQ) {
-      list = list.filter((r) => (r.name || '').toLowerCase().includes(nameQ));
-    }
-    if (sfGender !== 'all') {
-      list = list.filter((r) => (r.candidateFilterFields?.gender || '') === sfGender);
-    }
-    const eduQ = sfEdu.trim();
-    if (eduQ) {
-      const eduRowMatches = (stored: string) => {
-        const e = (stored || '').trim();
-        if (!e) return false;
-        if (eduQ === '高中') return e.includes('高中');
-        if (eduQ === '大专') return e.includes('大专') || e.includes('专科') || e.includes('高职');
-        if (eduQ === '本科') return e.includes('本科') || e.includes('学士');
-        if (eduQ === '研究生') {
-          return (
-            e.includes('研究生') ||
-            e.includes('硕士') ||
-            e.includes('博士') ||
-            /Master|Ph\.?\s*D\.?/i.test(e)
-          );
-        }
-        return e.includes(eduQ);
-      };
-      list = list.filter((r) => eduRowMatches(r.candidateFilterFields?.education || ''));
-    }
-    list = list.filter((r) => {
-      const f = r.candidateFilterFields;
-      return tri(sfHasDegree, f?.hasDegree ?? null) && tri(sfUnified, f?.isUnified ?? null) && tri(sfVerifiable, f?.verifiable ?? null);
-    });
-    const chQ = sfChannel.trim();
-    if (chQ) {
-      const channelRowMatches = (stored: string) => {
-        const c = (stored || '').trim();
-        if (!c) return false;
-        if (chQ === 'Boss 直聘') {
-          const norm = c.replace(/\s+/g, '').toLowerCase();
-          return norm.includes('boss') && norm.includes('直聘');
-        }
-        return c.includes(chQ);
-      };
-      list = list.filter((r) => channelRowMatches(r.candidateFilterFields?.recruitmentChannel || ''));
-    }
-    const salQ = sfSalary.trim();
-    if (salQ) {
-      list = list.filter((r) => (r.candidateFilterFields?.expectedSalary || '').includes(salQ));
-    }
-    const kw = sfKeyword.trim().toLowerCase();
-    if (kw) {
-      list = list.filter((r) => {
-        const jc = String(r.jobCode || '').trim();
-        const pnm = (jc && projectNameByJobCode.get(jc)) || '';
-        const blob = [
-          r.name,
-          r.phone || '',
-          r.job,
-          r.jobCode || '',
-          r.reportSummary || '',
-          r.status,
-          r.uploaderUsername || '',
-          pnm
-        ]
-          .join('\n')
-          .toLowerCase();
-        return blob.includes(kw);
-      });
-    }
-    return list;
-  }, [
-    resumes,
-    selectedJobCode,
-    inviteJobs,
-    sfName,
-    sfGender,
-    sfEdu,
-    sfHasDegree,
-    sfUnified,
-    sfVerifiable,
-    sfChannel,
-    sfSalary,
-    sfKeyword,
-    projectNameByJobCode
-  ]);
-
-  const pagedResumes = useMemo(() => {
-    const start = (screenListPage - 1) * screenPageSize;
-    return filteredResumes.slice(start, start + screenPageSize);
-  }, [filteredResumes, screenListPage, screenPageSize]);
-
   useEffect(() => {
-    const tp = Math.max(1, Math.ceil(filteredResumes.length / screenPageSize) || 1);
+    const tp = Math.max(1, Math.ceil(screenListTotal / screenPageSize) || 1);
     setScreenListPage((p) => Math.min(Math.max(1, p), tp));
-  }, [filteredResumes.length, screenPageSize]);
+  }, [screenListTotal, screenPageSize]);
 
   const openResumeOriginalFile = useCallback(
     async (resume: Resume, mode: 'preview' | 'download') => {
@@ -7529,12 +7541,12 @@ function ResumeScreeningView({
           <div>
             <h1 className="text-xl font-bold text-slate-900">简历管理</h1>
             <p className="mt-1 text-xs leading-relaxed text-slate-500 sm:text-sm">
-              项目决定拉取范围，其余条件在已加载数据上进一步筛选；上传请在弹窗内选择项目与目标岗位后提交文件。
+              项目、筛选条件与分页均由服务端计算；修改条件或翻页后会重新请求列表。上传请在弹窗内选择项目与目标岗位后提交文件。
             </p>
           </div>
           <form
             className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 shadow-sm"
-            title="项目决定数据拉取范围；点击搜索将重新拉取列表并应用筛选"
+            title="筛选与分页由服务端计算；点击搜索将重置到第 1 页并重新拉取"
             onSubmit={(e) => {
               e.preventDefault();
               setScreenListPage(1);
@@ -7544,7 +7556,7 @@ function ResumeScreeningView({
             <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-slate-100 pb-2">
               <h2 className="text-xs font-semibold text-slate-800">条件筛选</h2>
               <span className="hidden text-[11px] leading-snug text-slate-400 md:inline">
-                项目决定拉取范围 · 其余为本地筛选
+                筛选与分页由服务端计算
               </span>
               <div className="ml-auto flex shrink-0 items-center gap-1.5">
                 <button
@@ -7780,9 +7792,9 @@ function ResumeScreeningView({
           <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
             <div className="flex shrink-0 flex-row items-center justify-between gap-2 border-b border-slate-100 px-3 py-2 sm:px-4">
               <h3 className="text-sm font-bold text-slate-900">简历列表</h3>
-              <span className="shrink-0 text-xs text-slate-500">当前列表 {filteredResumes.length} 条</span>
+              <span className="shrink-0 text-xs text-slate-500">当前列表 {screenListTotal} 条</span>
             </div>
-            {apiBase && hasToken && pagedResumes.length > 0 ? (
+            {apiBase && hasToken && resumes.length > 0 ? (
               <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/60 px-3 py-2 sm:px-4">
                 <span className="text-xs text-slate-600">
                   已选{' '}
@@ -7825,14 +7837,14 @@ function ResumeScreeningView({
                   请先完成管理端登录；登录成功后，此处将展示已上传简历的 AI 筛查记录。
                 </p>
               ) : null}
-              {apiBase && hasToken && filteredResumes.length === 0 ? (
+              {apiBase && hasToken && screenListTotal === 0 ? (
                 <p className="text-sm text-slate-500">
                   {resumeProjectFilter.trim() || selectedJobCode.trim()
                     ? '当前项目/岗位筛选下暂无记录，可调整条件或点击「上传简历」补充数据。'
                     : '暂无记录。请点击「上传简历」；若长期无数据，请联系管理员确认系统是否正常。'}
                 </p>
               ) : null}
-              {pagedResumes.length > 0 ? (
+              {resumes.length > 0 ? (
                 <div className="max-w-full overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
                   <table className="min-w-[66rem] w-full table-fixed text-left text-sm text-slate-800">
                     <thead className="bg-slate-50/95 text-slate-600 border-b border-slate-200 text-xs sticky top-0 z-10">
@@ -7843,20 +7855,20 @@ function ResumeScreeningView({
                             title="全选本页"
                             aria-label="全选本页"
                             checked={
-                              pagedResumes.length > 0 &&
-                              pagedResumes.every((r) => screeningSelection[String(r.id)])
+                              resumes.length > 0 &&
+                              resumes.every((r) => screeningSelection[String(r.id)])
                             }
                             ref={(el) => {
                               if (!el) return;
-                              const n = pagedResumes.length;
-                              const c = pagedResumes.filter((r) => screeningSelection[String(r.id)]).length;
+                              const n = resumes.length;
+                              const c = resumes.filter((r) => screeningSelection[String(r.id)]).length;
                               el.indeterminate = n > 0 && c > 0 && c < n;
                             }}
                             onChange={(e) => {
                               const on = e.target.checked;
                               setScreeningSelection((prev) => {
                                 const next = { ...prev };
-                                for (const r of pagedResumes) {
+                                for (const r of resumes) {
                                   const k = String(r.id);
                                   if (on) next[k] = true;
                                   else delete next[k];
@@ -7884,7 +7896,7 @@ function ResumeScreeningView({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {pagedResumes.map((resume, idx) => {
+                      {resumes.map((resume, idx) => {
                         const uploaderLabel = uploaderDisplayFromUsers(resume.uploaderUsername, screeningHrUsers);
                         const rid = String(resume.id);
                         return (
@@ -8041,11 +8053,11 @@ function ResumeScreeningView({
                 </div>
               ) : null}
             </div>
-            {apiBase && hasToken && filteredResumes.length > 0 ? (
+            {apiBase && hasToken && screenListTotal > 0 ? (
               <ListPaginationBar
                 page={screenListPage}
                 pageSize={screenPageSize}
-                total={filteredResumes.length}
+                total={screenListTotal}
                 onPageChange={setScreenListPage}
                 onPageSizeChange={(n) => {
                   setScreenPageSize(n);
@@ -8486,6 +8498,7 @@ function ApplicationManagementView({
   }>(null)
   const [appListPage, setAppListPage] = useState(1)
   const [appPageSize, setAppPageSize] = useState(10)
+  const [appListTotal, setAppListTotal] = useState(0)
   const isAdminRole = currentRole === 'admin'
   const userDept = String(authProfile?.dept || '').trim()
   const deptScoped = Boolean(userDept && userDept !== '-')
@@ -8493,14 +8506,22 @@ function ApplicationManagementView({
   const loadRows = useCallback(() => {
     setLoading(true)
     setErr('')
+    const sp = new URLSearchParams()
+    sp.set('page', String(appListPage))
+    sp.set('pageSize', String(appPageSize))
+    const kw = keyword.trim()
+    if (kw) sp.set('keyword', kw)
+    if (statusFilter) sp.set('flowStage', statusFilter)
+    if (scoreFilter !== 'all') sp.set('listScore', scoreFilter)
     void Promise.all([
-      miniappApiFetch('/api/admin/resume-screenings'),
+      miniappApiFetch(`/api/admin/resume-screenings?${sp.toString()}`),
       fetch('/api/projects'),
       fetch('/api/users')
     ])
       .then(async ([screeningRes, projectsRes, usersRes]) => {
-        const j = (await screeningRes.json()) as { data?: unknown[]; message?: string }
+        const j = (await screeningRes.json()) as { data?: unknown[]; total?: number; message?: string }
         if (!screeningRes.ok) throw new Error(j.message || `加载失败 ${screeningRes.status}`)
+        setAppListTotal(Math.max(0, Math.floor(Number(j.total) || 0)))
         const data = Array.isArray(j.data) ? j.data : []
         const hrUsers = usersRes.ok ? usersFromApiPayload(await usersRes.json().catch(() => [])) : []
         const mapped = data.map((x) => {
@@ -8586,104 +8607,28 @@ function ApplicationManagementView({
             recruitersLabel: jobCodeToRecruiters.get(jc) || '—'
           }
         })
-        if (isAdminRole) {
-          setRows(withProject)
-          return
-        }
-        if (currentRole === 'recruiting_manager') {
-          const leadProjects = filterProjectsForRecruitingManagerScope(allProjects, authProfile)
-          const leadJobCodes = new Set<string>()
-          for (const p of leadProjects) {
-            for (const job of p.jobs || []) {
-              const jc = String(job.id || '').trim()
-              if (jc) leadJobCodes.add(jc)
-            }
-          }
-          setRows(
-            withProject.filter((x) => {
-              const jc = String(x.jobCode || '').trim()
-              return Boolean(jc && leadJobCodes.has(jc))
-            })
-          )
-          return
-        }
-        if (currentRole === 'recruiter') {
-          const myJobCodes = recruiterAssignedJobCodesFromProjects(allProjects, authProfile)
-          setRows(
-            withProject.filter((x) => {
-              const jc = String(x.jobCode || '').trim()
-              return Boolean(jc && myJobCodes.has(jc))
-            })
-          )
-          return
-        }
-        if (currentRole !== 'delivery_manager') {
-          setRows([])
-          return
-        }
-        const scopedProjects =
-          deptScoped ? filterProjectsForDeliveryManagerScope(allProjects, userDept) : []
-        const deptJobCodes = new Set<string>()
-        for (const p of scopedProjects) {
-          for (const job of p.jobs || []) {
-            const jc = String(job.id || '').trim()
-            if (jc) deptJobCodes.add(jc)
-          }
-        }
-        const list = !deptScoped
-          ? []
-          : withProject.filter((x) => {
-              const jc = String(x.jobCode || '').trim()
-              return Boolean(jc && deptJobCodes.has(jc))
-            })
-        setRows(list)
+        setRows(withProject)
       })
       .catch((e: unknown) => {
         setRows([])
+        setAppListTotal(0)
         setErr(e instanceof Error ? e.message : '加载失败')
       })
       .finally(() => setLoading(false))
-  }, [authProfile, currentRole, deptScoped, isAdminRole, userDept])
+  }, [appListPage, appPageSize, keyword, statusFilter, scoreFilter])
 
   useEffect(() => {
     loadRows()
   }, [loadRows])
 
-  const filteredRows = rows.filter((row) => {
-    const kw = keyword.trim().toLowerCase()
-    if (kw) {
-      const hit =
-        row.candidateName.toLowerCase().includes(kw) ||
-        row.jobTitle.toLowerCase().includes(kw) ||
-        row.jobCode.toLowerCase().includes(kw) ||
-        row.projectName.toLowerCase().includes(kw) ||
-        row.recruitersLabel.toLowerCase().includes(kw) ||
-        row.referrerLabel.toLowerCase().includes(kw) ||
-        row.interviewOutcome.toLowerCase().includes(kw)
-      if (!hit) return false
-    }
-    if (statusFilter && row.status !== statusFilter) return false
-    if (scoreFilter === 'high' && row.score < 80) return false
-    if (scoreFilter === 'mid' && (row.score < 60 || row.score >= 80)) return false
-    if (scoreFilter === 'low' && row.score >= 60) return false
-    return true
-  })
-
   useEffect(() => {
     setAppListPage(1)
   }, [keyword, statusFilter, scoreFilter])
 
-  const pagedFilteredRows = useMemo(() => {
-    const start = (appListPage - 1) * appPageSize
-    return filteredRows.slice(start, start + appPageSize)
-  }, [filteredRows, appListPage, appPageSize])
-
   useEffect(() => {
-    const tp = Math.max(1, Math.ceil(filteredRows.length / appPageSize) || 1)
+    const tp = Math.max(1, Math.ceil(appListTotal / appPageSize) || 1)
     setAppListPage((p) => Math.min(Math.max(1, p), tp))
-  }, [filteredRows.length, appPageSize])
-
-  const statusOptions = Array.from(new Set(rows.map((x) => x.status).filter(Boolean)))
+  }, [appListTotal, appPageSize])
   const dimBadgeClass = (n: number) =>
     n >= 80
       ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
@@ -8818,7 +8763,7 @@ function ApplicationManagementView({
             <input
               value={keyword}
               onChange={(e) => setKeyword(e.target.value)}
-              placeholder="搜索候选人、推荐人、状态、项目、岗位、编码"
+              placeholder="搜索候选人、手机、岗位名称与编码、项目、报告摘要、上传者登录名"
               className="md:col-span-2 border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
             />
             <select
@@ -8827,7 +8772,7 @@ function ApplicationManagementView({
               className="border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
             >
               <option value="">全部状态</option>
-              {statusOptions.map((s) => (
+              {APPLICATION_SCREENING_FLOW_STAGES.map((s) => (
                 <option key={s} value={s}>
                   {s}
                 </option>
@@ -8873,14 +8818,14 @@ function ApplicationManagementView({
                     加载中...
                   </td>
                 </tr>
-              ) : filteredRows.length === 0 ? (
+              ) : appListTotal === 0 ? (
                 <tr>
                   <td className="px-3 py-8 text-slate-500 sm:px-6" colSpan={11}>
                     暂无数据，请先在「简历管理」中上传简历
                   </td>
                 </tr>
               ) : (
-                pagedFilteredRows.map((row) => (
+                rows.map((row) => (
                   <tr key={row.id} className="transition-colors hover:bg-slate-50">
                     <td className="whitespace-nowrap px-3 py-3 font-bold text-slate-900 sm:px-6 sm:py-4">
                       {row.candidateName}
@@ -8995,11 +8940,11 @@ function ApplicationManagementView({
             </tbody>
           </table>
         </div>
-        {!loading && filteredRows.length > 0 ? (
+        {!loading && appListTotal > 0 ? (
           <ListPaginationBar
             page={appListPage}
             pageSize={appPageSize}
-            total={filteredRows.length}
+            total={appListTotal}
             onPageChange={setAppListPage}
             onPageSizeChange={(n) => {
               setAppPageSize(n)

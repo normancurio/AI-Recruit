@@ -32,6 +32,11 @@ function matchJobTitleToStandardProfileOption(raw: string): string | null {
   return null
 }
 import { mysqlConnectionTimezoneOptions, wireMysqlSessionTimezone } from '../shared/mysqlSessionTimezone'
+import {
+  buildResumeScreeningsAdminListWhere,
+  parseResumeScreeningsAdminListQuery,
+  type ResumeScreeningsAdminListQuery
+} from './resumeScreeningsAdminListQuery.ts'
 
 const requireCjs = createRequire(import.meta.url)
 
@@ -2720,21 +2725,61 @@ async function loadAdminSessionActor(token: string): Promise<{
   username: string
   displayName: string
   uiRole: ReturnType<typeof mapAdminDbRoleToUiRole>
+  dept: string
 } | null> {
   const un = await resolveAdminDbUsernameFromToken(token)
   if (!un) return null
   try {
     const [rows] = await mysqlAdminPool.query<RowDataPacket[]>(
-      'SELECT username, name, role FROM users WHERE username = ? LIMIT 1',
+      'SELECT username, name, role, dept FROM users WHERE username = ? LIMIT 1',
       [un]
     )
-    const row = rows[0] as { username?: string | null; name?: string | null; role?: string | null } | undefined
+    const row = rows[0] as { username?: string | null; name?: string | null; role?: string | null; dept?: string | null } | undefined
     const username = String(row?.username || un).trim() || un
     const displayName = String(row?.name || '').trim() || username
     const uiRole = mapAdminDbRoleToUiRole(String(row?.role || ''))
-    return { username, displayName, uiRole }
+    const dept = String(row?.dept || '').trim()
+    return { username, displayName, uiRole, dept }
   } catch {
-    return { username: un, displayName: un, uiRole: mapAdminDbRoleToUiRole('') }
+    return { username: un, displayName: un, uiRole: mapAdminDbRoleToUiRole(''), dept: '' }
+  }
+}
+
+/** 筛查列表：非 admin 仅可见其岗位范围内的 job_code；null 表示不限制（admin / 无法解析会话） */
+async function allowedJobCodesForScreeningListToken(token: string): Promise<string[] | null> {
+  const actor = await loadAdminSessionActor(token)
+  if (!actor) return null
+  if (actor.uiRole === 'admin') return null
+  try {
+    const [rows] = await mysqlPool.query<RowDataPacket[]>(
+      `SELECT j.job_code, j.recruiters, p.recruitment_leads AS recruitment_leads, p.dept AS project_dept
+       FROM jobs j
+       LEFT JOIN projects p ON p.id = j.project_id`
+    )
+    const keys = adminRecruiterIdentityKeys(actor.username, actor.displayName)
+    const ud = actor.dept.trim()
+    const out: string[] = []
+    for (const r of rows || []) {
+      const jc = String((r as { job_code?: unknown }).job_code || '').trim()
+      if (!jc) continue
+      let ok = false
+      if (actor.uiRole === 'recruiter') {
+        ok = recruitersJsonContainsIdentity((r as { recruiters?: unknown }).recruiters, keys)
+      } else if (actor.uiRole === 'recruiting_manager') {
+        const leads = parseRecruitmentLeadsColumn((r as { recruitment_leads?: unknown }).recruitment_leads)
+        ok = leads.length > 0 && identityKeysHitLeadList(leads, actor)
+      } else if (actor.uiRole === 'delivery_manager') {
+        if (!ud || ud === '-') ok = false
+        else {
+          const pd = String((r as { project_dept?: unknown }).project_dept || '').trim()
+          ok = Boolean(pd) && ud.toLowerCase() === pd.toLowerCase()
+        }
+      }
+      if (ok) out.push(jc)
+    }
+    return out
+  } catch {
+    return []
   }
 }
 
@@ -3153,11 +3198,22 @@ function resumeScreeningsProjectJoinSql(): string {
       LEFT JOIN projects pn ON ${onPn}`
 }
 
+const RESUME_SCREENING_PROFILE_JOIN = `LEFT JOIN resume_screening_profiles prof ON prof.screening_id = s.id`
+
+type ResumeScreeningsPageOpts = {
+  includeResumePlaintext: boolean
+  limit: number
+  offset: number
+  whereSql: string
+  whereParams: unknown[]
+}
+
 function resumeScreeningsJoinSql(
   withPipelineStage: boolean,
   withSessionJoin: boolean,
   projectId: string | null,
-  includeCandidateId = true
+  includeCandidateId: boolean,
+  pageOpts: ResumeScreeningsPageOpts
 ): {
   sql: string
   params: unknown[]
@@ -3177,13 +3233,16 @@ function resumeScreeningsJoinSql(
             CONVERT(lr.session_id USING utf8mb4) COLLATE utf8mb4_unicode_ci`
     : ''
   const { fragment: jobJoin, params: jobParams } = resumeScreeningsJobFilterJoinSql(projectId)
+  const plainCol = pageOpts.includeResumePlaintext
+    ? `SUBSTRING(COALESCE(s.resume_plaintext,''), 1, 12000) AS resume_plaintext`
+    : `CAST(NULL AS CHAR) AS resume_plaintext`
   // 标量子查询取最新报告；CONVERT+COLLATE 避免表间 utf8mb4_unicode_ci / utf8mb4_0900_ai_ci 混用报错
   const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, ${cidCol}s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username,
               CAST(DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS CHAR(32)) AS created_at,
               EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
-              SUBSTRING(COALESCE(s.resume_plaintext,''), 1, 12000) AS resume_plaintext,
+              ${plainCol},
               lr.overall_score AS interview_overall_score,
               lr.passed AS interview_passed,
               lr.updated_at AS interview_report_updated_at,
@@ -3193,6 +3252,7 @@ function resumeScreeningsJoinSql(
        FROM resume_screenings s
        ${jobJoin}
        ${resumeScreeningsProjectJoinSql()}
+       ${RESUME_SCREENING_PROFILE_JOIN}
        LEFT JOIN interview_reports lr ON lr.id = (
          SELECT ir.id
          FROM interview_reports ir
@@ -3213,40 +3273,115 @@ function resumeScreeningsJoinSql(
          LIMIT 1
        )
        ${sessJoin}
+       WHERE 1=1 ${pageOpts.whereSql}
        ORDER BY s.id DESC
-       LIMIT 200`
-  return { sql, params: jobParams }
+       LIMIT ? OFFSET ?`
+  const params = [...jobParams, ...pageOpts.whereParams, pageOpts.limit, pageOpts.offset]
+  return { sql, params }
+}
+
+function resumeScreeningsJoinCountSql(
+  withPipelineStage: boolean,
+  withSessionJoin: boolean,
+  projectId: string | null,
+  includeCandidateId: boolean,
+  whereSql: string,
+  whereParams: unknown[]
+): { sql: string; params: unknown[] } {
+  void withPipelineStage
+  void includeCandidateId
+  const sessJoin = withSessionJoin
+    ? `LEFT JOIN interview_sessions sess
+         ON CONVERT(sess.session_id USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+            CONVERT(lr.session_id USING utf8mb4) COLLATE utf8mb4_unicode_ci`
+    : ''
+  const { fragment: jobJoin, params: jobParams } = resumeScreeningsJobFilterJoinSql(projectId)
+  const sql = `SELECT COUNT(DISTINCT s.id) AS total
+       FROM resume_screenings s
+       ${jobJoin}
+       ${resumeScreeningsProjectJoinSql()}
+       ${RESUME_SCREENING_PROFILE_JOIN}
+       LEFT JOIN interview_reports lr ON lr.id = (
+         SELECT ir.id
+         FROM interview_reports ir
+         WHERE CONVERT(TRIM(ir.job_code) USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+               CONVERT(TRIM(s.job_code) USING utf8mb4) COLLATE utf8mb4_unicode_ci
+           AND (
+             (
+               TRIM(COALESCE(ir.candidate_phone, '')) <> ''
+               AND TRIM(COALESCE(s.candidate_phone, '')) <> ''
+               AND TRIM(ir.candidate_phone) = TRIM(s.candidate_phone)
+             )
+             OR (
+               CONVERT(TRIM(ir.candidate_name) USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+               CONVERT(TRIM(s.candidate_name) USING utf8mb4) COLLATE utf8mb4_unicode_ci
+             )
+           )
+         ORDER BY ir.updated_at DESC, ir.id DESC
+         LIMIT 1
+       )
+       ${sessJoin}
+       WHERE 1=1 ${whereSql}`
+  return { sql, params: [...jobParams, ...whereParams] }
 }
 
 function resumeScreeningsPlainSql(
   withPipelineStage: boolean,
   projectId: string | null,
-  includeCandidateId = true
+  includeCandidateId: boolean,
+  pageOpts: ResumeScreeningsPageOpts
 ): { sql: string; params: unknown[] } {
   const cidCol = includeCandidateId ? 's.candidate_id, ' : ''
   const ps = withPipelineStage ? 'pipeline_stage, ' : ''
   const { fragment: jobJoin, params: jobParams } = resumeScreeningsJobFilterJoinSql(projectId)
+  const plainCol = pageOpts.includeResumePlaintext
+    ? `SUBSTRING(COALESCE(s.resume_plaintext,''), 1, 12000) AS resume_plaintext`
+    : `CAST(NULL AS CHAR) AS resume_plaintext`
   const sql = `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, ${cidCol}s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username,
               CAST(DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS CHAR(32)) AS created_at,
               EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
-              SUBSTRING(COALESCE(s.resume_plaintext,''), 1, 12000) AS resume_plaintext,
+              ${plainCol},
               TRIM(COALESCE(pn.name, '')) AS job_project_name
        FROM resume_screenings s
        ${jobJoin}
        ${resumeScreeningsProjectJoinSql()}
+       ${RESUME_SCREENING_PROFILE_JOIN}
+       WHERE 1=1 ${pageOpts.whereSql}
        ORDER BY s.id DESC
-       LIMIT 200`
-  return { sql, params: jobParams }
+       LIMIT ? OFFSET ?`
+  const params = [...jobParams, ...pageOpts.whereParams, pageOpts.limit, pageOpts.offset]
+  return { sql, params }
+}
+
+function resumeScreeningsPlainCountSql(
+  withPipelineStage: boolean,
+  projectId: string | null,
+  includeCandidateId: boolean,
+  whereSql: string,
+  whereParams: unknown[]
+): { sql: string; params: unknown[] } {
+  void withPipelineStage
+  void includeCandidateId
+  const { fragment: jobJoin, params: jobParams } = resumeScreeningsJobFilterJoinSql(projectId)
+  const sql = `SELECT COUNT(DISTINCT s.id) AS total
+       FROM resume_screenings s
+       ${jobJoin}
+       ${resumeScreeningsProjectJoinSql()}
+       ${RESUME_SCREENING_PROFILE_JOIN}
+       WHERE 1=1 ${whereSql}`
+  return { sql, params: [...jobParams, ...whereParams] }
 }
 
 /** 简历库列表：筛查主表 + 结构化详情（profiles）+ 项目名；字段贴合简历详情编辑 */
 function resumeLibraryListSql(projectId: string | null): { sql: string; params: unknown[] } {
   const { fragment: jobJoin, params: jobParams } = resumeScreeningsJobFilterJoinSql(projectId)
   const sql = `SELECT s.id,
+              s.candidate_id,
               s.candidate_name,
               s.candidate_phone,
+              s.uploader_username,
               s.matched_job_title,
               s.job_code,
               s.file_name,
@@ -3297,18 +3432,57 @@ function isMissingMysqlColumn(e: unknown, col: string): boolean {
   return err.errno === 1054 && String(err.message || '').includes(col)
 }
 
-async function queryResumeScreeningsJoinedRows(projectId: string | null): Promise<any[]> {
+async function queryResumeScreeningsAdminList(
+  listQ: ResumeScreeningsAdminListQuery,
+  scopeJobCodes: string[] | null
+): Promise<{ rows: any[]; total: number }> {
+  const limit = listQ.pageSize
+  const offset = (listQ.page - 1) * limit
+  const built = buildResumeScreeningsAdminListWhere(listQ, true)
+  let whereSql = built.whereSql
+  let whereParams = [...built.whereParams]
+  if (scopeJobCodes) {
+    const ph = scopeJobCodes.map(() => '?').join(', ')
+    whereSql += ` AND s.job_code IN (${ph}) `
+    whereParams.push(...scopeJobCodes)
+  }
+  const pageOpts: ResumeScreeningsPageOpts = {
+    includeResumePlaintext: false,
+    limit,
+    offset,
+    whereSql,
+    whereParams
+  }
   let usePipeline = true
   let useSession = true
   let includeCandidateId = true
   let lastErr: unknown
   for (let attempt = 0; attempt < 8; attempt++) {
     try {
-      const { sql, params } = resumeScreeningsJoinSql(usePipeline, useSession, projectId, includeCandidateId)
-      const [rows] = await mysqlPool.query<any[]>(sql, params)
-      let out = rows || []
+      const { sql, params } = resumeScreeningsJoinSql(
+        usePipeline,
+        useSession,
+        listQ.projectId,
+        includeCandidateId,
+        pageOpts
+      )
+      const { sql: csql, params: cparams } = resumeScreeningsJoinCountSql(
+        usePipeline,
+        useSession,
+        listQ.projectId,
+        includeCandidateId,
+        whereSql,
+        whereParams
+      )
+      const [dr, cr] = await Promise.all([
+        mysqlPool.query<any[]>(sql, params),
+        mysqlPool.query<RowDataPacket[]>(csql, cparams)
+      ])
+      let out = (dr[0] as any[]) || []
       if (!usePipeline) out = out.map((r) => ({ ...r, pipeline_stage: r.pipeline_stage ?? 'resume_done' }))
-      return out
+      const countRow = (cr[0] as RowDataPacket[])?.[0]
+      const total = Number(countRow?.total) || 0
+      return { rows: out, total }
     } catch (e) {
       lastErr = e
       if (isMissingPipelineStageColumn(e) && usePipeline) {
@@ -3331,6 +3505,61 @@ async function queryResumeScreeningsJoinedRows(projectId: string | null): Promis
     }
   }
   throw lastErr
+}
+
+async function queryResumeScreeningsAdminListPlainFallback(
+  listQ: ResumeScreeningsAdminListQuery,
+  scopeJobCodes: string[] | null
+): Promise<{ rows: any[]; total: number }> {
+  const limit = listQ.pageSize
+  const offset = (listQ.page - 1) * limit
+  const built = buildResumeScreeningsAdminListWhere(listQ, false)
+  let whereSql = built.whereSql
+  let whereParams = [...built.whereParams]
+  if (scopeJobCodes) {
+    const ph = scopeJobCodes.map(() => '?').join(', ')
+    whereSql += ` AND s.job_code IN (${ph}) `
+    whereParams.push(...scopeJobCodes)
+  }
+  const pageOpts: ResumeScreeningsPageOpts = {
+    includeResumePlaintext: false,
+    limit,
+    offset,
+    whereSql,
+    whereParams
+  }
+  let plainWithPipeline = true
+  let plainWithCid = true
+  let rows: any[]
+  let total = 0
+  for (;;) {
+    try {
+      const q = resumeScreeningsPlainSql(plainWithPipeline, listQ.projectId, plainWithCid, pageOpts)
+      const cq = resumeScreeningsPlainCountSql(plainWithPipeline, listQ.projectId, plainWithCid, whereSql, whereParams)
+      const [qr, qc] = await Promise.all([
+        mysqlPool.query<any[]>(q.sql, q.params),
+        mysqlPool.query<RowDataPacket[]>(cq.sql, cq.params)
+      ])
+      rows = (qr[0] as any[]) || []
+      const countRow = (qc[0] as RowDataPacket[])?.[0]
+      total = Number(countRow?.total) || 0
+      break
+    } catch (e2: unknown) {
+      if (isMissingMysqlColumn(e2, 'candidate_id') && plainWithCid) {
+        plainWithCid = false
+        continue
+      }
+      if (isMissingPipelineStageColumn(e2) && plainWithPipeline) {
+        plainWithPipeline = false
+        continue
+      }
+      throw e2
+    }
+  }
+  if (!plainWithPipeline) {
+    rows = (rows || []).map((r) => ({ ...r, pipeline_stage: 'resume_done' }))
+  }
+  return { rows, total }
 }
 
 function pad2(n: number): string {
@@ -3367,10 +3596,14 @@ function resumeScreeningCreatedAtForResponse(raw: unknown): string {
 
 app.get('/api/admin/resume-screenings', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
-  const rawPid = String(req.query.projectId ?? req.query.project_id ?? '').trim()
-  const projectId = rawPid.length ? rawPid : null
+  const token = extractAdminRequestToken(req)
+  const listQ = parseResumeScreeningsAdminListQuery(req)
+  const scopeJobCodes = await allowedJobCodesForScreeningListToken(token)
+  if (scopeJobCodes && scopeJobCodes.length === 0) {
+    return res.json({ data: [], total: 0, page: listQ.page, pageSize: listQ.pageSize })
+  }
   try {
-    const rows = await queryResumeScreeningsJoinedRows(projectId)
+    const { rows, total } = await queryResumeScreeningsAdminList(listQ, scopeJobCodes)
     const data = (rows || []).map((r) => ({
       ...r,
       id: jsonSafeMysqlCell((r as { id?: unknown }).id),
@@ -3380,34 +3613,12 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
           ? normalizeMultipartFilename(String(r.file_name)).slice(0, 255)
           : r.file_name
     }))
-    res.json({ data })
+    return res.json({ data, total, page: listQ.page, pageSize: listQ.pageSize })
   } catch (e: unknown) {
     const code = (e as { code?: string })?.code
     if (code === 'ER_NO_SUCH_TABLE') {
       try {
-        let rows: any[]
-        let plainWithPipeline = true
-        let plainWithCid = true
-        for (;;) {
-          try {
-            const q = resumeScreeningsPlainSql(plainWithPipeline, projectId, plainWithCid)
-            ;[rows] = await mysqlPool.query<any[]>(q.sql, q.params)
-            break
-          } catch (e2: unknown) {
-            if (isMissingMysqlColumn(e2, 'candidate_id') && plainWithCid) {
-              plainWithCid = false
-              continue
-            }
-            if (isMissingPipelineStageColumn(e2) && plainWithPipeline) {
-              plainWithPipeline = false
-              continue
-            }
-            throw e2
-          }
-        }
-        if (!plainWithPipeline) {
-          rows = (rows || []).map((r) => ({ ...r, pipeline_stage: 'resume_done' }))
-        }
+        const { rows, total } = await queryResumeScreeningsAdminListPlainFallback(listQ, scopeJobCodes)
         const patched = (rows || []).map((r) => ({
           ...r,
           id: jsonSafeMysqlCell((r as { id?: unknown }).id),
@@ -3424,13 +3635,18 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
           interview_session_voip: null,
           interview_session_updated_at: null
         }))
-        return res.json({ data: patched })
+        return res.json({ data: patched, total, page: listQ.page, pageSize: listQ.pageSize })
       } catch (e2: unknown) {
         const c2 = (e2 as { code?: string })?.code
         if (c2 === 'ER_NO_SUCH_TABLE') {
           return res.status(503).json({ message: 'resume_screenings 表未创建，请执行 server/migration_resume_screenings.sql' })
         }
-        console.error('[GET /api/admin/resume-screenings] fallback', (e2 as { code?: string; errno?: number; message?: string })?.code, (e2 as { message?: string })?.message, e2)
+        console.error(
+          '[GET /api/admin/resume-screenings] fallback',
+          (e2 as { code?: string; errno?: number; message?: string })?.code,
+          (e2 as { message?: string })?.message,
+          e2
+        )
         return res.status(500).json({ message: 'db error' })
       }
     }
@@ -3450,6 +3666,10 @@ app.get('/api/admin/resume-library', async (req, res) => {
     const data = (rows || []).map((r) => ({
       ...r,
       id: jsonSafeMysqlCell((r as { id?: unknown }).id),
+      candidate_id:
+        (r as { candidate_id?: unknown }).candidate_id != null
+          ? jsonSafeMysqlCell((r as { candidate_id?: unknown }).candidate_id)
+          : null,
       created_at: resumeScreeningCreatedAtForResponse((r as { created_at?: unknown }).created_at),
       file_name:
         r?.file_name != null && String(r.file_name).trim()
