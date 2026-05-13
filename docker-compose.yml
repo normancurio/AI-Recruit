@@ -69,6 +69,8 @@ services:
       NODE_ENV: production
       TZ: Asia/Shanghai
       ADMIN_UI_PORT: "3010"
+      # server.ts 将 /api/admin 反代到 api 容器；勿改为公网 admin 域名（会自指、502/TLS）。勿在 .env 覆盖此项。
+      ADMIN_API_UPSTREAM: http://api:3011
       # 浏览器访问的小程序 API 公网根地址（无尾斜杠），覆盖错误构建里的 localhost:3011
       MINIAPP_API_PUBLIC_URL: ${MINIAPP_API_PUBLIC_URL:-}
     restart: unless-stopped

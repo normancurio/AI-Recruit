@@ -20,6 +20,7 @@ import {
   getStandardJobRoleBaseSet,
   matchRoleBaseFromJobTitle
 } from '../shared/jobTaxonomy'
+import { deptNamesMatch } from '../shared/deptMatch'
 
 /** 将解析/抽取的应聘职位对齐为标准岗位序列（不含级别），供简历详情下拉落库 */
 function matchJobTitleToStandardProfileOption(raw: string): string | null {
@@ -2754,7 +2755,7 @@ async function allowedJobCodesForScreeningListToken(token: string): Promise<stri
     const [rows] = await mysqlPool.query<RowDataPacket[]>(
       `SELECT j.job_code, j.recruiters, p.recruitment_leads AS recruitment_leads, p.dept AS project_dept
        FROM jobs j
-       LEFT JOIN projects p ON p.id = j.project_id`
+       LEFT JOIN projects p ON ${resumeScreeningsProjectIdMatchSql('p', 'j')}`
     )
     const keys = adminRecruiterIdentityKeys(actor.username, actor.displayName)
     const ud = actor.dept.trim()
@@ -2772,7 +2773,7 @@ async function allowedJobCodesForScreeningListToken(token: string): Promise<stri
         if (!ud || ud === '-') ok = false
         else {
           const pd = String((r as { project_dept?: unknown }).project_dept || '').trim()
-          ok = Boolean(pd) && ud.toLowerCase() === pd.toLowerCase()
+          ok = deptNamesMatch(ud, pd)
         }
       }
       if (ok) out.push(jc)
@@ -2814,7 +2815,7 @@ async function screeningJobAllowsRecruitingManager(
   const [jr] = await mysqlPool.query<RowDataPacket[]>(
     `SELECT p.recruitment_leads AS recruitment_leads
      FROM jobs j
-     LEFT JOIN projects p ON p.id = j.project_id
+     LEFT JOIN projects p ON ${resumeScreeningsProjectIdMatchSql('p', 'j')}
      WHERE UPPER(TRIM(j.job_code)) = UPPER(TRIM(?))
      LIMIT 1`,
     [jc]
@@ -2831,7 +2832,7 @@ async function screeningJobAllowsDeliveryManager(jobCode: string, actorDept: str
   const [jr] = await mysqlPool.query<RowDataPacket[]>(
     `SELECT p.dept AS project_dept
      FROM jobs j
-     LEFT JOIN projects p ON p.id = j.project_id
+     LEFT JOIN projects p ON ${resumeScreeningsProjectIdMatchSql('p', 'j')}
      WHERE UPPER(TRIM(j.job_code)) = UPPER(TRIM(?))
      LIMIT 1`,
     [jobCode]
@@ -2840,7 +2841,7 @@ async function screeningJobAllowsDeliveryManager(jobCode: string, actorDept: str
   if (!row) return false
   const pd = String(row.project_dept || '').trim()
   if (!pd) return false
-  return d.toLowerCase() === pd.toLowerCase()
+  return deptNamesMatch(d, pd)
 }
 
 async function assertCanDeleteResumeScreening(

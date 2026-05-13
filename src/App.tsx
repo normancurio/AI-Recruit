@@ -24,6 +24,7 @@ import {
   jobLevelValidationMessage,
   jobRoleBaseValidationMessage
 } from '../shared/jobTaxonomy';
+import { deptNamesMatch } from '../shared/deptMatch';
 import { 
   Building2, Briefcase, Users, FileText, UserCheck, 
   Settings, Network, UserCog, Shield, Tags, Menu as MenuIcon,
@@ -364,29 +365,6 @@ export interface Dept {
   parentId?: string | null;
 }
 export interface User { id: string; name: string; username: string; dept: string; role: string; status: string; }
-
-/** 部门名比对：去空白、全角空格、Unicode 兼容规范化，避免「交付八部」与库内不可见字符不一致 */
-function normalizeDeptForMatch(s: string): string {
-  try {
-    return String(s || '')
-      .normalize('NFKC')
-      .replace(/[\s\u3000]+/g, ' ')
-      .trim()
-      .toLowerCase();
-  } catch {
-    return String(s || '')
-      .replace(/[\s\u3000]+/g, ' ')
-      .trim()
-      .toLowerCase();
-  }
-}
-
-function deptNamesMatch(userDept: string, deptName: string): boolean {
-  const a = normalizeDeptForMatch(userDept);
-  const b = normalizeDeptForMatch(deptName);
-  if (!a || !b || a === '-' || b === '-') return false;
-  return a === b;
-}
 
 /** 从若干根部门 id 向下收集自身及所有子部门 id（依据 parentId） */
 function collectDescendantDeptIds(depts: Dept[], rootIds: string[]): Set<string> {
