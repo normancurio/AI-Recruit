@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -661,7 +661,10 @@ export default function App() {
     const base = miniappApiBase.replace(/\/$/, '');
     void fetch(`${base}/api/admin/auth-status`)
       .then(async (r) => {
-        if (!r.ok) throw new Error(String(r.status))
+        if (!r.ok) {
+          const j = (await r.json().catch(() => ({}))) as { message?: string }
+          throw adminJsonFailError(r, j, '服务不可用')
+        }
         return r.json() as Promise<{ passwordLogin?: boolean; captchaEnabled?: boolean }>
       })
       .then((j) => {
@@ -758,13 +761,13 @@ export default function App() {
         })
       });
       const j = (await r.json().catch(() => ({}))) as { message?: string };
-      if (!r.ok) throw new Error(j.message || '修改失败');
+      if (!r.ok) throw adminJsonFailError(r, j, '修改失败');
       setChangePwdOk('密码已更新，请牢记新密码。');
       setChangePwdCurrent('');
       setChangePwdNew('');
       setChangePwdConfirm('');
     } catch (err) {
-      setChangePwdErr(err instanceof Error ? err.message : '修改失败');
+      setChangePwdErr(userFacingApiError(err, '修改失败'));
     } finally {
       setChangePwdLoading(false);
     }
@@ -847,16 +850,43 @@ export default function App() {
   const [activeMenu, setActiveMenu] = useState('project-list');
   const [expandedMenus, setExpandedMenus] = useState<string[]>(['projects', 'recruitment', 'system']);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  /** 仅 ≥md：收起为左侧图标栏（持久化，便于大屏多留主内容区） */
+  const [desktopSidebarCollapsed, setDesktopSidebarCollapsed] = useState(() => {
+    if (typeof window === 'undefined') return false
+    return window.localStorage.getItem('ai-recruit-admin-sidebar-collapsed') === '1'
+  })
+  /** 收起态下：当前展开的一级菜单 flyout（仅 md+） */
+  const [desktopNavFlyout, setDesktopNavFlyout] = useState<string | null>(null)
 
-  useLayoutEffect(() => {
-    if (typeof window === 'undefined') return;
-    if (window.matchMedia('(min-width: 768px)').matches) {
-      setMobileNavOpen(true);
+  const toggleDesktopSidebarCollapsed = useCallback(() => {
+    setDesktopSidebarCollapsed((prev) => {
+      const next = !prev
+      try {
+        window.localStorage.setItem('ai-recruit-admin-sidebar-collapsed', next ? '1' : '0')
+      } catch {
+        /* ignore */
+      }
+      if (next) setDesktopNavFlyout(null)
+      return next
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!desktopSidebarCollapsed) setDesktopNavFlyout(null)
+  }, [desktopSidebarCollapsed])
+
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 768px)')
+    const onChange = () => {
+      if (!mq.matches) setDesktopNavFlyout(null)
     }
-  }, []);
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
 
   const navigateMenu = useCallback((id: string) => {
     setActiveMenu(id);
+    setDesktopNavFlyout(null)
     if (typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches) {
       setMobileNavOpen(false);
     }
@@ -866,7 +896,10 @@ export default function App() {
     if (!mobileNavOpen) return;
     const isMobile = typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMobileNavOpen(false);
+      if (e.key === 'Escape') {
+        setMobileNavOpen(false);
+        setDesktopNavFlyout(null);
+      }
     };
     window.addEventListener('keydown', onKey);
     if (!isMobile) {
@@ -879,6 +912,27 @@ export default function App() {
       document.body.style.overflow = prev;
     };
   }, [mobileNavOpen]);
+
+  useEffect(() => {
+    if (!desktopNavFlyout) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setDesktopNavFlyout(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [desktopNavFlyout]);
+
+  useEffect(() => {
+    if (!desktopNavFlyout) return
+    const onDocMouseDown = (e: MouseEvent) => {
+      const t = e.target
+      if (!(t instanceof Element)) return
+      if (t.closest('[data-sidebar-flyout]') || t.closest('[data-sidebar-rail]')) return
+      setDesktopNavFlyout(null)
+    }
+    document.addEventListener('mousedown', onDocMouseDown)
+    return () => document.removeEventListener('mousedown', onDocMouseDown)
+  }, [desktopNavFlyout])
 
   const submitHrLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -905,7 +959,7 @@ export default function App() {
         message?: string
         data?: { token?: string; user?: AdminLoginProfile }
       };
-      if (!r.ok) throw new Error(j.message || `登录失败 ${r.status}`);
+      if (!r.ok) throw adminJsonFailError(r, j, '登录失败');
       const token = j.data?.token;
       if (!token) throw new Error('未返回 token');
       setAdminSessionToken(token);
@@ -934,7 +988,7 @@ export default function App() {
       setLoginCaptchaInput('');
       if (hrCaptchaEnabled) void refreshLoginCaptcha();
     } catch (err) {
-      setLoginErr(err instanceof Error ? err.message : '登录失败');
+      setLoginErr(userFacingApiError(err, '登录失败'));
       if (hrCaptchaEnabled) void refreshLoginCaptcha();
     } finally {
       setLoginLoading(false);
@@ -1229,83 +1283,167 @@ export default function App() {
         />
       ) : null}
       <aside
-        className={`fixed inset-y-0 left-0 z-30 flex h-[100dvh] w-64 max-w-[min(100vw,16rem)] flex-col bg-slate-900 text-slate-300 shadow-xl transition-transform duration-200 ease-out ${
-          mobileNavOpen ? 'translate-x-0' : '-translate-x-full'
-        }`}
+        className={`fixed inset-y-0 left-0 z-30 flex h-[100dvh] shrink-0 flex-col border-r border-slate-800/80 bg-slate-900 text-slate-300 shadow-xl transition-[width,transform] duration-200 ease-out md:static md:inset-auto md:z-0 md:h-screen md:min-h-[100dvh] md:shadow-xl ${
+          desktopSidebarCollapsed ? 'w-64 max-w-[min(100vw,16rem)] md:w-[4.5rem] md:min-w-[4.5rem] md:max-w-[4.5rem]' : 'w-64 max-w-[min(100vw,16rem)] md:w-64'
+        } ${mobileNavOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 relative`}
       >
-        <div className="h-14 md:h-16 shrink-0 flex items-center justify-between gap-2 border-b border-slate-800 bg-slate-950 px-4 md:px-6">
-          <div className="flex min-w-0 flex-1 items-center">
-            <BrainCircuit className="mr-2 h-6 w-6 shrink-0 text-indigo-400 md:mr-3" />
-            <span className="truncate text-base font-bold tracking-wide text-white md:text-lg">智能招聘系统</span>
-          </div>
-          <button
-            type="button"
-            className="shrink-0 rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white"
-            onClick={() => setMobileNavOpen(false)}
-            aria-label="关闭菜单"
+        <div
+          className={`h-14 shrink-0 border-b border-slate-800 bg-slate-950 md:h-16 ${
+            desktopSidebarCollapsed ? 'flex flex-col items-center justify-center gap-1 px-1 py-2 md:px-2' : 'flex items-center justify-between gap-2 px-4 md:px-6'
+          }`}
+        >
+          <div
+            className={`flex min-w-0 items-center text-white ${desktopSidebarCollapsed ? 'justify-center md:w-full' : 'flex-1'}`}
           >
-            <X className="h-5 w-5" />
-          </button>
+            <BrainCircuit
+              className={`h-6 w-6 shrink-0 text-indigo-400 ${desktopSidebarCollapsed ? '' : 'mr-2 md:mr-3'}`}
+            />
+            <span
+              className={`truncate text-base font-bold tracking-wide text-white md:text-lg ${desktopSidebarCollapsed ? 'md:hidden' : ''}`}
+            >
+              智能招聘系统
+            </span>
+          </div>
+          <div className="flex shrink-0 items-center gap-0.5">
+            <button
+              type="button"
+              className="hidden rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white md:inline-flex"
+              onClick={toggleDesktopSidebarCollapsed}
+              aria-label={desktopSidebarCollapsed ? '展开侧栏' : '收起侧栏'}
+              title={desktopSidebarCollapsed ? '展开侧栏' : '收起侧栏'}
+            >
+              {desktopSidebarCollapsed ? <ChevronRight className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
+            </button>
+            <button
+              type="button"
+              className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white md:hidden"
+              onClick={() => setMobileNavOpen(false)}
+              aria-label="关闭菜单"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto overscroll-contain py-4">
-          {navConfig.map((nav) => (
-            <div key={nav.id} className="mb-1">
-              {nav.children ? (
-                <>
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div className="flex-1 overflow-y-auto overscroll-contain py-4">
+            {navConfig.map((nav) => (
+              <div key={nav.id} className="mb-1">
+                {nav.children ? (
+                  <>
+                    <div className={desktopSidebarCollapsed ? 'md:hidden' : ''}>
+                      <button
+                        type="button"
+                        onClick={() => toggleMenu(nav.id)}
+                        className="flex w-full items-center justify-between px-4 py-3 transition-colors hover:bg-slate-800 hover:text-white md:px-6"
+                      >
+                        <div className="flex items-center gap-3">
+                          {nav.icon}
+                          <span className="font-medium">{nav.title}</span>
+                        </div>
+                        <ChevronDown
+                          className={`h-4 w-4 shrink-0 transition-transform ${expandedMenus.includes(nav.id) ? 'rotate-180' : ''}`}
+                        />
+                      </button>
+                      <AnimatePresence>
+                        {expandedMenus.includes(nav.id) && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            className="overflow-hidden bg-slate-900/50"
+                          >
+                            {nav.children.map((child) => (
+                              <button
+                                type="button"
+                                key={child.id}
+                                onClick={() => navigateMenu(child.id)}
+                                className={`flex w-full items-center gap-3 py-2.5 pl-12 pr-4 text-sm transition-colors md:pl-14 md:pr-6 ${
+                                  activeMenu === child.id
+                                    ? 'bg-indigo-500/10 font-medium text-indigo-400'
+                                    : 'hover:bg-slate-800 hover:text-white'
+                                }`}
+                              >
+                                {child.icon || <div className="h-1.5 w-1.5 rounded-full bg-current opacity-50" />}
+                                {child.title}
+                              </button>
+                            ))}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                    <div className={desktopSidebarCollapsed ? 'hidden md:block' : 'hidden'}>
+                      <button
+                        type="button"
+                        data-sidebar-rail
+                        onClick={() => setDesktopNavFlyout((prev) => (prev === nav.id ? null : nav.id))}
+                        title={nav.title}
+                        aria-expanded={desktopNavFlyout === nav.id}
+                        aria-haspopup="true"
+                        className={`flex w-full items-center justify-center px-2 py-3 transition-colors hover:bg-slate-800 hover:text-white ${
+                          nav.children?.some((c) => c.id === activeMenu)
+                            ? 'border-l-2 border-indigo-400 bg-indigo-500/15 text-indigo-300'
+                            : desktopNavFlyout === nav.id
+                              ? 'bg-slate-800 text-white'
+                              : ''
+                        }`}
+                      >
+                        <span className="[&>svg]:h-5 [&>svg]:w-5">{nav.icon}</span>
+                      </button>
+                    </div>
+                  </>
+                ) : (
                   <button
                     type="button"
-                    onClick={() => toggleMenu(nav.id)}
-                    className="flex w-full items-center justify-between px-4 py-3 transition-colors hover:bg-slate-800 hover:text-white md:px-6"
+                    onClick={() => navigateMenu(nav.id)}
+                    className={`flex w-full items-center gap-3 px-4 py-3 transition-colors md:px-6 ${
+                      activeMenu === nav.id
+                        ? 'border-r-2 border-indigo-400 bg-indigo-500/10 text-indigo-400'
+                        : 'hover:bg-slate-800 hover:text-white'
+                    } ${desktopSidebarCollapsed ? 'md:justify-center md:px-2' : ''}`}
+                    title={desktopSidebarCollapsed ? nav.title : undefined}
                   >
-                    <div className="flex items-center gap-3">
-                      {nav.icon}
-                      <span className="font-medium">{nav.title}</span>
-                    </div>
-                    <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${expandedMenus.includes(nav.id) ? 'rotate-180' : ''}`} />
+                    {nav.icon}
+                    <span className={`font-medium ${desktopSidebarCollapsed ? 'md:sr-only' : ''}`}>{nav.title}</span>
                   </button>
-                  <AnimatePresence>
-                    {expandedMenus.includes(nav.id) && (
-                      <motion.div
-                        initial={{ height: 0, opacity: 0 }}
-                        animate={{ height: 'auto', opacity: 1 }}
-                        exit={{ height: 0, opacity: 0 }}
-                        className="overflow-hidden bg-slate-900/50"
-                      >
-                        {nav.children.map((child) => (
-                          <button
-                            type="button"
-                            key={child.id}
-                            onClick={() => navigateMenu(child.id)}
-                            className={`flex w-full items-center gap-3 py-2.5 pl-12 pr-4 text-sm transition-colors md:pl-14 md:pr-6 ${
-                              activeMenu === child.id ? 'bg-indigo-500/10 font-medium text-indigo-400' : 'hover:bg-slate-800 hover:text-white'
-                            }`}
-                          >
-                            {child.icon || <div className="h-1.5 w-1.5 rounded-full bg-current opacity-50" />}
-                            {child.title}
-                          </button>
-                        ))}
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => navigateMenu(nav.id)}
-                  className={`flex w-full items-center gap-3 px-4 py-3 transition-colors md:px-6 ${
-                    activeMenu === nav.id
-                      ? 'border-r-2 border-indigo-400 bg-indigo-500/10 text-indigo-400'
-                      : 'hover:bg-slate-800 hover:text-white'
-                  }`}
-                >
-                  {nav.icon}
-                  <span className="font-medium">{nav.title}</span>
-                </button>
-              )}
-            </div>
-          ))}
+                )}
+              </div>
+            ))}
+          </div>
         </div>
+
+        {desktopSidebarCollapsed &&
+          desktopNavFlyout &&
+          (() => {
+            const fly = navConfig.find((n) => n.id === desktopNavFlyout && n.children);
+            if (!fly?.children) return null;
+            return (
+              <div
+                data-sidebar-flyout
+                className="pointer-events-auto absolute left-full top-14 z-50 ml-1 hidden w-[13.5rem] flex-col rounded-xl border border-slate-700 bg-slate-950 py-2 shadow-2xl ring-1 ring-black/20 md:top-16 md:flex"
+                role="menu"
+                aria-label={`${fly.title}子菜单`}
+              >
+                <div className="border-b border-slate-800 px-3 py-2 text-xs font-semibold text-slate-400">{fly.title}</div>
+                {fly.children.map((child) => (
+                  <button
+                    type="button"
+                    key={child.id}
+                    role="menuitem"
+                    onClick={() => navigateMenu(child.id)}
+                    className={`flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm transition-colors hover:bg-slate-800 hover:text-white ${
+                      activeMenu === child.id ? 'bg-indigo-500/15 font-medium text-indigo-300' : 'text-slate-200'
+                    }`}
+                  >
+                    <span className="shrink-0 [&>svg]:h-4 [&>svg]:w-4">
+                      {child.icon || <span className="inline-block h-1.5 w-1.5 rounded-full bg-current opacity-50" />}
+                    </span>
+                    <span className="min-w-0 truncate">{child.title}</span>
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
       </aside>
 
       <main className="flex min-h-0 min-w-0 min-h-[100dvh] flex-1 flex-col overflow-hidden md:min-h-screen">
@@ -1313,7 +1451,7 @@ export default function App() {
           <div className="flex min-w-0 items-center gap-2">
             <button
               type="button"
-              className="shrink-0 rounded-lg p-2 text-slate-600 hover:bg-slate-100"
+              className="shrink-0 rounded-lg p-2 text-slate-600 hover:bg-slate-100 md:hidden"
               onClick={() => setMobileNavOpen(true)}
               aria-label="打开菜单"
             >
@@ -1466,6 +1604,154 @@ function projectRecruitingLeadDisplay(p: { recruitmentLeads?: string[]; manager?
   return '—';
 }
 
+/** 管理端轻量弹层：打开时锁背景滚动，Esc 关闭（与 AdminConfirmModal 共用约定） */
+function useAdminOverlayLockAndEscape(open: boolean, onEscape: () => void) {
+  const onEscapeRef = useRef(onEscape);
+  onEscapeRef.current = onEscape;
+
+  useEffect(() => {
+    if (!open || typeof document === 'undefined') return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      onEscapeRef.current();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open]);
+}
+
+/** 项目管理 / 岗位分配 / 简历库与筛查 / 初面与系统设置等：替代 window.alert */
+function AdminMessageModal({
+  open,
+  title,
+  message,
+  onClose
+}: {
+  open: boolean;
+  title: string;
+  message: string;
+  onClose: () => void;
+}) {
+  useAdminOverlayLockAndEscape(open, onClose);
+  if (!open || typeof document === 'undefined') return null;
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="admin-message-modal-title"
+      className="fixed inset-0 z-[220] flex items-center justify-center bg-slate-900/50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-4">
+          <h3 id="admin-message-modal-title" className="pr-2 font-semibold text-slate-900">
+            {title}
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="shrink-0 rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+            aria-label="关闭"
+          >
+            <XCircle className="h-5 w-5" />
+          </button>
+        </div>
+        <div className="max-h-[60vh] overflow-y-auto px-5 py-4">
+          <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700">{message}</p>
+        </div>
+        <div className="flex justify-end border-t border-slate-100 px-5 py-4">
+          <button type="button" onClick={onClose} className={btnPrimaryMd}>
+            知道了
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+/** 危险操作二次确认，替代 window.confirm（多视图共用） */
+function AdminConfirmModal({
+  open,
+  title,
+  message,
+  confirmLabel = '确定',
+  cancelLabel = '取消',
+  danger,
+  busy,
+  onCancel,
+  onConfirm
+}: {
+  open: boolean;
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  danger?: boolean;
+  busy?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+  const onCancelRef = useRef(onCancel);
+  onCancelRef.current = onCancel;
+
+  useAdminOverlayLockAndEscape(open, () => {
+    if (!busyRef.current) onCancelRef.current();
+  });
+
+  if (!open || typeof document === 'undefined') return null;
+  const confirmClass = danger
+    ? 'rounded-lg bg-red-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-red-500 disabled:pointer-events-none disabled:opacity-60'
+    : btnPrimaryMd;
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="admin-confirm-modal-title"
+      className="fixed inset-0 z-[220] flex items-center justify-center bg-slate-900/50 p-4"
+      onClick={() => !busy && onCancel()}
+    >
+      <div
+        className="w-full max-w-md overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="border-b border-slate-100 px-5 py-4">
+          <h3 id="admin-confirm-modal-title" className="font-semibold text-slate-900">
+            {title}
+          </h3>
+        </div>
+        <div className="px-5 py-4">
+          <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700">{message}</p>
+        </div>
+        <div className="flex flex-wrap justify-end gap-2 border-t border-slate-100 px-5 py-4">
+          <button type="button" disabled={busy} onClick={onCancel} className={btnSecondarySm}>
+            {cancelLabel}
+          </button>
+          <button type="button" disabled={busy} onClick={onConfirm} className={confirmClass}>
+            {busy ? '请稍候…' : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
 function ProjectManagementView({
   role,
   onNavigate,
@@ -1499,6 +1785,11 @@ function ProjectManagementView({
   const [projectJobLockId, setProjectJobLockId] = useState<string | null>(null);
   const [projectListPage, setProjectListPage] = useState(1);
   const [projectPageSize, setProjectPageSize] = useState(10);
+  const [adminMsg, setAdminMsg] = useState<null | { title: string; message: string }>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<
+    null | { kind: 'project'; project: Project } | { kind: 'job'; job: Job }
+  >(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   const loadProjects = useCallback(() => {
     void fetch('/api/projects')
@@ -1567,16 +1858,39 @@ function ProjectManagementView({
     setCreateOpen(true);
   };
 
-  const handleDeleteProject = async (p: Project) => {
-    if (!window.confirm(`确定删除项目「${p.name}」（${p.id}）？下属岗位的 project_id 将清空为未分配。`)) return;
+  const handleDeleteProject = (p: Project) => {
+    setDeleteConfirm({ kind: 'project', project: p });
+  };
+
+  const handleProjectPanelDeleteJob = (job: Job) => {
+    setDeleteConfirm({ kind: 'job', job });
+  };
+
+  const runConfirmedDelete = async () => {
+    if (!deleteConfirm) return;
+    setDeleteBusy(true);
     try {
-      const r = await fetch(`/api/projects/${encodeURIComponent(p.id)}`, { method: 'DELETE' });
-      const j = (await r.json().catch(() => ({}))) as { message?: string };
-      if (!r.ok) throw new Error(j.message || `删除失败 ${r.status}`);
-      setExpandedProject((ex) => (ex === p.id ? null : ex));
-      loadProjects();
+      if (deleteConfirm.kind === 'project') {
+        const p = deleteConfirm.project;
+        const r = await fetch(`/api/projects/${encodeURIComponent(p.id)}`, { method: 'DELETE' });
+        const j = (await r.json().catch(() => ({}))) as { message?: string };
+        if (!r.ok) throw adminJsonFailError(r, j, '删除失败');
+        setDeleteConfirm(null);
+        setExpandedProject((ex) => (ex === p.id ? null : ex));
+        loadProjects();
+      } else {
+        const job = deleteConfirm.job;
+        const r = await fetch(`/api/jobs/${encodeURIComponent(job.id)}`, { method: 'DELETE' });
+        const j = (await r.json().catch(() => ({}))) as { message?: string };
+        if (!r.ok) throw adminJsonFailError(r, j, '删除失败');
+        setDeleteConfirm(null);
+        loadProjects();
+      }
     } catch (err) {
-      window.alert(err instanceof Error ? err.message : '删除失败');
+      setAdminMsg({ title: '删除失败', message: userFacingApiError(err, '删除失败') });
+      setDeleteConfirm(null);
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -1621,7 +1935,7 @@ function ProjectManagementView({
           body: JSON.stringify(patchBody)
         });
         const j = (await r.json().catch(() => ({}))) as { message?: string };
-        if (!r.ok) throw new Error(j.message || `保存失败 ${r.status}`);
+        if (!r.ok) throw adminJsonFailError(r, j, '保存失败');
       } else {
         const postBody: Record<string, unknown> = {
             id,
@@ -1643,13 +1957,13 @@ function ProjectManagementView({
           body: JSON.stringify(postBody)
         });
         const j = (await r.json().catch(() => ({}))) as { message?: string };
-        if (!r.ok) throw new Error(j.message || `创建失败 ${r.status}`);
+        if (!r.ok) throw adminJsonFailError(r, j, '创建失败');
       }
       setCreateOpen(false);
       setEditingProjectId(null);
       loadProjects();
     } catch (err) {
-      setCreateError(err instanceof Error ? err.message : isEdit ? '保存失败' : '创建失败');
+      setCreateError(userFacingApiError(err, isEdit ? '保存失败' : '创建失败'));
     } finally {
       setCreateSubmitting(false);
     }
@@ -1892,7 +2206,7 @@ function ProjectManagementView({
           body: JSON.stringify(body)
         });
         const j = (await r.json().catch(() => ({}))) as { message?: string };
-        if (!r.ok) throw new Error(j.message || `创建失败 ${r.status}`);
+        if (!r.ok) throw adminJsonFailError(r, j, '创建失败');
       } else {
         const r = await fetch(`/api/jobs/${encodeURIComponent(projectJobForm.jobCode)}`, {
           method: 'PATCH',
@@ -1900,7 +2214,7 @@ function ProjectManagementView({
           body: JSON.stringify(payload)
         });
         const j = (await r.json().catch(() => ({}))) as { message?: string };
-        if (!r.ok) throw new Error(j.message || `保存失败 ${r.status}`);
+        if (!r.ok) throw adminJsonFailError(r, j, '保存失败');
       }
       setProjectJobForm(null);
       setProjectJobLockId(null);
@@ -1911,22 +2225,10 @@ function ProjectManagementView({
           ? {
               ...f,
               submitting: false,
-              error: err instanceof Error ? err.message : '请求失败'
+              error: userFacingApiError(err, '请求失败')
             }
           : f
       );
-    }
-  };
-
-  const handleProjectPanelDeleteJob = async (job: Job) => {
-    if (!window.confirm(`确定删除岗位「${job.title}」（${job.id}）？不可恢复。`)) return;
-    try {
-      const r = await fetch(`/api/jobs/${encodeURIComponent(job.id)}`, { method: 'DELETE' });
-      const j = (await r.json().catch(() => ({}))) as { message?: string };
-      if (!r.ok) throw new Error(j.message || `删除失败 ${r.status}`);
-      loadProjects();
-    } catch (err) {
-      window.alert(err instanceof Error ? err.message : '删除失败');
     }
   };
 
@@ -2029,7 +2331,7 @@ function ProjectManagementView({
                           </button>
                           <button
                             type="button"
-                            onClick={() => void handleDeleteProject(project)}
+                            onClick={() => handleDeleteProject(project)}
                             className="p-2 rounded-lg text-slate-500 hover:text-red-600 hover:bg-red-50 transition-colors"
                             aria-label="删除项目"
                           >
@@ -2138,7 +2440,7 @@ function ProjectManagementView({
                                     </button>
                                     <button
                                       type="button"
-                                      onClick={() => void handleProjectPanelDeleteJob(job)}
+                                      onClick={() => handleProjectPanelDeleteJob(job)}
                                       className="p-2 rounded-lg text-slate-500 hover:text-red-600 hover:bg-red-50 transition-colors"
                                       aria-label="删除岗位"
                                     >
@@ -2449,6 +2751,28 @@ function ProjectManagementView({
             document.body
           )
         : null}
+      <AdminMessageModal
+        open={Boolean(adminMsg)}
+        title={adminMsg?.title ?? ''}
+        message={adminMsg?.message ?? ''}
+        onClose={() => setAdminMsg(null)}
+      />
+      <AdminConfirmModal
+        open={Boolean(deleteConfirm)}
+        title={deleteConfirm?.kind === 'project' ? '删除项目' : '删除岗位'}
+        message={
+          deleteConfirm?.kind === 'project'
+            ? `确定删除项目「${deleteConfirm.project.name}」（${deleteConfirm.project.id}）？下属岗位的 project_id 将清空为未分配。`
+            : deleteConfirm?.kind === 'job'
+              ? `确定删除岗位「${deleteConfirm.job.title}」（${deleteConfirm.job.id}）？不可恢复。`
+              : ''
+        }
+        confirmLabel="删除"
+        danger
+        busy={deleteBusy}
+        onCancel={() => !deleteBusy && setDeleteConfirm(null)}
+        onConfirm={() => void runConfirmedDelete()}
+      />
       <JobEditorModal
         jobForm={projectJobForm}
         setJobForm={setProjectJobForm}
@@ -2469,6 +2793,55 @@ function ProjectManagementView({
       />
     </div>
   );
+}
+
+/** 无 JSON message 时按 HTTP 状态给出简短中文说明 */
+function describeHttpStatusForUser(status: number): string {
+  if (status === 401) return '登录已失效或没有权限，请重新登录后再试。'
+  if (status === 403) return '没有权限执行此操作。'
+  if (status === 404) return '请求的资源不存在。'
+  if (status === 408 || status === 504) return '请求超时，请稍后重试。'
+  if (status === 429) return '请求过于频繁，请稍后再试。'
+  if (status === 503) return '服务暂不可用，请稍后重试或联系管理员。'
+  if (status >= 500) return '服务器暂时异常，请稍后重试或联系管理员。'
+  if (status === 400) return '请求无效或参数有误，请检查后重试。'
+  return `请求失败（HTTP ${status}）`
+}
+
+/**
+ * 接口/网络错误展示：优先保留服务端 message；对断网、旧版英文占位、空 message 做中文友好化。
+ */
+function formatApiErrorForDisplay(opts: { status?: number; message?: string; fallback?: string }): string {
+  const msg = String(opts.message ?? '').trim()
+  if (/failed to fetch|load failed|networkerror|network request failed|the user aborted|fetch aborted/i.test(msg)) {
+    return '无法连接到服务器，请检查网络或确认招聘服务是否已启动。'
+  }
+  if (/^db error$/i.test(msg)) return '数据处理失败，请稍后重试或联系管理员。'
+  if (/^(load failed|fail)$/i.test(msg)) {
+    const fb = String(opts.fallback ?? '').trim()
+    return fb || '加载失败，请稍后重试。'
+  }
+  if (msg) return msg
+  if (typeof opts.status === 'number' && opts.status > 0) return describeHttpStatusForUser(opts.status)
+  const fb = String(opts.fallback ?? '').trim()
+  return fb || '请求失败，请稍后重试。'
+}
+
+/** 从 catch 的 unknown 得到面向用户的说明（与 formatApiErrorForDisplay 一致） */
+function userFacingApiError(caught: unknown, fallback: string): string {
+  const raw =
+    caught instanceof Error
+      ? caught.message
+      : typeof caught === 'string'
+        ? caught
+        : ''
+  return formatApiErrorForDisplay({ message: raw, fallback })
+}
+
+/** 已解析 JSON body 且 HTTP 非成功时抛错，与 formatApiErrorForDisplay 一致 */
+function adminJsonFailError(res: Response, body: { message?: unknown }, fallback: string): Error {
+  const raw = typeof body.message === 'string' ? body.message : ''
+  return new Error(formatApiErrorForDisplay({ status: res.status, message: raw, fallback }))
 }
 
 async function miniappApiFetch(path: string, init?: RequestInit): Promise<Response> {
@@ -2567,7 +2940,7 @@ function WorkbenchView({
     void miniappApiFetch('/api/admin/workbench-stats')
       .then(async (r) => {
         const j = (await r.json()) as { data?: WorkbenchStatsPayload; message?: string };
-        if (!r.ok) throw new Error(j.message || 'fail');
+        if (!r.ok) throw adminJsonFailError(r, j, '工作台数据加载失败');
         const d = j.data;
         if (!d || typeof d !== 'object') throw new Error('invalid payload');
         setWbStats({
@@ -2642,7 +3015,7 @@ function WorkbenchView({
     },
     {
       key: 'invite',
-      title: `${pendingInviteCount} 位候选人达到邀约条件，待发送初面邀请`,
+      title: `${pendingInviteCount} 位候选人已完成筛查、待发送初面邀请`,
       note: '建议 24 小时内完成邀约，减少候选人流失。',
       cta: '去发送初面邀请',
       priority: 75,
@@ -3294,12 +3667,12 @@ function JobEditorModal({
         })
       });
       const j = (await r.json().catch(() => ({}))) as { jdText?: string; message?: string };
-      if (!r.ok) throw new Error(j.message || `生成失败 ${r.status}`);
+      if (!r.ok) throw adminJsonFailError(r, j, '生成失败');
       const jd = String(j.jdText || '').trim();
       if (!jd) throw new Error('未生成有效内容');
       setJobForm((f) => (f ? { ...f, jdText: jd } : f));
     } catch (e) {
-      setJobForm((f) => (f ? { ...f, error: e instanceof Error ? e.message : 'AI 生成失败' } : f));
+      setJobForm((f) => (f ? { ...f, error: userFacingApiError(e, 'AI 生成失败') } : f));
     } finally {
       setJdGenerating(false);
     }
@@ -3816,6 +4189,9 @@ function JobQueryView({
   const [rmBatchApplying, setRmBatchApplying] = useState(false);
   const [rmBatchError, setRmBatchError] = useState('');
   const rmBatchSelectAllRef = useRef<HTMLInputElement>(null);
+  const [adminMsg, setAdminMsg] = useState<null | { title: string; message: string }>(null);
+  const [deleteJobConfirm, setDeleteJobConfirm] = useState<Job | null>(null);
+  const [deleteJobBusy, setDeleteJobBusy] = useState(false);
 
   const loadData = useCallback(() => {
     void fetch('/api/projects')
@@ -4072,9 +4448,11 @@ function JobQueryView({
       currentRole === 'recruiting_manager' &&
       !recruitingManagerCanEditJob(job, authProfile, projectForJobRow(job))
     ) {
-      window.alert(
-        '仅可编辑「项目招聘负责人」中包含您本人姓名或登录账号的项目下的岗位；请在「项目管理」中由交付经理/管理员将您设为该项目的招聘负责人。'
-      );
+      setAdminMsg({
+        title: '无法编辑',
+        message:
+          '仅可编辑「项目招聘负责人」中包含您本人姓名或登录账号的项目下的岗位；请在「项目管理」中由交付经理/管理员将您设为该项目的招聘负责人。'
+      });
       return;
     }
     const firstPid = selectableProjects[0]?.id ?? '';
@@ -4203,7 +4581,7 @@ function JobQueryView({
           body: JSON.stringify(body)
         });
         const j = (await r.json().catch(() => ({}))) as { message?: string };
-        if (!r.ok) throw new Error(j.message || `创建失败 ${r.status}`);
+        if (!r.ok) throw adminJsonFailError(r, j, '创建失败');
       } else {
         const patchBody: Record<string, unknown> = { ...basePayload };
         if (isRm) patchBody.recruiters = recruitersOut;
@@ -4213,7 +4591,7 @@ function JobQueryView({
           body: JSON.stringify(patchBody)
         });
         const j = (await r.json().catch(() => ({}))) as { message?: string };
-        if (!r.ok) throw new Error(j.message || `保存失败 ${r.status}`);
+        if (!r.ok) throw adminJsonFailError(r, j, '保存失败');
       }
       setJobForm(null);
       loadData();
@@ -4223,22 +4601,32 @@ function JobQueryView({
           ? {
               ...f,
               submitting: false,
-              error: err instanceof Error ? err.message : '请求失败'
+              error: userFacingApiError(err, '请求失败')
             }
           : f
       );
     }
   };
 
-  const handleDeleteJob = async (job: Job) => {
-    if (!window.confirm(`确定删除岗位「${job.title}」（${job.id}）？不可恢复。`)) return;
+  const requestDeleteJob = (job: Job) => {
+    setDeleteJobConfirm(job);
+  };
+
+  const runDeleteJobConfirmed = async () => {
+    const job = deleteJobConfirm;
+    if (!job) return;
+    setDeleteJobBusy(true);
     try {
       const r = await fetch(`/api/jobs/${encodeURIComponent(job.id)}`, { method: 'DELETE' });
       const j = (await r.json().catch(() => ({}))) as { message?: string };
-      if (!r.ok) throw new Error(j.message || `删除失败 ${r.status}`);
+      if (!r.ok) throw adminJsonFailError(r, j, '删除失败');
+      setDeleteJobConfirm(null);
       loadData();
     } catch (err) {
-      window.alert(err instanceof Error ? err.message : '删除失败');
+      setAdminMsg({ title: '删除失败', message: userFacingApiError(err, '删除失败') });
+      setDeleteJobConfirm(null);
+    } finally {
+      setDeleteJobBusy(false);
     }
   };
 
@@ -4266,7 +4654,10 @@ function JobQueryView({
 
   const openRmBatchAssignModal = () => {
     if (!rmBatchSelectedJobCodes.length) {
-      window.alert('请先在列表中勾选要分配招聘专员的岗位。');
+      setAdminMsg({
+        title: '提示',
+        message: '请先在列表中勾选要分配招聘专员的岗位。'
+      });
       return;
     }
     setRmBatchError('');
@@ -4322,10 +4713,10 @@ function JobQueryView({
           body: JSON.stringify(payload)
         });
         const j = (await r.json().catch(() => ({}))) as { message?: string };
-        if (!r.ok) throw new Error(j.message || String(r.status));
+        if (!r.ok) throw adminJsonFailError(r, j, '请求失败');
         ok++;
       } catch (e) {
-        fails.push(`${row.job.title}（${jobId}）：${e instanceof Error ? e.message : '失败'}`);
+        fails.push(`${row.job.title}（${jobId}）：${userFacingApiError(e, '失败')}`);
       }
     }
     setRmBatchApplying(false);
@@ -4334,14 +4725,16 @@ function JobQueryView({
       setRmBatchAssignOpen(false);
       setRmBatchSelectedJobCodes([]);
       setRmBatchRecruiters('');
-      window.alert(
-        `已成功更新 ${ok} 个岗位的招聘人员（本部门由您勾选；其他部门负责人已分配的人员已自动保留）。`
-      );
+      setAdminMsg({
+        title: '已完成',
+        message: `已成功更新 ${ok} 个岗位的招聘人员（本部门由您勾选；其他部门负责人已分配的人员已自动保留）。`
+      });
     } else {
       setRmBatchError(`成功 ${ok} 条；失败 ${fails.length} 条。`);
-      window.alert(
-        `成功 ${ok} 条；失败 ${fails.length} 条：\n${fails.slice(0, 10).join('\n')}${fails.length > 10 ? '\n…' : ''}`
-      );
+      setAdminMsg({
+        title: '批量分配结果',
+        message: `成功 ${ok} 条；失败 ${fails.length} 条：\n${fails.slice(0, 10).join('\n')}${fails.length > 10 ? '\n…' : ''}`
+      });
     }
   };
 
@@ -4630,7 +5023,7 @@ function JobQueryView({
                             {canDeleteInJobQuery ? (
                               <button
                                 type="button"
-                                onClick={() => void handleDeleteJob(job)}
+                                onClick={() => requestDeleteJob(job)}
                                 className="p-2 rounded-lg text-slate-500 hover:text-red-600 hover:bg-red-50 transition-colors"
                                 aria-label="删除"
                               >
@@ -4798,6 +5191,26 @@ function JobQueryView({
             document.body
           )
         : null}
+      <AdminMessageModal
+        open={Boolean(adminMsg)}
+        title={adminMsg?.title ?? ''}
+        message={adminMsg?.message ?? ''}
+        onClose={() => setAdminMsg(null)}
+      />
+      <AdminConfirmModal
+        open={Boolean(deleteJobConfirm)}
+        title="删除岗位"
+        message={
+          deleteJobConfirm
+            ? `确定删除岗位「${deleteJobConfirm.title}」（${deleteJobConfirm.id}）？不可恢复。`
+            : ''
+        }
+        confirmLabel="删除"
+        danger
+        busy={deleteJobBusy}
+        onCancel={() => !deleteJobBusy && setDeleteJobConfirm(null)}
+        onConfirm={() => void runDeleteJobConfirmed()}
+      />
     </div>
   );
 }
@@ -5591,7 +6004,7 @@ function ResumeProfileEditDialog({
     void miniappApiFetch(`/api/admin/resume-screenings/${encodeURIComponent(resume.id)}/profile`)
       .then(async (r) => {
         const j = (await r.json().catch(() => ({}))) as { data?: Record<string, unknown>; message?: string }
-        if (!r.ok) throw new Error(j.message || `加载失败 ${r.status}`)
+        if (!r.ok) throw adminJsonFailError(r, j, '加载失败')
         const d = (j.data || {}) as Record<string, unknown>
         if (cancelled) return
         setProfileDraft({
@@ -5619,7 +6032,7 @@ function ResumeProfileEditDialog({
         })
       })
       .catch((e) => {
-        if (!cancelled) setProfileError(e instanceof Error ? e.message : '加载详情失败')
+        if (!cancelled) setProfileError(userFacingApiError(e, '加载详情失败'))
       })
       .finally(() => {
         if (!cancelled) setProfileLoading(false)
@@ -5699,11 +6112,11 @@ function ResumeProfileEditDialog({
         body: JSON.stringify(payload)
       })
       const j = (await r.json().catch(() => ({}))) as { message?: string }
-      if (!r.ok) throw new Error(j.message || `保存失败 ${r.status}`)
+      if (!r.ok) throw adminJsonFailError(r, j, '保存失败')
       onClose()
       onSaved()
     } catch (e) {
-      setProfileError(e instanceof Error ? e.message : '保存失败')
+      setProfileError(userFacingApiError(e, '保存失败'))
     } finally {
       setProfileSaving(false)
     }
@@ -6086,6 +6499,7 @@ function ResumeLibraryView({
   const [libFilterDraft, setLibFilterDraft] = useState<ResumeLibraryFilters>(() => emptyResumeLibraryFilters());
   const [libFilterApplied, setLibFilterApplied] = useState<ResumeLibraryFilters>(() => emptyResumeLibraryFilters());
   const [libFilterMoreOpen, setLibFilterMoreOpen] = useState(false);
+  const [libAdminMsg, setLibAdminMsg] = useState<null | { title: string; message: string }>(null);
 
   const libAdvancedFilterCount = useMemo(() => {
     const d = libFilterApplied;
@@ -6115,7 +6529,7 @@ function ResumeLibraryView({
     void miniappApiFetch('/api/admin/projects')
       .then(async (r) => {
         const j = (await r.json()) as { data?: { id: string; name?: string }[]; message?: string };
-        if (!r.ok) throw new Error(j.message || 'load projects failed');
+        if (!r.ok) throw adminJsonFailError(r, j, '项目加载失败');
         const list = (j.data || []).map((p) => {
           const row = p as {
             id?: unknown;
@@ -6210,14 +6624,7 @@ function ResumeLibraryView({
         setInviteJobs(scoped);
       })
       .catch((e) => {
-        const msg = e instanceof Error ? e.message : String(e);
-        const isNet =
-          msg === 'Failed to fetch' || msg === 'Load failed' || msg.includes('NetworkError');
-        setInviteBanner(
-          isNet
-            ? '无法连接到招聘服务，请检查网络或联系管理员确认后台是否在线。'
-            : `加载岗位列表失败：${msg || '请稍后重试或联系管理员。'}`
-        );
+        setInviteBanner(userFacingApiError(e, '加载岗位列表失败'));
         setInviteJobs([]);
       })
       .finally(() => setInviteJobsLoading(false));
@@ -6244,12 +6651,12 @@ function ResumeLibraryView({
     void miniappApiFetch('/api/admin/resume-library')
       .then(async (r) => {
         const j = (await r.json()) as { data?: ResumeLibraryApiRow[]; message?: string };
-        if (!r.ok) throw new Error(j.message || 'load failed');
+        if (!r.ok) throw adminJsonFailError(r, j, '简历库加载失败');
         setLibRows(j.data || []);
       })
-      .catch(() => {
+      .catch((e) => {
         setLibRows([]);
-        setLibError('简历库数据暂时无法加载，请稍后重试或联系管理员检查库表是否已升级。');
+        setLibError(userFacingApiError(e, '简历库数据暂时无法加载，请稍后重试或联系管理员检查库表是否已升级。'));
       });
   }, [apiBase, hasToken, sessRev]);
 
@@ -6267,11 +6674,11 @@ function ResumeLibraryView({
     void miniappApiFetch(`/api/admin/resume-library/${encodeURIComponent(sid)}/delivery-history`)
       .then(async (r) => {
         const j = (await r.json()) as { data?: ResumeDeliveryHistoryApiRow[]; message?: string };
-        if (!r.ok) throw new Error(j.message || '加载失败');
+        if (!r.ok) throw adminJsonFailError(r, j, '加载失败');
         setDeliveryHistoryRows(j.data || []);
       })
       .catch((e: unknown) => {
-        setDeliveryHistoryError(e instanceof Error ? e.message : '加载失败');
+        setDeliveryHistoryError(userFacingApiError(e, '加载失败'));
         setDeliveryHistoryRows([]);
       })
       .finally(() => setDeliveryHistoryLoading(false));
@@ -6397,7 +6804,7 @@ function ResumeLibraryView({
         );
         if (!r.ok) {
           const j = (await r.json().catch(() => ({}))) as { message?: string };
-          throw new Error(j.message || `获取文件失败 ${r.status}`);
+          throw adminJsonFailError(r, j, '获取文件失败');
         }
         const blob = await r.blob();
         const url = URL.createObjectURL(blob);
@@ -6412,7 +6819,10 @@ function ResumeLibraryView({
           setTimeout(() => URL.revokeObjectURL(url), 5000);
         }
       } catch (e) {
-        window.alert(e instanceof Error ? e.message : '获取简历文件失败');
+        setLibAdminMsg({
+          title: '无法打开文件',
+          message: userFacingApiError(e, '获取简历文件失败')
+        });
       } finally {
         setFileBusyId(null);
       }
@@ -6929,6 +7339,12 @@ function ResumeLibraryView({
           </motion.div>
         ) : null}
       </AnimatePresence>
+      <AdminMessageModal
+        open={Boolean(libAdminMsg)}
+        title={libAdminMsg?.title ?? ''}
+        message={libAdminMsg?.message ?? ''}
+        onClose={() => setLibAdminMsg(null)}
+      />
     </div>
   );
 }
@@ -6988,6 +7404,8 @@ function ResumeScreeningView({
   const [sfKeyword, setSfKeyword] = useState('');
   const [screenFilterMoreOpen, setScreenFilterMoreOpen] = useState(false);
   const [screeningHrUsers, setScreeningHrUsers] = useState<User[]>([]);
+  const [screeningAdminMsg, setScreeningAdminMsg] = useState<null | { title: string; message: string }>(null);
+  const [bulkDeleteIds, setBulkDeleteIds] = useState<string[] | null>(null);
 
   const screenAdvancedFilterCount = useMemo(() => {
     let n = 0;
@@ -7085,7 +7503,7 @@ function ResumeScreeningView({
     void miniappApiFetch(screeningUrl)
       .then(async (r) => {
         const j = (await r.json()) as { data?: unknown[]; total?: number; message?: string };
-        if (!r.ok) throw new Error(j.message || 'load failed');
+        if (!r.ok) throw adminJsonFailError(r, j, '加载失败');
         const rows = (j.data || []) as Array<{
           id: number | string
           job_code: string
@@ -7202,7 +7620,7 @@ function ResumeScreeningView({
         );
         if (!r.ok) {
           const j = (await r.json().catch(() => ({}))) as { message?: string };
-          throw new Error(j.message || `获取文件失败 ${r.status}`);
+          throw adminJsonFailError(r, j, '获取文件失败');
         }
         const blob = await r.blob();
         const url = URL.createObjectURL(blob);
@@ -7217,7 +7635,10 @@ function ResumeScreeningView({
           setTimeout(() => URL.revokeObjectURL(url), 5000);
         }
       } catch (e) {
-        window.alert(e instanceof Error ? e.message : '获取简历文件失败');
+        setScreeningAdminMsg({
+          title: '无法打开文件',
+          message: userFacingApiError(e, '获取简历文件失败')
+        });
       } finally {
         setFileBusyId(null);
       }
@@ -7240,13 +7661,16 @@ function ResumeScreeningView({
           body: JSON.stringify({ ids: idStrs })
         });
         const j = (await r.json().catch(() => ({}))) as { message?: string; deleted?: number };
-        if (!r.ok) throw new Error(j.message || `删除失败 ${r.status}`);
+        if (!r.ok) throw adminJsonFailError(r, j, '删除失败');
         setScreeningSelection({});
         setReportResume((prev) => (prev && idSet.has(String(prev.id)) ? null : prev));
         setProfileEditResume((prev) => (prev && idSet.has(String(prev.id)) ? null : prev));
         loadScreenings();
       } catch (e) {
-        window.alert(e instanceof Error ? e.message : '删除失败');
+        setScreeningAdminMsg({
+          title: '删除失败',
+          message: userFacingApiError(e, '删除失败')
+        });
       } finally {
         setScreeningDeleting(false);
       }
@@ -7263,7 +7687,7 @@ function ResumeScreeningView({
     void miniappApiFetch('/api/admin/projects')
       .then(async (r) => {
         const j = (await r.json()) as { data?: { id: string; name?: string }[]; message?: string };
-        if (!r.ok) throw new Error(j.message || 'load projects failed');
+        if (!r.ok) throw adminJsonFailError(r, j, '项目加载失败');
         const list = (j.data || []).map((p) => {
           const row = p as {
             id?: unknown;
@@ -7361,14 +7785,7 @@ function ResumeScreeningView({
         setInviteJobs(scoped);
       })
       .catch((e) => {
-        const msg = e instanceof Error ? e.message : String(e);
-        const isNet =
-          msg === 'Failed to fetch' || msg === 'Load failed' || msg.includes('NetworkError');
-        setInviteBanner(
-          isNet
-            ? '无法连接到招聘服务，请检查网络或联系管理员确认后台是否在线。'
-            : `加载岗位列表失败：${msg || '请稍后重试或联系管理员。'}`
-        );
+        setInviteBanner(userFacingApiError(e, '加载岗位列表失败'));
         setInviteJobs([]);
       })
       .finally(() => setInviteJobsLoading(false));
@@ -7413,7 +7830,7 @@ function ResumeScreeningView({
         body: JSON.stringify(body)
       });
       const j = (await r.json()) as { data?: { inviteCode: string; jobCode: string }; message?: string };
-      if (!r.ok) throw new Error(j.message || `发起失败 HTTP ${r.status}`);
+      if (!r.ok) throw adminJsonFailError(r, j, '发起面试失败');
       if (j.data?.inviteCode) {
         setInviteModal({
           kind: 'success',
@@ -7424,7 +7841,7 @@ function ResumeScreeningView({
         loadScreenings();
       }
     } catch (e) {
-      setInviteModal({ kind: 'error', message: e instanceof Error ? e.message : '发起面试失败' });
+      setInviteModal({ kind: 'error', message: userFacingApiError(e, '发起面试失败') });
     } finally {
       setCreatingInvite(null);
     }
@@ -7484,13 +7901,13 @@ function ResumeScreeningView({
     void miniappApiFetch('/api/admin/resume-screen', { method: 'POST', body: fd })
       .then(async (r) => {
         const j = (await r.json()) as { message?: string }
-        if (!r.ok) throw new Error(j.message || 'upload failed');
+        if (!r.ok) throw adminJsonFailError(r, j, '上传或筛查失败');
         loadScreenings();
         setUploadHint('解析与打分已完成，已加入下方列表。');
         setUploadModalOpen(false);
       })
       .catch((e: unknown) => {
-        setUploadHint(e instanceof Error ? e.message : '上传或筛查失败');
+        setUploadHint(userFacingApiError(e, '上传或筛查失败'));
       })
       .finally(() => setUploading(false));
   };
@@ -7790,14 +8207,7 @@ function ResumeScreeningView({
                   onClick={() => {
                     const ids = Object.keys(screeningSelection).filter((k) => screeningSelection[k]);
                     if (!ids.length) return;
-                    if (
-                      !window.confirm(
-                        `确定删除已选 ${ids.length} 条筛查记录？将同步移除详情、原件文件及邀请关联，且不可恢复。`
-                      )
-                    ) {
-                      return;
-                    }
-                    void deleteScreeningsByIds(ids);
+                    setBulkDeleteIds(ids);
                   }}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40"
                 >
@@ -7984,18 +8394,16 @@ function ResumeScreeningView({
                                   >
                                     <UserPen className="h-4 w-4" aria-hidden />
                                   </button>
-                                  {resume.matchScore >= 60 ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => handleInviteFromResume(resume)}
-                                      disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
-                                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-40"
-                                      title="发起面试"
-                                      aria-label="发起面试"
-                                    >
-                                      <CalendarCheck className="h-4 w-4" aria-hidden />
-                                    </button>
-                                  ) : null}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleInviteFromResume(resume)}
+                                    disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
+                                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-40"
+                                    title="发起面试"
+                                    aria-label="发起面试"
+                                  >
+                                    <CalendarCheck className="h-4 w-4" aria-hidden />
+                                  </button>
                                   {resume.hasOriginalFile ? (
                                     <>
                                       <button
@@ -8422,6 +8830,30 @@ function ResumeScreeningView({
           </motion.div>
         ) : null}
       </AnimatePresence>
+      <AdminMessageModal
+        open={Boolean(screeningAdminMsg)}
+        title={screeningAdminMsg?.title ?? ''}
+        message={screeningAdminMsg?.message ?? ''}
+        onClose={() => setScreeningAdminMsg(null)}
+      />
+      <AdminConfirmModal
+        open={Boolean(bulkDeleteIds?.length)}
+        title="删除选中记录"
+        message={
+          bulkDeleteIds?.length
+            ? `确定删除已选 ${bulkDeleteIds.length} 条筛查记录？将同步移除详情、原件文件及邀请关联，且不可恢复。`
+            : ''
+        }
+        confirmLabel="删除"
+        danger
+        onCancel={() => setBulkDeleteIds(null)}
+        onConfirm={() => {
+          const ids = bulkDeleteIds;
+          if (!ids?.length) return;
+          setBulkDeleteIds(null);
+          void deleteScreeningsByIds(ids);
+        }}
+      />
     </div>
   );
 }
@@ -8474,6 +8906,7 @@ function ApplicationManagementView({
     qa: Array<{ questionId?: string; question?: string; answer?: string }>
     updatedAt: string
   }>(null)
+  const [appAdminMsg, setAppAdminMsg] = useState<null | { title: string; message: string }>(null)
   const [appListPage, setAppListPage] = useState(1)
   const [appPageSize, setAppPageSize] = useState(10)
   const [appListTotal, setAppListTotal] = useState(0)
@@ -8498,7 +8931,7 @@ function ApplicationManagementView({
     ])
       .then(async ([screeningRes, projectsRes, usersRes]) => {
         const j = (await screeningRes.json()) as { data?: unknown[]; total?: number; message?: string }
-        if (!screeningRes.ok) throw new Error(j.message || `加载失败 ${screeningRes.status}`)
+        if (!screeningRes.ok) throw adminJsonFailError(screeningRes, j, '加载失败')
         setAppListTotal(Math.max(0, Math.floor(Number(j.total) || 0)))
         const data = Array.isArray(j.data) ? j.data : []
         const hrUsers = usersRes.ok ? usersFromApiPayload(await usersRes.json().catch(() => [])) : []
@@ -8590,7 +9023,7 @@ function ApplicationManagementView({
       .catch((e: unknown) => {
         setRows([])
         setAppListTotal(0)
-        setErr(e instanceof Error ? e.message : '加载失败')
+        setErr(userFacingApiError(e, '加载失败'))
       })
       .finally(() => setLoading(false))
   }, [appListPage, appPageSize, keyword, statusFilter, scoreFilter])
@@ -8619,7 +9052,8 @@ function ApplicationManagementView({
     try {
       const r = await miniappApiFetch(`/api/admin/interview-report?screeningId=${encodeURIComponent(row.id)}`)
       const j = (await r.json()) as { data?: Record<string, unknown>; message?: string }
-      if (!r.ok || !j.data) throw new Error(j.message || `加载失败 ${r.status}`)
+      if (!r.ok) throw adminJsonFailError(r, j, '加载失败')
+      if (!j.data) throw adminJsonFailError(r, j, '未返回报告数据')
       const d = j.data
       setReportModal({
         candidateName: row.candidateName,
@@ -8635,7 +9069,10 @@ function ApplicationManagementView({
         updatedAt: String(d.updatedAt || '')
       })
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : '加载面试报告失败')
+      setAppAdminMsg({
+        title: '加载失败',
+        message: userFacingApiError(e, '加载面试报告失败')
+      })
     } finally {
       setReportLoadingId(null)
     }
@@ -9034,6 +9471,12 @@ function ApplicationManagementView({
           </motion.div>
         ) : null}
       </AnimatePresence>
+      <AdminMessageModal
+        open={Boolean(appAdminMsg)}
+        title={appAdminMsg?.title ?? ''}
+        message={appAdminMsg?.message ?? ''}
+        onClose={() => setAppAdminMsg(null)}
+      />
     </div>
   )
 }
@@ -9044,11 +9487,11 @@ async function adminFetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   const data = (await res.json().catch(() => ({}))) as unknown;
   if (!res.ok) {
-    const msg =
+    const rawMsg =
       data && typeof data === 'object' && 'message' in data && typeof (data as { message?: unknown }).message === 'string'
         ? (data as { message: string }).message
-        : `请求失败 (${res.status})`;
-    throw new Error(msg);
+        : ''
+    throw adminJsonFailError(res, { message: rawMsg }, '')
   }
   return data as T;
 }
@@ -9222,6 +9665,9 @@ function SystemJobRoleBasesView() {
   const [err, setErr] = useState('');
   const [newName, setNewName] = useState('');
   const [adding, setAdding] = useState(false);
+  const [jobRoleAdminMsg, setJobRoleAdminMsg] = useState<null | { title: string; message: string }>(null);
+  const [jobRoleDeleteRow, setJobRoleDeleteRow] = useState<JobRoleBaseAdminRow | null>(null);
+  const [jobRoleDeleteBusy, setJobRoleDeleteBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -9229,10 +9675,10 @@ function SystemJobRoleBasesView() {
     try {
       const r = await miniappApiFetch('/api/admin/job-role-bases');
       const j = (await r.json().catch(() => ({}))) as { data?: JobRoleBaseAdminRow[]; message?: string };
-      if (!r.ok) throw new Error(j.message || '加载失败');
+      if (!r.ok) throw adminJsonFailError(r, j, '加载失败');
       setRows((j.data || []) as JobRoleBaseAdminRow[]);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : '加载失败');
+      setErr(userFacingApiError(e, '加载失败'));
       setRows([]);
     } finally {
       setLoading(false);
@@ -9254,12 +9700,12 @@ function SystemJobRoleBasesView() {
         body: JSON.stringify({ name: t })
       });
       const j = (await r.json().catch(() => ({}))) as { message?: string };
-      if (!r.ok) throw new Error(j.message || '添加失败');
+      if (!r.ok) throw adminJsonFailError(r, j, '添加失败');
       setNewName('');
       await load();
       refreshGlobal();
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : '添加失败');
+      setJobRoleAdminMsg({ title: '添加失败', message: userFacingApiError(e, '添加失败') });
     } finally {
       setAdding(false);
     }
@@ -9274,31 +9720,36 @@ function SystemJobRoleBasesView() {
         body: JSON.stringify({ enabled: next })
       });
       const j = (await r.json().catch(() => ({}))) as { message?: string };
-      if (!r.ok) throw new Error(j.message || '更新失败');
+      if (!r.ok) throw adminJsonFailError(r, j, '更新失败');
       await load();
       refreshGlobal();
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : '更新失败');
+      setJobRoleAdminMsg({ title: '更新失败', message: userFacingApiError(e, '更新失败') });
     }
   };
 
-  const delRow = async (row: JobRoleBaseAdminRow) => {
-    if (
-      !window.confirm(
-        `确定删除标准岗位「${row.name}」？历史数据中的文本不受影响，但表单中不可再选此项。`
-      )
-    )
-      return;
+  const requestDeleteJobRoleBase = (row: JobRoleBaseAdminRow) => {
+    setJobRoleDeleteRow(row);
+  };
+
+  const runDeleteJobRoleBaseConfirmed = async () => {
+    const row = jobRoleDeleteRow;
+    if (!row) return;
+    setJobRoleDeleteBusy(true);
     try {
       const r = await miniappApiFetch(`/api/admin/job-role-bases/${encodeURIComponent(row.id)}`, {
         method: 'DELETE'
       });
       const j = (await r.json().catch(() => ({}))) as { message?: string };
-      if (!r.ok) throw new Error(j.message || '删除失败');
+      if (!r.ok) throw adminJsonFailError(r, j, '删除失败');
+      setJobRoleDeleteRow(null);
       await load();
       refreshGlobal();
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : '删除失败');
+      setJobRoleAdminMsg({ title: '删除失败', message: userFacingApiError(e, '删除失败') });
+      setJobRoleDeleteRow(null);
+    } finally {
+      setJobRoleDeleteBusy(false);
     }
   };
 
@@ -9372,7 +9823,7 @@ function SystemJobRoleBasesView() {
                     <td className="px-4 py-3 text-right">
                       <button
                         type="button"
-                        onClick={() => void delRow(row)}
+                        onClick={() => requestDeleteJobRoleBase(row)}
                         className="text-xs font-medium text-red-600 hover:text-red-800"
                       >
                         删除
@@ -9385,6 +9836,26 @@ function SystemJobRoleBasesView() {
           </div>
         )}
       </div>
+      <AdminMessageModal
+        open={Boolean(jobRoleAdminMsg)}
+        title={jobRoleAdminMsg?.title ?? ''}
+        message={jobRoleAdminMsg?.message ?? ''}
+        onClose={() => setJobRoleAdminMsg(null)}
+      />
+      <AdminConfirmModal
+        open={Boolean(jobRoleDeleteRow)}
+        title="删除标准岗位"
+        message={
+          jobRoleDeleteRow
+            ? `确定删除标准岗位「${jobRoleDeleteRow.name}」？历史数据中的文本不受影响，但表单中不可再选此项。`
+            : ''
+        }
+        confirmLabel="删除"
+        danger
+        busy={jobRoleDeleteBusy}
+        onCancel={() => !jobRoleDeleteBusy && setJobRoleDeleteRow(null)}
+        onConfirm={() => void runDeleteJobRoleBaseConfirmed()}
+      />
     </div>
   );
 }
@@ -9413,6 +9884,7 @@ function SystemDeptView() {
   const [formManager, setFormManager] = useState('');
   const [formCount, setFormCount] = useState('0');
   const [hrUsers, setHrUsers] = useState<User[]>([]);
+  const [deptDeleteConfirm, setDeptDeleteConfirm] = useState<Dept | null>(null);
 
   const deptById = useMemo(() => new Map(depts.map((d) => [d.id, d])), [depts]);
 
@@ -9527,7 +9999,7 @@ function SystemDeptView() {
       const rows = Array.isArray(deptRows) ? deptRows : [];
       setDepts(rows.map(mapDeptRow));
     } catch (e) {
-      setError(e instanceof Error ? e.message : '加载部门失败');
+      setError(userFacingApiError(e, '加载部门失败'));
       setDepts([]);
     }
     try {
@@ -9592,20 +10064,26 @@ function SystemDeptView() {
       setDialog(null);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : '保存失败');
+      setError(userFacingApiError(e, '保存失败'));
     } finally {
       setSaving(false);
     }
   };
 
-  const deleteDept = async (d: Dept) => {
-    if (!window.confirm(`确定删除部门「${d.name}」？`)) return;
+  const requestDeleteDept = (d: Dept) => {
+    setDeptDeleteConfirm(d);
+  };
+
+  const runDeleteDeptConfirmed = async () => {
+    const d = deptDeleteConfirm;
+    if (!d) return;
+    setDeptDeleteConfirm(null);
     setError(null);
     try {
       await adminFetchJson(`/api/depts/${encodeURIComponent(d.id)}`, { method: 'DELETE' });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : '删除失败');
+      setError(userFacingApiError(e, '删除失败'));
     }
   };
 
@@ -9729,7 +10207,7 @@ function SystemDeptView() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => void deleteDept(dept)}
+                      onClick={() => requestDeleteDept(dept)}
                       className="text-red-600 hover:text-red-800 font-medium text-xs"
                     >
                       删除
@@ -9855,6 +10333,15 @@ function SystemDeptView() {
           />
         </div>
       </SystemCrudModal>
+      <AdminConfirmModal
+        open={Boolean(deptDeleteConfirm)}
+        title="删除部门"
+        message={deptDeleteConfirm ? `确定删除部门「${deptDeleteConfirm.name}」？` : ''}
+        confirmLabel="删除"
+        danger
+        onCancel={() => setDeptDeleteConfirm(null)}
+        onConfirm={() => void runDeleteDeptConfirmed()}
+      />
     </div>
   );
 }
@@ -9886,6 +10373,7 @@ function SystemUserView({
   const [ufStatus, setUfStatus] = useState<'正常' | '停用'>('正常');
   const [ufPassword, setUfPassword] = useState('');
   const [ufPasswordConfirm, setUfPasswordConfirm] = useState('');
+  const [userDeleteConfirm, setUserDeleteConfirm] = useState<User | null>(null);
 
   const myDept = String(authProfile?.dept || '').trim();
   const myDeptOk = Boolean(myDept && myDept !== '-');
@@ -9935,7 +10423,7 @@ function SystemUserView({
         }))
       );
     } catch (e) {
-      setError(e instanceof Error ? e.message : '加载失败');
+      setError(userFacingApiError(e, '加载失败'));
       setUsers([]);
       setDeptTree([]);
       setDeptNames([]);
@@ -10115,20 +10603,26 @@ function SystemUserView({
       setUfPasswordConfirm('');
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : '保存失败');
+      setError(userFacingApiError(e, '保存失败'));
     } finally {
       setSaving(false);
     }
   };
 
-  const deleteUser = async (u: User) => {
-    if (!window.confirm(`确定删除用户「${u.name}」（${u.username}）？`)) return;
+  const requestDeleteUser = (u: User) => {
+    setUserDeleteConfirm(u);
+  };
+
+  const runDeleteUserConfirmed = async () => {
+    const u = userDeleteConfirm;
+    if (!u) return;
+    setUserDeleteConfirm(null);
     setError(null);
     try {
       await adminFetchJson(`/api/users/${encodeURIComponent(u.id)}`, { method: 'DELETE' });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : '删除失败');
+      setError(userFacingApiError(e, '删除失败'));
     }
   };
 
@@ -10144,7 +10638,7 @@ function SystemUserView({
       });
       setUsers((prev) => prev.map((u) => (u.id === user.id ? { ...u, status: next } : u)));
     } catch (e) {
-      setError(e instanceof Error ? e.message : '更新失败');
+      setError(userFacingApiError(e, '更新失败'));
     } finally {
       setUpdatingId(null);
     }
@@ -10322,7 +10816,7 @@ function SystemUserView({
                           </button>
                           <button
                             type="button"
-                            onClick={() => void deleteUser(user)}
+                            onClick={() => requestDeleteUser(user)}
                             className="text-xs font-medium text-red-600 hover:text-red-800"
                           >
                             删除
@@ -10498,6 +10992,19 @@ function SystemUserView({
           </>
         )}
       </SystemCrudModal>
+      <AdminConfirmModal
+        open={Boolean(userDeleteConfirm)}
+        title="删除用户"
+        message={
+          userDeleteConfirm
+            ? `确定删除用户「${userDeleteConfirm.name}」（${userDeleteConfirm.username}）？`
+            : ''
+        }
+        confirmLabel="删除"
+        danger
+        onCancel={() => setUserDeleteConfirm(null)}
+        onConfirm={() => void runDeleteUserConfirmed()}
+      />
     </div>
   );
 }
@@ -10533,6 +11040,7 @@ function SystemRoleView() {
   const [rfUsers, setRfUsers] = useState('0');
   const [rfMenuMode, setRfMenuMode] = useState<'inherit' | 'custom'>('inherit');
   const [rfMenuChecked, setRfMenuChecked] = useState<Set<string>>(() => new Set());
+  const [roleDeleteConfirm, setRoleDeleteConfirm] = useState<SysRole | null>(null);
 
   const allMenuIds = useMemo(
     () => ADMIN_ROLE_MENU_OPTIONS.flatMap((g) => g.items.map((i) => i.id)),
@@ -10562,7 +11070,7 @@ function SystemRoleView() {
       }));
       setRoles(mapped);
     } catch (e) {
-      setError(e instanceof Error ? e.message : '加载失败');
+      setError(userFacingApiError(e, '加载失败'));
       setRoles([]);
     } finally {
       setLoading(false);
@@ -10640,20 +11148,26 @@ function SystemRoleView() {
       setDialog(null);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : '保存失败');
+      setError(userFacingApiError(e, '保存失败'));
     } finally {
       setSaving(false);
     }
   };
 
-  const deleteRole = async (r: SysRole) => {
-    if (!window.confirm(`确定删除角色「${r.name}」？`)) return;
+  const requestDeleteRole = (r: SysRole) => {
+    setRoleDeleteConfirm(r);
+  };
+
+  const runDeleteRoleConfirmed = async () => {
+    const r = roleDeleteConfirm;
+    if (!r) return;
+    setRoleDeleteConfirm(null);
     setError(null);
     try {
       await adminFetchJson(`/api/roles/${encodeURIComponent(r.id)}`, { method: 'DELETE' });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : '删除失败');
+      setError(userFacingApiError(e, '删除失败'));
     }
   };
 
@@ -10740,7 +11254,7 @@ function SystemRoleView() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => void deleteRole(role)}
+                      onClick={() => requestDeleteRole(role)}
                       className="text-red-600 hover:text-red-800 font-medium text-xs"
                     >
                       删除
@@ -10851,6 +11365,15 @@ function SystemRoleView() {
           ) : null}
         </div>
       </SystemCrudModal>
+      <AdminConfirmModal
+        open={Boolean(roleDeleteConfirm)}
+        title="删除角色"
+        message={roleDeleteConfirm ? `确定删除角色「${roleDeleteConfirm.name}」？` : ''}
+        confirmLabel="删除"
+        danger
+        onCancel={() => setRoleDeleteConfirm(null)}
+        onConfirm={() => void runDeleteRoleConfirmed()}
+      />
     </div>
   );
 }
@@ -10887,6 +11410,7 @@ function SystemMenuView() {
   const [mfIcon, setMfIcon] = useState('Briefcase');
   const [mfPath, setMfPath] = useState('/');
   const [mfLevel, setMfLevel] = useState('0');
+  const [menuDeleteConfirm, setMenuDeleteConfirm] = useState<Menu | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -10895,7 +11419,7 @@ function SystemMenuView() {
       const rows = await adminFetchJson<Array<Record<string, unknown>>>('/api/menus');
       setMenus(rows.map(mapMenuRow));
     } catch (e) {
-      setError(e instanceof Error ? e.message : '加载失败');
+      setError(userFacingApiError(e, '加载失败'));
       setMenus([]);
     } finally {
       setLoading(false);
@@ -11034,20 +11558,26 @@ function SystemMenuView() {
       setDialog(null);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : '保存失败');
+      setError(userFacingApiError(e, '保存失败'));
     } finally {
       setSaving(false);
     }
   };
 
-  const deleteMenu = async (m: Menu) => {
-    if (!window.confirm(`确定删除菜单「${m.name}」？`)) return;
+  const requestDeleteMenu = (m: Menu) => {
+    setMenuDeleteConfirm(m);
+  };
+
+  const runDeleteMenuConfirmed = async () => {
+    const m = menuDeleteConfirm;
+    if (!m) return;
+    setMenuDeleteConfirm(null);
     setError(null);
     try {
       await adminFetchJson(`/api/menus/${encodeURIComponent(m.id)}`, { method: 'DELETE' });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : '删除失败');
+      setError(userFacingApiError(e, '删除失败'));
     }
   };
 
@@ -11142,7 +11672,7 @@ function SystemMenuView() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => void deleteMenu(menu)}
+                        onClick={() => requestDeleteMenu(menu)}
                         className="text-red-600 hover:text-red-800 font-medium text-xs"
                       >
                         删除
@@ -11240,6 +11770,15 @@ function SystemMenuView() {
           <input className={systemFieldClass} value={mfPath} onChange={(e) => setMfPath(e.target.value)} />
         </div>
       </SystemCrudModal>
+      <AdminConfirmModal
+        open={Boolean(menuDeleteConfirm)}
+        title="删除菜单"
+        message={menuDeleteConfirm ? `确定删除菜单「${menuDeleteConfirm.name}」？` : ''}
+        confirmLabel="删除"
+        danger
+        onCancel={() => setMenuDeleteConfirm(null)}
+        onConfirm={() => void runDeleteMenuConfirmed()}
+      />
     </div>
   );
 }

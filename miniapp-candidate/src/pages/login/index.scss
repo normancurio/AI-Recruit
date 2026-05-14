@@ -55,10 +55,28 @@ page {
   gap: 12px;
 }
 
+.label-row {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .label {
   font-size: 26px;
   color: #334155;
   font-weight: 600;
+}
+
+.invite-test-hint {
+  font-size: 22px;
+  color: #047857;
+  font-weight: 500;
+  padding: 2px 12px;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.12);
 }
 
 .required-star {

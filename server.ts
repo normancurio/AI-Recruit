@@ -379,7 +379,7 @@ async function startServer() {
       const [rows] = await adminPool.query('SELECT * FROM clients');
       res.json(rows);
     } catch {
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -504,7 +504,7 @@ async function startServer() {
       }
       res.json(result);
     } catch {
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -606,7 +606,7 @@ async function startServer() {
         return;
       }
       console.error('[POST /api/projects]', e);
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -691,7 +691,7 @@ async function startServer() {
       res.json({ ok: true });
     } catch (e) {
       console.error('[PATCH /api/projects/:projectId]', e);
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -710,7 +710,7 @@ async function startServer() {
       res.json({ ok: true });
     } catch (e) {
       console.error('[DELETE /api/projects/:projectId]', e);
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -735,7 +735,7 @@ async function startServer() {
       res.json({ jdText });
     } catch (e) {
       console.error('[POST /api/jobs/generate-jd]', e);
-      res.status(500).json({ message: e instanceof Error ? e.message : '生成失败' });
+      res.status(500).json({ message: '生成岗位描述失败，请稍后重试或检查大模型配置。' });
     }
   });
 
@@ -844,7 +844,7 @@ async function startServer() {
         return;
       }
       console.error('[POST /api/jobs]', e);
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -953,7 +953,7 @@ async function startServer() {
         return;
       }
       console.error('[PATCH /api/jobs]', e);
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -999,7 +999,7 @@ async function startServer() {
       res.json({ ok: true });
     } catch (e) {
       console.error('[POST /api/jobs/:jobCode/claim]', e);
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1026,7 +1026,7 @@ async function startServer() {
         return;
       }
       console.error('[DELETE /api/jobs]', e);
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1035,7 +1035,7 @@ async function startServer() {
       const [rows] = await adminPool.query('SELECT * FROM resumes');
       res.json(rows);
     } catch {
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1044,7 +1044,7 @@ async function startServer() {
       const [rows] = await adminPool.query('SELECT * FROM applications');
       res.json(rows);
     } catch {
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1055,7 +1055,7 @@ async function startServer() {
       );
       res.json(rows);
     } catch {
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1116,7 +1116,7 @@ async function startServer() {
         return;
       }
       console.error('[POST /api/depts]', e);
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1188,7 +1188,7 @@ async function startServer() {
         return;
       }
       console.error('[PATCH /api/depts/:id]', e);
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1219,7 +1219,7 @@ async function startServer() {
       }
       res.json({ ok: true });
     } catch {
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1230,7 +1230,7 @@ async function startServer() {
       );
       res.json(rows);
     } catch {
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1273,7 +1273,7 @@ async function startServer() {
         return;
       }
       console.error('[POST /api/users]', e);
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1307,7 +1307,7 @@ async function startServer() {
           return;
         }
       } catch {
-        res.status(500).json({ message: 'db error' });
+        res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
         return;
       }
     }
@@ -1373,7 +1373,7 @@ async function startServer() {
         return;
       }
       console.error('[PATCH /api/users]', e);
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1391,7 +1391,7 @@ async function startServer() {
       }
       res.json({ ok: true });
     } catch {
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1400,7 +1400,7 @@ async function startServer() {
       const [rows] = await adminPool.query('SELECT * FROM roles ORDER BY id ASC');
       res.json(rows);
     } catch {
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1447,7 +1447,7 @@ async function startServer() {
         return;
       }
       console.error('[POST /api/roles]', e);
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1507,7 +1507,7 @@ async function startServer() {
       }
       res.json({ ok: true });
     } catch {
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1525,7 +1525,7 @@ async function startServer() {
       }
       res.json({ ok: true });
     } catch {
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1534,7 +1534,7 @@ async function startServer() {
       const [rows] = await adminPool.query('SELECT * FROM menus ORDER BY level ASC, id ASC');
       res.json(rows);
     } catch {
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1563,7 +1563,7 @@ async function startServer() {
         }
         lv = (Number((prows[0] as { level?: number }).level) || 0) + 1;
       } catch {
-        res.status(500).json({ message: 'db error' });
+        res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
         return;
       }
     } else {
@@ -1582,7 +1582,7 @@ async function startServer() {
         return;
       }
       console.error('[POST /api/menus]', e);
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1639,7 +1639,7 @@ async function startServer() {
           patches.push('level = ?');
           vals.push(pl + 1);
         } catch {
-          res.status(500).json({ message: 'db error' });
+          res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
           return;
         }
       } else {
@@ -1671,7 +1671,7 @@ async function startServer() {
       }
       res.json({ ok: true });
     } catch {
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 
@@ -1689,7 +1689,7 @@ async function startServer() {
       }
       res.json({ ok: true });
     } catch {
-      res.status(500).json({ message: 'db error' });
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
   });
 

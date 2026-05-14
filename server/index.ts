@@ -1533,7 +1533,7 @@ function fallbackResumeScreening(resumeText: string, jdText: string, jobTitle: s
     summary:
       `（未调用大模型或调用失败：仅根据岗位 JD 与简历文本的关键词重叠度估算分数，仅供参考。）\n` +
       `目标岗位：${jobTitle || '—'}\n` +
-      `若要结构化 AI 评估：在根目录 .env.local 配置 DASHSCOPE_API_KEY（阿里云百炼），可选 QWEN_RESUME_MODEL，重启 npm run dev:api 后重新筛查。`,
+      `若要结构化 AI 评估：在根目录 .env.local 配置 DASHSCOPE_API_KEY（阿里云百炼）；可选 QWEN_RESUME_MODEL（未设置时默认 qwen-turbo，与面试出题模型无关），重启 npm run dev:api 后重新筛查。`,
     ...dims,
     evaluationJson: JSON.stringify(fallbackEval)
   }
@@ -1579,10 +1579,8 @@ async function runResumeScreeningWithAi(params: {
 }): Promise<ResumeScreeningAiResult | null> {
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
   if (!apiKey) return null
-  const model =
-    process.env.QWEN_RESUME_MODEL?.trim() ||
-    process.env.QWEN_QUESTION_MODEL?.trim() ||
-    'qwen-turbo'
+  /** 与面试题模型分离：未单独配置时固定用较快模型，避免 QWEN_QUESTION_MODEL 用 plus 时上传简历与出题同等延迟 */
+  const model = process.env.QWEN_RESUME_MODEL?.trim() || 'qwen-turbo'
   const { userPrompt, systemPrompt } = buildResumeEvalPromptForServer(params)
   const data = await dashScopeChatCompletions({
     model,
@@ -2068,12 +2066,12 @@ app.get('/api/health', async (_, res) => {
 
 app.post('/api/wechat/login', async (req, res) => {
   const code = String(req.body?.code || '').trim()
-  if (!code) return res.status(400).json({ message: 'code required' })
+  if (!code) return res.status(400).json({ message: '缺少登录临时凭证（code）' })
 
   const wechatEnv = checkWechatEnv()
   if (!wechatEnv.ok) {
     return res.status(500).json({
-      message: 'WECHAT_APPID / WECHAT_SECRET not configured'
+      message: '未配置微信小程序 AppID 或 AppSecret（WECHAT_APPID / WECHAT_SECRET）'
     })
   }
 
@@ -2091,9 +2089,12 @@ app.post('/api/wechat/login', async (req, res) => {
     const err = error as Error & { wechat?: unknown }
     flowLog('wechat/login 失败', false, err.message)
     if (err.message === 'code2Session failed') {
-      return res.status(502).json({ message: err.message, wechat: err.wechat })
+      return res.status(502).json({
+        message: '微信服务端返回异常，请稍后重试或核对 AppSecret 与网络环境。',
+        wechat: err.wechat
+      })
     }
-    res.status(500).json({ message: 'request code2Session error' })
+    res.status(500).json({ message: '微信登录态换取失败，请稍后重试' })
   }
 })
 
@@ -2113,49 +2114,49 @@ app.post('/api/wechat/phone', async (req, res) => {
   const openid = String(req.body?.openid || '').trim()
   const encryptedData = String(req.body?.encryptedData || '').trim()
   const iv = String(req.body?.iv || '').trim()
-  if (!openid || !encryptedData || !iv) return res.status(400).json({ message: 'invalid params' })
+  if (!openid || !encryptedData || !iv) return res.status(400).json({ message: '请求参数无效' })
 
   const appId = process.env.WECHAT_APPID || ''
-  if (!appId) return res.status(500).json({ message: 'WECHAT_APPID not configured' })
+  if (!appId) return res.status(500).json({ message: '未配置微信小程序 AppID（WECHAT_APPID）' })
 
   const me = await getUserProfileByOpenId({ appid: appId, openid })
-  if (!me.userId) return res.status(400).json({ message: 'user not found, please wx.login again' })
-  if (!me.sessionKey) return res.status(400).json({ message: 'sessionKey missing, please wx.login again' })
+  if (!me.userId) return res.status(400).json({ message: '未找到用户，请先完成 wx.login 后再试' })
+  if (!me.sessionKey) return res.status(400).json({ message: '缺少会话密钥，请重新调用 wx.login 后再试' })
 
   try {
     const data = decryptWechatPhone({ sessionKey: me.sessionKey, encryptedData, iv })
     if (appId && data?.watermark?.appid && data.watermark.appid !== appId) {
-      return res.status(400).json({ message: 'watermark appid mismatch' })
+      return res.status(400).json({ message: '数据水印与当前小程序 AppID 不一致' })
     }
     const phone = String(data.purePhoneNumber || data.phoneNumber || '').trim()
-    if (!phone) return res.status(400).json({ message: 'phone missing' })
+    if (!phone) return res.status(400).json({ message: '未解析到手机号' })
 
     const { role, phone: storedPhone } = await bindUserPhoneAndRole({ appid: appId, openid, phone })
     res.json({ data: { phone: storedPhone, role } })
   } catch (e) {
-    res.status(400).json({ message: 'decrypt phone failed' })
+    res.status(400).json({ message: '手机号解密失败' })
   }
 })
 
 app.get('/api/user/me', (req, res) => {
   const openid = String(req.query.openid || '').trim()
-  if (!openid) return res.status(400).json({ message: 'openid required' })
+  if (!openid) return res.status(400).json({ message: '缺少 openid' })
   const appid = process.env.WECHAT_APPID || ''
-  if (!appid) return res.status(500).json({ message: 'WECHAT_APPID not configured' })
+  if (!appid) return res.status(500).json({ message: '未配置微信小程序 AppID（WECHAT_APPID）' })
   getUserProfileByOpenId({ appid, openid })
     .then((u) => res.json({ data: { openid: u.openid, role: u.role, phone: u.phone } }))
-    .catch(() => res.status(500).json({ message: 'get profile failed' }))
+    .catch(() => res.status(500).json({ message: '获取用户信息失败' }))
 })
 
 app.post('/api/user/bind-phone', (req, res) => {
   const openid = String(req.body?.openid || '').trim()
   const phone = String(req.body?.phone || '').trim()
-  if (!openid || !phone) return res.status(400).json({ message: 'invalid params' })
+  if (!openid || !phone) return res.status(400).json({ message: '请求参数无效' })
   const appid = process.env.WECHAT_APPID || ''
-  if (!appid) return res.status(500).json({ message: 'WECHAT_APPID not configured' })
+  if (!appid) return res.status(500).json({ message: '未配置微信小程序 AppID（WECHAT_APPID）' })
   bindUserPhoneAndRole({ appid, openid, phone })
     .then((r) => res.json({ data: r }))
-    .catch(() => res.status(500).json({ message: 'bind phone failed' }))
+    .catch(() => res.status(500).json({ message: '绑定手机号失败' }))
 })
 
 const ADMIN_SESSION_TTL_SEC = Number(process.env.ADMIN_SESSION_TTL_SEC || 60 * 60 * 24 * 7)
@@ -2463,13 +2464,13 @@ app.post('/api/admin/login', async (req, res) => {
   if (!adminSessionPersistenceConfigured()) {
     return res.status(503).json({
       message:
-        'admin session not configured: set REDIS_HOST or REDIS_URL for Redis sessions, or ADMIN_SESSION_SECRET (or ADMIN_API_TOKEN) for signed tokens'
+        '管理端会话未配置：请设置 REDIS_HOST 或 REDIS_URL 以使用 Redis 会话，或设置 ADMIN_SESSION_SECRET（或 ADMIN_API_TOKEN）以使用签名令牌。'
     })
   }
   const username = String(req.body?.username || '').trim()
   const password = String(req.body?.password ?? '')
   if (!username || !password) {
-    return res.status(400).json({ message: 'username and password required' })
+    return res.status(400).json({ message: '请输入用户名和密码' })
   }
 
   if (adminRedisConfigured()) {
@@ -2500,11 +2501,11 @@ app.post('/api/admin/login', async (req, res) => {
     } | undefined
     if (row && String(row.password_hash || '').trim()) {
       if (!verifyAdminPassword(password, String(row.password_hash))) {
-        return res.status(401).json({ message: 'invalid credentials' })
+        return res.status(401).json({ message: '用户名或密码错误' })
       }
       const st = String(row.status ?? '').trim()
       if (st && st !== '正常') {
-        return res.status(403).json({ message: 'account disabled' })
+        return res.status(403).json({ message: '账号已停用' })
       }
       const uid = String(row.id || '').trim()
       const un = String(row.username || username).trim()
@@ -2525,10 +2526,10 @@ app.post('/api/admin/login', async (req, res) => {
         return res.json({ data: { token: redisTok, expiresInSec: ADMIN_SESSION_TTL_SEC, user: userPayload } })
       }
       if (!adminSessionSigningConfigured()) {
-        return res.status(503).json({ message: 'Redis session unavailable and no ADMIN_SESSION_SECRET for token fallback' })
+        return res.status(503).json({ message: 'Redis 会话不可用且未配置 ADMIN_SESSION_SECRET，无法签发令牌' })
       }
       const token = signAdminSessionToken(uid || un, un)
-      if (!token) return res.status(500).json({ message: 'session sign failed' })
+      if (!token) return res.status(500).json({ message: '会话令牌签发失败' })
       return res.json({ data: { token, expiresInSec: ADMIN_SESSION_TTL_SEC, user: userPayload } })
     }
   } catch {
@@ -2538,13 +2539,13 @@ app.post('/api/admin/login', async (req, res) => {
   if (!envAdminPasswordLoginConfigured()) {
     return res.status(401).json({
       message:
-        'invalid credentials（请确认管理库 users.username / password_hash；若未使用库表登录可配置 ADMIN_USERNAME + ADMIN_PASSWORD）'
+        '登录失败：未找到可用账号或用户名/密码错误。请确认管理库 users 表中的用户名与密码哈希，或在环境中配置 ADMIN_USERNAME 与 ADMIN_PASSWORD。'
     })
   }
   const eu = String(process.env.ADMIN_USERNAME || '').trim()
   const ep = String(process.env.ADMIN_PASSWORD || '')
   if (username !== eu || password !== ep) {
-    return res.status(401).json({ message: 'invalid credentials' })
+    return res.status(401).json({ message: '用户名或密码错误' })
   }
   const envUser = { name: '环境账号', username: eu, uiRole: 'admin' as const }
   const redisTok = await createAdminRedisSession(eu, eu)
@@ -2552,10 +2553,10 @@ app.post('/api/admin/login', async (req, res) => {
     return res.json({ data: { token: redisTok, expiresInSec: ADMIN_SESSION_TTL_SEC, user: envUser } })
   }
   if (!adminSessionSigningConfigured()) {
-    return res.status(503).json({ message: 'Redis session unavailable and no ADMIN_SESSION_SECRET for token fallback' })
+    return res.status(503).json({ message: 'Redis 会话不可用且未配置 ADMIN_SESSION_SECRET，无法签发令牌' })
   }
   const token = signAdminSessionTokenLegacy(username)
-  if (!token) return res.status(500).json({ message: 'session sign failed' })
+  if (!token) return res.status(500).json({ message: '会话令牌签发失败' })
   res.json({ data: { token, expiresInSec: ADMIN_SESSION_TTL_SEC, user: envUser } })
 })
 
@@ -2564,7 +2565,7 @@ async function assertAdminToken(req: express.Request, res: express.Response): Pr
   if (!legacy && !adminSessionPersistenceConfigured()) {
     res.status(503).json({
       message:
-        'Admin auth not configured: set ADMIN_API_TOKEN, or REDIS_* for sessions, or ADMIN_SESSION_SECRET for signed sessions'
+        '管理端鉴权未配置：请设置 ADMIN_API_TOKEN，或配置 REDIS_* 以使用会话，或设置 ADMIN_SESSION_SECRET 以使用签名会话。'
     })
     return false
   }
@@ -2573,13 +2574,13 @@ async function assertAdminToken(req: express.Request, res: express.Response): Pr
   const headerToken = String(req.headers['x-admin-token'] || '').trim()
   const token = bearer || headerToken
   if (!token) {
-    res.status(401).json({ message: 'unauthorized' })
+    res.status(401).json({ message: '未登录或登录已失效' })
     return false
   }
   if (legacy && token === legacy) return true
   if (token.includes('.') && verifyAdminSessionToken(token)) return true
   if (await verifyAdminRedisSession(token)) return true
-  res.status(401).json({ message: 'unauthorized' })
+  res.status(401).json({ message: '未登录或登录已失效' })
   return false
 }
 
@@ -2649,14 +2650,14 @@ app.post('/api/admin/interviewer/mark-phone', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const raw = String(req.body?.phone || '').trim()
   const phone = normalizePhoneForMatch(raw)
-  if (!phone) return res.status(400).json({ message: 'phone required' })
+  if (!phone) return res.status(400).json({ message: '请填写手机号' })
   mysqlPool
     .query(
       'INSERT INTO interviewer_phone_whitelist(phone, enabled, remark) VALUES (?,1,NULL) ON DUPLICATE KEY UPDATE enabled=1, updated_at=NOW()',
       [phone]
     )
     .then(() => res.json({ ok: true }))
-    .catch(() => res.status(500).json({ message: 'db error' }))
+    .catch(() => res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' }))
 })
 
 function maskPhoneDisplay(phone: string | null | undefined) {
@@ -2975,7 +2976,7 @@ app.get('/api/admin/jobs', async (req, res) => {
     })
   } catch (e) {
     console.error('[GET /api/admin/jobs]', e)
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -3003,7 +3004,7 @@ app.get('/api/admin/projects', async (req, res) => {
       return res.status(503).json({ message: 'projects 表未创建' })
     }
     console.error('[GET /api/admin/projects]', e)
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -3013,7 +3014,7 @@ app.post('/api/admin/jobs', async (req, res) => {
   let jobCode = String(req.body?.jobCode || '').trim().toUpperCase()
   if (!titleNorm) {
     return res.status(400).json({
-      message: String(req.body?.title || '').trim() ? jobTitleValidationMessage() : 'title required'
+      message: String(req.body?.title || '').trim() ? jobTitleValidationMessage() : '请填写岗位名称'
     })
   }
   if (!jobCode) {
@@ -3031,7 +3032,7 @@ app.post('/api/admin/jobs', async (req, res) => {
   const location = String(req.body?.location ?? '').trim()
   const skills = String(req.body?.skills ?? '').trim()
   const levelRaw = String(req.body?.level ?? '').trim()
-  if (!levelRaw) return res.status(400).json({ message: 'level required' })
+  if (!levelRaw) return res.status(400).json({ message: '请填写岗位级别' })
   const levelNorm = normalizeJobLevel(levelRaw)
   if (!levelNorm) return res.status(400).json({ message: jobLevelValidationMessage() })
   const salary = String(req.body?.salary ?? '').trim()
@@ -3056,22 +3057,22 @@ app.post('/api/admin/jobs', async (req, res) => {
     )
     res.json({ data: { jobCode } })
   } catch (e: any) {
-    if (e?.code === 'ER_DUP_ENTRY') return res.status(409).json({ message: 'job_code exists' })
+    if (e?.code === 'ER_DUP_ENTRY') return res.status(409).json({ message: '该岗位编码已存在' })
     if (e?.code === 'ER_NO_REFERENCED_ROW_2') {
-      return res.status(400).json({ message: 'projectId not found in projects' })
+      return res.status(400).json({ message: '所选项目不存在' })
     }
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
 app.patch('/api/admin/jobs/:jobCode', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const jobCode = String(req.params.jobCode || '').trim().toUpperCase()
-  if (!jobCode) return res.status(400).json({ message: 'jobCode required' })
+  if (!jobCode) return res.status(400).json({ message: '请填写岗位编码（jobCode）' })
   const titleIn = req.body?.title !== undefined
   const titleNorm = titleIn ? normalizeJobTitle(String(req.body.title)) : undefined
   if (titleIn) {
-    if (!String(req.body.title ?? '').trim()) return res.status(400).json({ message: 'title required' })
+    if (!String(req.body.title ?? '').trim()) return res.status(400).json({ message: '请填写岗位名称' })
     if (!titleNorm) return res.status(400).json({ message: jobTitleValidationMessage() })
   }
   const department = req.body?.department !== undefined ? String(req.body.department).trim() : null
@@ -3095,7 +3096,7 @@ app.patch('/api/admin/jobs/:jobCode', async (req, res) => {
   let levelNorm: string | undefined
   if (levelIn) {
     const raw = String(req.body.level ?? '').trim()
-    if (!raw) return res.status(400).json({ message: 'level required' })
+    if (!raw) return res.status(400).json({ message: '请填写岗位级别' })
     const ln = normalizeJobLevel(raw)
     if (!ln) return res.status(400).json({ message: jobLevelValidationMessage() })
     levelNorm = ln
@@ -3146,19 +3147,19 @@ app.patch('/api/admin/jobs/:jobCode', async (req, res) => {
       fields.push('recruiters=CAST(? AS JSON)')
       vals.push(recruiters)
     }
-    if (!fields.length) return res.status(400).json({ message: 'no fields to update' })
+    if (!fields.length) return res.status(400).json({ message: '没有可更新的字段' })
     vals.push(jobCode)
     const [hdr] = await mysqlPool.query<ResultSetHeader>(
       `UPDATE jobs SET ${fields.join(', ')} WHERE job_code=?`,
       vals
     )
-    if (!hdr.affectedRows) return res.status(404).json({ message: 'job not found' })
+    if (!hdr.affectedRows) return res.status(404).json({ message: '未找到对应岗位' })
     res.json({ ok: true })
   } catch (e: any) {
     if (e?.code === 'ER_NO_REFERENCED_ROW_2') {
-      return res.status(400).json({ message: 'projectId not found in projects' })
+      return res.status(400).json({ message: '所选项目不存在' })
     }
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -3648,12 +3649,12 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
           (e2 as { message?: string })?.message,
           e2
         )
-        return res.status(500).json({ message: 'db error' })
+        return res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
       }
     }
     const ex = e as { code?: string; errno?: number; message?: string }
     console.error('[GET /api/admin/resume-screenings]', ex.code, ex.errno, ex.message, e)
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -3690,7 +3691,7 @@ app.get('/api/admin/resume-library', async (req, res) => {
       return res.status(503).json({ message: 'resume_screenings 表未创建，请执行 server/migration_resume_screenings.sql' })
     }
     console.error('[GET /api/admin/resume-library]', (e as { message?: string })?.message, e)
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -3698,7 +3699,7 @@ app.get('/api/admin/resume-library/:id/delivery-history', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const idTok = normalizeResumeScreeningPkToken(req.params.id)
   if (!idTok) {
-    return res.status(400).json({ message: 'invalid id' })
+    return res.status(400).json({ message: 'ID 无效或格式不正确' })
   }
   const token = extractAdminRequestToken(req)
   const projJoin = resumeScreeningsProjectJoinSql()
@@ -3742,7 +3743,7 @@ app.get('/api/admin/resume-library/:id/delivery-history', async (req, res) => {
         return res.status(503).json({ message: 'resume_screenings 表未创建' })
       }
       console.error('[GET /api/admin/resume-library/:id/delivery-history] anchor', e)
-      return res.status(500).json({ message: 'db error' })
+      return res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
     }
   }
 
@@ -3802,7 +3803,7 @@ app.get('/api/admin/resume-library/:id/delivery-history', async (req, res) => {
       return res.status(503).json({ message: 'resume_screenings 表未创建' })
     }
     console.error('[GET /api/admin/resume-library/:id/delivery-history]', e)
-    return res.status(500).json({ message: 'db error' })
+    return res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 
   const jobCodes = (rows || []).map((r) => String((r as { job_code?: unknown }).job_code || '').trim()).filter(Boolean)
@@ -3871,7 +3872,7 @@ app.get('/api/admin/job-role-bases', async (req, res) => {
       })
     }
     console.error('[GET /api/admin/job-role-bases]', e)
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -3915,7 +3916,7 @@ app.post('/api/admin/job-role-bases', async (req, res) => {
       return res.status(503).json({ message: '缺少标准岗位表，请执行迁移 SQL' })
     }
     console.error('[POST /api/admin/job-role-bases]', e)
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -3928,7 +3929,7 @@ app.patch('/api/admin/job-role-bases/:id', async (req, res) => {
   }
   const idTok = String(req.params.id || '').trim()
   if (!/^\d{1,20}$/.test(idTok)) {
-    return res.status(400).json({ message: 'invalid id' })
+    return res.status(400).json({ message: 'ID 无效或格式不正确' })
   }
   const hasName = req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'name')
   const hasSort =
@@ -3983,7 +3984,7 @@ app.patch('/api/admin/job-role-bases/:id', async (req, res) => {
       return res.status(400).json({ message: '该岗位名称已存在' })
     }
     console.error('[PATCH /api/admin/job-role-bases/:id]', e)
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -3996,7 +3997,7 @@ app.delete('/api/admin/job-role-bases/:id', async (req, res) => {
   }
   const idTok = String(req.params.id || '').trim()
   if (!/^\d{1,20}$/.test(idTok)) {
-    return res.status(400).json({ message: 'invalid id' })
+    return res.status(400).json({ message: 'ID 无效或格式不正确' })
   }
   try {
     const [hdr] = await mysqlPool.query<ResultSetHeader>('DELETE FROM standard_job_role_bases WHERE id = ?', [idTok])
@@ -4007,7 +4008,7 @@ app.delete('/api/admin/job-role-bases/:id', async (req, res) => {
     res.json({ ok: true })
   } catch (e) {
     console.error('[DELETE /api/admin/job-role-bases/:id]', e)
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -4016,7 +4017,7 @@ app.patch('/api/admin/resume-screenings/:id', async (req, res) => {
   const idRaw = String(req.params.id || '').trim()
   const idNum = Number(idRaw)
   if (!Number.isFinite(idNum) || idNum <= 0) {
-    return res.status(400).json({ message: 'invalid id' })
+    return res.status(400).json({ message: 'ID 无效或格式不正确' })
   }
   const hasName = req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'candidateName')
   const hasPhone = req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'candidatePhone')
@@ -4109,7 +4110,7 @@ app.patch('/api/admin/resume-screenings/:id', async (req, res) => {
       })
     }
     console.error('[PATCH /api/admin/resume-screenings/:id]', ex.message, e)
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -4222,7 +4223,7 @@ app.post('/api/admin/resume-screenings/delete', async (req, res) => {
 app.get('/api/admin/resume-screenings/:id/profile', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const idNum = Number(String(req.params.id || '').trim())
-  if (!Number.isFinite(idNum) || idNum <= 0) return res.status(400).json({ message: 'invalid id' })
+  if (!Number.isFinite(idNum) || idNum <= 0) return res.status(400).json({ message: 'ID 无效或格式不正确' })
   try {
     const [rows] = await mysqlPool.query<any[]>(
       `SELECT screening_id, candidate_name, gender, age, work_experience_years, job_title, school, candidate_phone,
@@ -4285,14 +4286,14 @@ app.get('/api/admin/resume-screenings/:id/profile', async (req, res) => {
     if (ex.code === 'ER_NO_SUCH_TABLE') {
       return res.status(503).json({ message: '缺少结构化详情表，请执行 server/migration_resume_screening_profiles.sql' })
     }
-    return res.status(500).json({ message: 'db error' })
+    return res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
 app.patch('/api/admin/resume-screenings/:id/profile', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const idNum = Number(String(req.params.id || '').trim())
-  if (!Number.isFinite(idNum) || idNum <= 0) return res.status(400).json({ message: 'invalid id' })
+  if (!Number.isFinite(idNum) || idNum <= 0) return res.status(400).json({ message: 'ID 无效或格式不正确' })
   const row = resumeProfileRowFromValues({
     candidateName: req.body?.candidate_name,
     profile: req.body
@@ -4373,14 +4374,14 @@ app.patch('/api/admin/resume-screenings/:id/profile', async (req, res) => {
     if (ex.code === 'ER_NO_SUCH_TABLE') {
       return res.status(503).json({ message: '缺少结构化详情表，请执行 server/migration_resume_screening_profiles.sql' })
     }
-    return res.status(500).json({ message: 'db error' })
+    return res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
 app.get('/api/admin/resume-screenings/:id/file', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const idNum = Number(String(req.params.id || '').trim())
-  if (!Number.isFinite(idNum) || idNum <= 0) return res.status(400).json({ message: 'invalid id' })
+  if (!Number.isFinite(idNum) || idNum <= 0) return res.status(400).json({ message: 'ID 无效或格式不正确' })
   const mode = String(req.query.mode || '').trim().toLowerCase()
   const download = mode === 'download'
   try {
@@ -4407,7 +4408,7 @@ app.get('/api/admin/resume-screenings/:id/file', async (req, res) => {
     if (ex.code === 'ER_NO_SUCH_TABLE') {
       return res.status(503).json({ message: '缺少简历文件表，请执行 server/migration_resume_screening_files.sql' })
     }
-    return res.status(500).json({ message: 'db error' })
+    return res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -4464,7 +4465,7 @@ app.get('/api/admin/workbench-stats', async (req, res) => {
       const [[row]] = await mysqlPool.query<RowDataPacket[]>(
         `SELECT COUNT(*) AS n
          FROM resume_screenings
-         WHERE pipeline_stage = 'resume_done' AND match_score >= 70`
+         WHERE pipeline_stage = 'resume_done'`
       )
       pendingInviteCount = Number(row?.n) || 0
     } catch {}
@@ -4551,7 +4552,7 @@ app.get('/api/admin/workbench-stats', async (req, res) => {
       return res.status(503).json({ message: 'resume_screenings 表未创建，请执行 server/migration_resume_screenings.sql' })
     }
     console.error('[GET /api/admin/workbench-stats]', e)
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -4559,7 +4560,7 @@ app.get('/api/admin/interview-report', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const screeningId = Number(req.query?.screeningId)
   if (!Number.isFinite(screeningId) || screeningId <= 0) {
-    return res.status(400).json({ message: 'screeningId required' })
+    return res.status(400).json({ message: '请提供 screeningId' })
   }
   try {
     const [screenRows] = await mysqlPool.query<any[]>(
@@ -4622,7 +4623,7 @@ app.get('/api/admin/interview-report', async (req, res) => {
     if (code === 'ER_NO_SUCH_TABLE') {
       return res.status(503).json({ message: '缺少 interview_reports 表，请执行 server/migration_interview_reports.sql' })
     }
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -4632,8 +4633,8 @@ app.post(
   async (req, res) => {
     if (!(await assertAdminToken(req, res))) return
     const jobCode = String(req.body?.jobCode || '').trim().toUpperCase()
-    if (!jobCode) return res.status(400).json({ message: 'jobCode required' })
-    if (!req.file?.buffer?.length) return res.status(400).json({ message: 'file required' })
+    if (!jobCode) return res.status(400).json({ message: '请填写岗位编码（jobCode）' })
+    if (!req.file?.buffer?.length) return res.status(400).json({ message: '请上传文件' })
     try {
       const uploadFileName = normalizeMultipartFilename(req.file.originalname).slice(0, 255)
       const actorToken = extractAdminRequestToken(req)
@@ -4645,14 +4646,14 @@ app.post(
         'SELECT title, department, jd_text FROM jobs WHERE job_code=? LIMIT 1',
         [jobCode]
       )
-      if (!jobRows.length) return res.status(404).json({ message: 'job not found' })
+      if (!jobRows.length) return res.status(404).json({ message: '未找到对应岗位' })
       const job = jobRows[0] as { title: string; department: string | null; jd_text: string | null }
       let plain: string
       try {
         plain = await extractResumePlainText(req.file.buffer, uploadFileName, req.file.mimetype || '')
       } catch (ex) {
-        const msg = ex instanceof Error ? ex.message : 'parse failed'
-        return res.status(415).json({ message: msg })
+        flowLog('resume-screen 解析文件', false, ex instanceof Error ? ex.message : 'parse failed')
+        return res.status(415).json({ message: '无法解析该简历文件格式，请尝试 PDF 或 Word 后重试。' })
       }
       if (!plain.trim()) return res.status(422).json({ message: '未能从文件中提取可读文本' })
 
@@ -5109,7 +5110,7 @@ app.post(
         return res.status(503).json({ message: 'resume_screenings 表未创建，请执行 server/migration_resume_screenings.sql' })
       }
       flowLog('resume-screen', false, e instanceof Error ? e.message : 'failed')
-      res.status(500).json({ message: 'screening failed' })
+      res.status(500).json({ message: 'AI 筛查失败，请稍后重试' })
     }
   }
 )
@@ -5179,7 +5180,7 @@ async function markResumeScreeningPipelineInvited(screeningId: number, jobCodeUp
 app.post('/api/admin/invitations', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const jobCode = String(req.body?.jobCode || '').trim().toUpperCase()
-  if (!jobCode) return res.status(400).json({ message: 'jobCode required' })
+  if (!jobCode) return res.status(400).json({ message: '请填写岗位编码（jobCode）' })
   const recruiterCode = String(req.body?.recruiterCode || '').trim()
   const rawDays = Number(req.body?.expiresInDays)
   const days = Number.isFinite(rawDays) && rawDays > 0 ? Math.min(Math.floor(rawDays), 365) : 7
@@ -5187,9 +5188,9 @@ app.post('/api/admin/invitations', async (req, res) => {
   const screeningIdForPipeline = Number.isFinite(screeningIdRaw) && screeningIdRaw > 0 ? screeningIdRaw : 0
   try {
     const [jobs] = await mysqlPool.query<any[]>('SELECT id FROM jobs WHERE job_code=? LIMIT 1', [jobCode])
-    if (!jobs.length) return res.status(404).json({ message: 'job not found' })
+    if (!jobs.length) return res.status(404).json({ message: '未找到对应岗位' })
     const jobId = mysqlRowIdForParam(jobs[0].id)
-    if (jobId == null) return res.status(500).json({ message: 'job id invalid' })
+    if (jobId == null) return res.status(500).json({ message: '岗位数据异常' })
     /** 业务库 users 无 username，仅有 phone 等；HR 后台登录名（如 admin）不能映射到 interviewer_user_id */
     let interviewerUserId: string | number | null = null
     if (recruiterCode) {
@@ -5262,7 +5263,7 @@ app.post('/api/admin/invitations', async (req, res) => {
       }
     }
     console.error('[admin/invitations] allocate failed', lastErr)
-    return res.status(500).json({ message: 'could not allocate invite code' })
+    return res.status(500).json({ message: '无法分配邀请码，请稍后重试' })
   } catch (e: unknown) {
     const err = e as { code?: string; errno?: number; sqlMessage?: string; message?: string }
     console.error('[admin/invitations]', err?.code || err?.message, err?.sqlMessage || '')
@@ -5276,7 +5277,7 @@ app.post('/api/admin/invitations', async (req, res) => {
         message: '外键校验失败：请确认岗位存在于 jobs 表，且业务库 users 与 interviewer 配置一致'
       })
     }
-    res.status(500).json({ message: err?.sqlMessage || err?.message || 'db error' })
+    res.status(500).json({ message: '数据库操作失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -5296,17 +5297,17 @@ app.get('/api/admin/sessions', async (req, res) => {
     )
     res.json({ data: rows })
   } catch {
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
 app.get('/api/admin/session-report', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const sessionId = String(req.query.sessionId || '').trim()
-  if (!sessionId) return res.status(400).json({ message: 'sessionId required' })
+  if (!sessionId) return res.status(400).json({ message: '请提供会话 ID（sessionId）' })
   try {
     const sid = await getSessionInternalId(sessionId)
-    if (!sid) return res.status(404).json({ message: 'session not found' })
+    if (!sid) return res.status(404).json({ message: '未找到会话' })
 
     const [sessRows] = await mysqlPool.query<any[]>(
       `SELECT s.session_id AS sessionId, s.updated_at AS updatedAt,
@@ -5319,7 +5320,7 @@ app.get('/api/admin/session-report', async (req, res) => {
        LIMIT 1`,
       [sessionId]
     )
-    if (!sessRows.length) return res.status(404).json({ message: 'session not found' })
+    if (!sessRows.length) return res.status(404).json({ message: '未找到会话' })
     const meta = sessRows[0]
 
     const [msgRows] = await mysqlPool.query<any[]>(
@@ -5375,19 +5376,19 @@ app.get('/api/admin/session-report', async (req, res) => {
 
     res.json({ data })
   } catch {
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
 // 候选人邀请：返回 pending 且未过期的邀请（定向或全量）
 app.get('/api/candidate/invitations', async (req, res) => {
   const openid = String(req.query.openid || '').trim()
-  if (!openid) return res.status(400).json({ message: 'openid required' })
+  if (!openid) return res.status(400).json({ message: '缺少 openid' })
   const appid = process.env.WECHAT_APPID || ''
-  if (!appid) return res.status(500).json({ message: 'WECHAT_APPID not configured' })
+  if (!appid) return res.status(500).json({ message: '未配置微信小程序 AppID（WECHAT_APPID）' })
 
   const me = await getUserProfileByOpenId({ appid, openid })
-  if (!me.userId) return res.status(400).json({ message: 'user not found' })
+  if (!me.userId) return res.status(400).json({ message: '未找到用户' })
 
   const [rows] = await mysqlPool.query<any[]>(
     `SELECT inv.invite_code AS inviteId, j.job_code AS jobId, j.title AS title, j.department AS department
@@ -5409,12 +5410,12 @@ app.get('/api/candidate/invitations', async (req, res) => {
 app.post('/api/candidate/invitations/accept', async (req, res) => {
   const openid = String(req.body?.openid || '').trim()
   const inviteId = String(req.body?.inviteId || '').trim()
-  if (!openid || !inviteId) return res.status(400).json({ message: 'invalid params' })
+  if (!openid || !inviteId) return res.status(400).json({ message: '请求参数无效' })
   const appid = process.env.WECHAT_APPID || ''
-  if (!appid) return res.status(500).json({ message: 'WECHAT_APPID not configured' })
+  if (!appid) return res.status(500).json({ message: '未配置微信小程序 AppID（WECHAT_APPID）' })
 
   const me = await getUserProfileByOpenId({ appid, openid })
-  if (!me.userId) return res.status(400).json({ message: 'user not found' })
+  if (!me.userId) return res.status(400).json({ message: '未找到用户' })
 
   const conn = await mysqlPool.getConnection()
   try {
@@ -5445,7 +5446,7 @@ app.post('/api/candidate/invitations/accept', async (req, res) => {
     )
     if (!invRows.length) {
       await conn.rollback()
-      return res.status(404).json({ message: 'invite not found' })
+      return res.status(404).json({ message: '未找到邀请' })
     }
 
     const inv = invRows[0]
@@ -5459,7 +5460,7 @@ app.post('/api/candidate/invitations/accept', async (req, res) => {
     )
     if (updHeader.affectedRows !== 1) {
       await conn.rollback()
-      return res.status(409).json({ message: 'invite already processed' })
+      return res.status(409).json({ message: '邀请已处理' })
     }
 
     const sessionId = `${inv.jobCode}-${openid}`
@@ -5498,7 +5499,7 @@ app.post('/api/candidate/invitations/accept', async (req, res) => {
     })
   } catch {
     await conn.rollback()
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   } finally {
     conn.release()
   }
@@ -5513,7 +5514,7 @@ app.post('/api/candidate/validate-invite', async (req, res) => {
       data: { id: resolved.jobCode, title: resolved.title, department: resolved.department }
     })
   } catch {
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -5524,7 +5525,7 @@ app.post('/api/candidate/login-invite', async (req, res) => {
   const name = String(req.body?.name || '').trim()
   const phone = String(req.body?.phone || '').trim()
   if (!code || !inviteCodeRaw || !name) {
-    return res.status(400).json({ message: 'code, inviteCode, name required' })
+    return res.status(400).json({ message: '请填写 code、邀请码与姓名' })
   }
   try {
     flowLog('login-invite 开始', true, `invite=${inviteCodeRaw} name=${name}`)
@@ -5539,7 +5540,7 @@ app.post('/api/candidate/login-invite', async (req, res) => {
       }
     }
     const me = await getUserProfileByOpenId({ appid, openid })
-    if (!me.userId) return res.status(400).json({ message: 'user not found' })
+    if (!me.userId) return res.status(400).json({ message: '未找到用户' })
 
     const resolved = await resolveInviteCode(inviteCodeRaw)
     if (!resolved) return res.status(400).json({ message: '邀请码无效' })
@@ -5595,7 +5596,7 @@ app.post('/api/candidate/login-invite', async (req, res) => {
         )
         if (updHeader.affectedRows !== 1) {
           await conn.rollback()
-          return res.status(409).json({ message: 'invite already processed' })
+          return res.status(409).json({ message: '邀请已处理' })
         }
 
         sessionId = `${inv.jobCode}-${openid}`
@@ -5645,12 +5646,15 @@ app.post('/api/candidate/login-invite', async (req, res) => {
     const err = e as Error & { wechat?: unknown }
     flowLog('login-invite 异常', false, err.message)
     if (err.message === 'WECHAT_ENV') {
-      return res.status(500).json({ message: 'WECHAT_APPID / WECHAT_SECRET not configured' })
+      return res.status(500).json({ message: '未配置微信小程序 AppID 或 AppSecret（WECHAT_APPID / WECHAT_SECRET）' })
     }
     if (err.message === 'code2Session failed') {
-      return res.status(502).json({ message: err.message, wechat: err.wechat })
+      return res.status(502).json({
+        message: '微信服务端返回异常，请稍后重试或核对 AppSecret 与网络环境。',
+        wechat: err.wechat
+      })
     }
-    res.status(500).json({ message: 'login-invite failed' })
+    res.status(500).json({ message: '邀请登录失败，请稍后重试' })
   }
 })
 
@@ -5676,7 +5680,7 @@ async function loadInterviewQuestionContext(params: {
   const row = rows.length ? rows[0] : null
   const fallbackJob = JOBS[jobId as keyof typeof JOBS]
   if (!row && !fallbackJob) {
-    const err = new Error('job not found') as Error & { httpStatus?: number }
+    const err = new Error('未找到对应岗位') as Error & { httpStatus?: number }
     err.httpStatus = 404
     throw err
   }
@@ -5713,7 +5717,7 @@ app.get('/api/candidate/interview-questions', async (req, res) => {
   const candidateName = String(req.query.candidateName || req.query.name || '').trim()
   const resumeScreeningIdRaw = String(req.query.resumeScreeningId || req.query.screeningId || '').trim()
   const phase = String(req.query.phase || '').trim().toLowerCase()
-  if (!jobId) return res.status(400).json({ message: 'jobId required' })
+  if (!jobId) return res.status(400).json({ message: '请提供岗位 ID（jobId）' })
   try {
     flowLog(
       'interview-questions 开始',
@@ -5758,12 +5762,12 @@ app.get('/api/candidate/interview-questions', async (req, res) => {
     res.json({ data: aiQuestions })
   } catch (e) {
     const http = (e as InterviewQuestionsHttpError).httpStatus ?? (e as Error & { httpStatus?: number })?.httpStatus
-    const msg = e instanceof Error ? e.message : 'generate questions failed'
+    const msg = e instanceof Error ? e.message : '生成面试题失败，请稍后重试'
     flowLog('interview-questions 失败', false, msg)
     if (typeof http === 'number' && http >= 400 && http < 600) {
       return res.status(http).json({ message: msg })
     }
-    res.status(500).json({ message: 'generate questions failed' })
+    res.status(500).json({ message: '生成面试题失败，请稍后重试' })
   }
 })
 
@@ -5773,8 +5777,8 @@ app.post('/api/candidate/interview-questions-rest', async (req, res) => {
   const candidateName = String(req.body?.candidateName || req.body?.name || '').trim()
   const resumeScreeningIdRaw = String(req.body?.resumeScreeningId || req.body?.screeningId || '').trim()
   const firstQuestionText = String(req.body?.firstQuestionText || '').trim()
-  if (!jobId) return res.status(400).json({ message: 'jobId required' })
-  if (!firstQuestionText) return res.status(400).json({ message: 'firstQuestionText required' })
+  if (!jobId) return res.status(400).json({ message: '请提供岗位 ID（jobId）' })
+  if (!firstQuestionText) return res.status(400).json({ message: '请填写首题题干（firstQuestionText）' })
   try {
     flowLog(
       'interview-questions-rest 开始',
@@ -5808,12 +5812,12 @@ app.post('/api/candidate/interview-questions-rest', async (req, res) => {
     })
   } catch (e) {
     const http = (e as InterviewQuestionsHttpError).httpStatus ?? (e as Error & { httpStatus?: number })?.httpStatus
-    const msg = e instanceof Error ? e.message : 'generate questions failed'
+    const msg = e instanceof Error ? e.message : '生成面试题失败，请稍后重试'
     flowLog('interview-questions-rest 失败', false, msg)
     if (typeof http === 'number' && http >= 400 && http < 600) {
       return res.status(http).json({ message: msg })
     }
-    res.status(500).json({ message: 'generate questions failed' })
+    res.status(500).json({ message: '生成面试题失败，请稍后重试' })
   }
 })
 
@@ -5823,16 +5827,16 @@ app.post(
   uploadAudioMemory.single('file'),
   async (req, res) => {
     if (!req.file?.buffer?.length) {
-      return res.status(400).json({ message: 'file required' })
+      return res.status(400).json({ message: '请上传文件' })
     }
     const sessionId = String(req.body?.sessionId || '').trim()
     const questionId = String(req.body?.questionId || '').trim()
     const segmentIndex = Number.isFinite(Number(req.body?.segmentIndex)) ? Number(req.body.segmentIndex) : 0
     if (!sessionId) {
-      return res.status(400).json({ message: 'sessionId required' })
+      return res.status(400).json({ message: '请提供会话 ID（sessionId）' })
     }
     if (!process.env.DASHSCOPE_API_KEY?.trim()) {
-      return res.status(503).json({ message: 'DASHSCOPE_API_KEY not configured' })
+      return res.status(503).json({ message: '未配置大模型密钥（DASHSCOPE_API_KEY）' })
     }
     const mime =
       req.file.mimetype && req.file.mimetype !== 'application/octet-stream'
@@ -5865,8 +5869,8 @@ app.post(
       const text = typeof raw === 'string' ? raw.trim() : ''
       res.json({ data: { sessionId, questionId, segmentIndex, text } })
     } catch (e) {
-      const msg = e instanceof Error ? e.message : 'asr failed'
-      res.status(502).json({ message: msg })
+      flowLog('ai-interview/asr', false, e instanceof Error ? e.message : 'asr failed')
+      res.status(502).json({ message: '语音识别失败，请稍后重试或检查录音格式。' })
     }
   }
 )
@@ -5877,13 +5881,13 @@ app.post('/api/candidate/trtc/credential', (req, res) => {
   const userIdRaw = String(req.body?.userId || '').trim()
   if (!sessionId || !userIdRaw) {
     flowLog('trtc/credential 参数', false, '缺 sessionId 或 userId')
-    return res.status(400).json({ message: 'sessionId and userId required' })
+    return res.status(400).json({ message: '请同时提供 sessionId 与 userId' })
   }
   const sdkAppId = Number(process.env.TRTC_SDK_APP_ID || 0)
   const secretKey = process.env.TRTC_SDK_SECRET_KEY?.trim()
   if (!sdkAppId || !secretKey) {
     flowLog('trtc/credential', false, 'TRTC 未配置')
-    return res.status(503).json({ message: 'TRTC not configured' })
+    return res.status(503).json({ message: '未配置实时音视频（TRTC）' })
   }
   try {
     const userId = sanitizeTrtcUserId(userIdRaw)
@@ -5893,9 +5897,8 @@ app.post('/api/candidate/trtc/credential', (req, res) => {
     flowLog('trtc/credential 签发', true, `session=${sessionId} room=${roomId}`)
     res.json({ data: { sdkAppId, userId, userSig, roomId } })
   } catch (e) {
-    const msg = e instanceof Error ? e.message : 'userSig failed'
-    flowLog('trtc/credential 异常', false, msg)
-    res.status(500).json({ message: msg })
+    flowLog('trtc/credential 异常', false, e instanceof Error ? e.message : 'userSig failed')
+    res.status(500).json({ message: '实时音视频凭证签发失败，请稍后重试。' })
   }
 })
 
@@ -5904,17 +5907,17 @@ app.post('/api/live/session/start', async (req, res) => {
   const jobId = String(req.body?.jobId || '').trim()
   const candidateOpenId = String(req.body?.candidateOpenId || '').trim()
   const questions = Array.isArray(req.body?.questions) ? req.body.questions : []
-  if (!sessionId) return res.status(400).json({ message: 'sessionId required' })
+  if (!sessionId) return res.status(400).json({ message: '请提供会话 ID（sessionId）' })
 
   const wechatEnv = checkWechatEnv()
   if (!wechatEnv.ok) {
-    return res.status(500).json({ message: 'WECHAT_APPID / WECHAT_SECRET not configured' })
+    return res.status(500).json({ message: '未配置微信小程序 AppID 或 AppSecret（WECHAT_APPID / WECHAT_SECRET）' })
   }
 
   try {
     await upsertSessionBase({ sessionId, jobId, appid: wechatEnv.appId, candidateOpenId })
     const sid = await getSessionInternalId(sessionId)
-    if (!sid) return res.status(500).json({ message: 'session create failed' })
+    if (!sid) return res.status(500).json({ message: '会话创建失败' })
 
     if (questions.length) {
       const [exists] = await mysqlPool.query<any[]>(
@@ -5936,7 +5939,7 @@ app.post('/api/live/session/start', async (req, res) => {
     res.json({ ok: true })
   } catch (e) {
     flowLog('live/session/start 异常', false, e instanceof Error ? e.message : 'db error')
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -5944,12 +5947,12 @@ app.post('/api/live/session/start', async (req, res) => {
 app.post('/api/live/session/append-questions', async (req, res) => {
   const sessionId = String(req.body?.sessionId || '').trim()
   const questions = Array.isArray(req.body?.questions) ? req.body.questions : []
-  if (!sessionId) return res.status(400).json({ message: 'sessionId required' })
+  if (!sessionId) return res.status(400).json({ message: '请提供会话 ID（sessionId）' })
   if (!questions.length) return res.json({ ok: true, inserted: 0 })
 
   try {
     const sid = await getSessionInternalId(sessionId)
-    if (!sid) return res.status(404).json({ message: 'session not found' })
+    if (!sid) return res.status(404).json({ message: '未找到会话' })
 
     const [maxRows] = await mysqlPool.query<any[]>(
       'SELECT COALESCE(MAX(question_no), 0) AS m FROM interview_questions WHERE session_id=?',
@@ -5971,7 +5974,7 @@ app.post('/api/live/session/append-questions', async (req, res) => {
     res.json({ ok: true, inserted })
   } catch (e) {
     flowLog('live/session/append-questions 异常', false, e instanceof Error ? e.message : 'db error')
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -5996,19 +5999,19 @@ app.get('/api/interviewer/live-sessions', async (req, res) => {
     )
     res.json({ data: rows })
   } catch {
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
 /** 面试官：查看自己发起的邀请列表，可进入对应会话 */
 app.get('/api/interviewer/invitations', async (req, res) => {
   const openid = String(req.query.openid || '').trim()
-  if (!openid) return res.status(400).json({ message: 'openid required' })
+  if (!openid) return res.status(400).json({ message: '缺少 openid' })
   const appid = process.env.WECHAT_APPID || ''
-  if (!appid) return res.status(500).json({ message: 'WECHAT_APPID not configured' })
+  if (!appid) return res.status(500).json({ message: '未配置微信小程序 AppID（WECHAT_APPID）' })
   try {
     const me = await getUserProfileByOpenId({ appid, openid })
-    if (!me.userId) return res.status(404).json({ message: 'user not found' })
+    if (!me.userId) return res.status(404).json({ message: '未找到用户' })
 
     const [rows] = await mysqlPool.query<any[]>(
       `SELECT inv.invite_code AS inviteCode,
@@ -6033,7 +6036,7 @@ app.get('/api/interviewer/invitations', async (req, res) => {
     )
     res.json({ data: rows })
   } catch {
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -6041,12 +6044,12 @@ app.post('/api/live/session/bind-members', async (req, res) => {
   const sessionId = String(req.body?.sessionId || '').trim()
   const role = String(req.body?.role || '').trim()
   const openid = String(req.body?.openid || '').trim()
-  if (!sessionId || !role || !openid) return res.status(400).json({ message: 'invalid params' })
+  if (!sessionId || !role || !openid) return res.status(400).json({ message: '请求参数无效' })
   const appid = process.env.WECHAT_APPID || ''
-  if (!appid) return res.status(500).json({ message: 'WECHAT_APPID not configured' })
+  if (!appid) return res.status(500).json({ message: '未配置微信小程序 AppID（WECHAT_APPID）' })
   try {
     const internalId = await getSessionInternalId(sessionId)
-    if (!internalId) return res.status(404).json({ message: 'session not found' })
+    if (!internalId) return res.status(404).json({ message: '未找到会话' })
 
     if (role === 'candidate') {
       await mysqlPool.query('UPDATE interview_sessions SET candidate_openid=?, updated_at=NOW() WHERE session_id=?', [openid, sessionId])
@@ -6077,17 +6080,17 @@ app.post('/api/live/session/bind-members', async (req, res) => {
       }
     })
   } catch (e) {
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
 /** 候选人发起视频请求：写入会话状态，供面试官侧显示「接听」；并从关联邀请回填面试官 openid（VoIP 接听方必须与 listener openid 一致） */
 app.post('/api/live/session/request-video', async (req, res) => {
   const sessionId = String(req.body?.sessionId || '').trim()
-  if (!sessionId) return res.status(400).json({ message: 'sessionId required' })
+  if (!sessionId) return res.status(400).json({ message: '请提供会话 ID（sessionId）' })
   try {
     const sid = await getSessionInternalId(sessionId)
-    if (!sid) return res.status(404).json({ message: 'session not found' })
+    if (!sid) return res.status(404).json({ message: '未找到会话' })
     await mysqlPool.query(
       `UPDATE interview_sessions s
        LEFT JOIN interview_invitations inv ON inv.id = s.invitation_id
@@ -6103,17 +6106,17 @@ app.post('/api/live/session/request-video', async (req, res) => {
     )
     res.json({ ok: true })
   } catch {
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
 /** 面试官点击接听：将会话视频状态置为已接听 */
 app.post('/api/live/session/accept-video', async (req, res) => {
   const sessionId = String(req.body?.sessionId || '').trim()
-  if (!sessionId) return res.status(400).json({ message: 'sessionId required' })
+  if (!sessionId) return res.status(400).json({ message: '请提供会话 ID（sessionId）' })
   try {
     const sid = await getSessionInternalId(sessionId)
-    if (!sid) return res.status(404).json({ message: 'session not found' })
+    if (!sid) return res.status(404).json({ message: '未找到会话' })
     await mysqlPool.query(
       "UPDATE interview_sessions SET voip_status='connected', updated_at=NOW() WHERE session_id=?",
       [sessionId]
@@ -6124,24 +6127,24 @@ app.post('/api/live/session/accept-video', async (req, res) => {
     )
     res.json({ ok: true })
   } catch {
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
 app.post('/api/live/session/transcript', async (req, res) => {
   const sessionId = String(req.body?.sessionId || '').trim()
   const text = String(req.body?.text || '').trim()
-  if (!sessionId || !text) return res.status(400).json({ message: 'invalid params' })
+  if (!sessionId || !text) return res.status(400).json({ message: '请求参数无效' })
   try {
     const sid = await getSessionInternalId(sessionId)
-    if (!sid) return res.status(404).json({ message: 'session not found' })
+    if (!sid) return res.status(404).json({ message: '未找到会话' })
     await mysqlPool.query(
       "INSERT INTO interview_messages(session_id, message_type, question_id, sender_role, content) VALUES (?, 'transcript', NULL, 'candidate', ?)",
       [sid, text]
     )
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -6150,10 +6153,10 @@ app.post('/api/live/session/trtc-signal', async (req, res) => {
   const sessionId = String(req.body?.sessionId || '').trim()
   const text = String(req.body?.text || '').trim()
   const kind = String(req.body?.kind || 'subtitle').trim() || 'subtitle'
-  if (!sessionId || !text) return res.status(400).json({ message: 'invalid params' })
+  if (!sessionId || !text) return res.status(400).json({ message: '请求参数无效' })
   try {
     const sid = await getSessionInternalId(sessionId)
-    if (!sid) return res.status(404).json({ message: 'session not found' })
+    if (!sid) return res.status(404).json({ message: '未找到会话' })
     const payload = JSON.stringify({
       channel: 'trtc_signal',
       kind,
@@ -6166,7 +6169,7 @@ app.post('/api/live/session/trtc-signal', async (req, res) => {
     )
     res.json({ ok: true })
   } catch {
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
@@ -6175,10 +6178,10 @@ app.post('/api/live/session/qa', async (req, res) => {
   const questionId = String(req.body?.questionId || '').trim()
   const question = String(req.body?.question || '').trim()
   const answer = String(req.body?.answer || '').trim()
-  if (!sessionId || !questionId) return res.status(400).json({ message: 'invalid params' })
+  if (!sessionId || !questionId) return res.status(400).json({ message: '请求参数无效' })
   try {
     const sid = await getSessionInternalId(sessionId)
-    if (!sid) return res.status(404).json({ message: 'session not found' })
+    if (!sid) return res.status(404).json({ message: '未找到会话' })
     const payload = JSON.stringify({ questionId, question, answer })
     await mysqlPool.query(
       "INSERT INTO interview_messages(session_id, message_type, question_id, sender_role, content) VALUES (?, 'qa_answer', NULL, 'candidate', ?)",
@@ -6186,13 +6189,13 @@ app.post('/api/live/session/qa', async (req, res) => {
     )
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 
 app.get('/api/live/session/state', async (req, res) => {
   const sessionId = String(req.query.sessionId || '').trim()
-  if (!sessionId) return res.status(400).json({ message: 'sessionId required' })
+  if (!sessionId) return res.status(400).json({ message: '请提供会话 ID（sessionId）' })
   try {
     const [sessRows] = await mysqlPool.query<any[]>(
       `SELECT s.session_id, s.candidate_openid, s.interviewer_openid, s.voip_status,
@@ -6203,10 +6206,10 @@ app.get('/api/live/session/state', async (req, res) => {
        LIMIT 1`,
       [sessionId]
     )
-    if (!sessRows.length) return res.status(404).json({ message: 'session not found' })
+    if (!sessRows.length) return res.status(404).json({ message: '未找到会话' })
     const sess = sessRows[0]
     const sid = await getSessionInternalId(sessionId)
-    if (!sid) return res.status(404).json({ message: 'session not found' })
+    if (!sid) return res.status(404).json({ message: '未找到会话' })
 
     const [qRows] = await mysqlPool.query<any[]>(
       'SELECT question_no, question_text FROM interview_questions WHERE session_id=? ORDER BY question_no ASC',
@@ -6279,7 +6282,7 @@ app.get('/api/live/session/state', async (req, res) => {
     }
     res.json({ data })
   } catch (e) {
-    res.status(500).json({ message: 'db error' })
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
 

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import Taro, { useDidShow } from '@tarojs/taro'
+import Taro, { useDidShow, useShareAppMessage } from '@tarojs/taro'
 import { Button, Input, Text, View } from '@tarojs/components'
 import { loginWithInviteCode } from '../../services/interviewApi'
 import { loginAndGetOpenId } from '../../services/authApi'
@@ -13,6 +13,11 @@ export default function LoginPage() {
   const [phone, setPhone] = useState('')
   const [inviteCode, setInviteCode] = useState('')
   const [loading, setLoading] = useState(false)
+
+  useShareAppMessage(() => ({
+    title: '欢迎参加面试 · 填写邀请码进入',
+    path: '/pages/login/index'
+  }))
 
   useDidShow(async () => {
     try {
@@ -137,13 +142,16 @@ export default function LoginPage() {
         </View>
 
         <View className='field'>
-          <Text className='label'>
-            邀请码<Text className='required-star'>*</Text>
-          </Text>
+          <View className='label-row'>
+            <Text className='label'>
+              邀请码<Text className='required-star'>*</Text>
+            </Text>
+            <Text className='invite-test-hint'>测试(J001)</Text>
+          </View>
           <Input
             className='input'
             value={inviteCode}
-            placeholder='HR 提供的岗位码或完整码'
+            placeholder='HR 提供的岗位码或完整码，演示可填 J001'
             onInput={(e) => setInviteCode(e.detail.value)}
           />
         </View>
