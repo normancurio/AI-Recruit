@@ -578,22 +578,37 @@ function dashScopeCompatibleBaseUrl() {
   return (process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1').replace(/\/$/, '')
 }
 
+async function sleepMs(ms: number): Promise<void> {
+  await new Promise((r) => setTimeout(r, ms))
+}
+
 async function dashScopeChatCompletions(body: Record<string, unknown>) {
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
   if (!apiKey) throw new Error('DASHSCOPE_API_KEY missing')
   const base = dashScopeCompatibleBaseUrl()
-  const resp = await fetch(`${base}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(body)
-  })
+  let resp: Response
+  try {
+    resp = await fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    })
+  } catch (netErr) {
+    const e = new Error(
+      netErr instanceof Error ? `网络请求失败：${netErr.message}` : '网络请求失败'
+    ) as Error & { httpStatus?: number }
+    e.httpStatus = 0
+    throw e
+  }
   const data = (await resp.json()) as { choices?: { message?: { content?: string } }[]; error?: { message?: string }; message?: string }
   if (!resp.ok) {
     const msg = data?.error?.message || data?.message || JSON.stringify(data)
-    throw new Error(msg)
+    const e = new Error(msg) as Error & { httpStatus?: number }
+    e.httpStatus = resp.status
+    throw e
   }
   return data
 }
@@ -825,6 +840,8 @@ type ResumeScreeningAiResult = {
   stabilityScore: number
   /** 结构化评估结果 JSON（字符串） */
   evaluationJson?: string
+  /** 未走通大模型，仅为关键词粗估；前端应提示用户可重新上传 */
+  screeningIncomplete?: boolean
 }
 
 function clampResumeScore(n: number): number {
@@ -1518,22 +1535,23 @@ function fallbackResumeScreening(resumeText: string, jdText: string, jobTitle: s
     schema_version: 1,
     job_type: 'fallback',
     hard_gate: { passed: true, reasons: [] as string[] },
-    decision: '建议备选',
-    summary: '关键词回退：无大模型结构化简历字段。',
+    decision: '待定',
+    summary: '未能形成 AI 结构化结论，请重新上传可解析的简历或联系管理员配置模型。',
     candidate_profile: hasHeurProfile ? heurProfile : ({} as Record<string, unknown>),
     note: hasHeurProfile
-      ? '未调用大模型或调用失败：分数为关键词估算；已根据简历正文正则补全部分 candidate_profile（邮箱/院校/应聘岗位等）。配置 DASHSCOPE_API_KEY 后可获得完整 AI 评估。'
-      : '未调用大模型或调用失败：仅根据岗位 JD 与简历文本的关键词重叠度估算分数；未能从正文识别结构化字段（可能为扫描件 PDF）。配置 DASHSCOPE_API_KEY 并重启 dev:api 后可获得完整结构化。'
+      ? '未调用大模型或调用失败：分数为关键词估算；已用正文规则补全部分字段。配置 DASHSCOPE_API_KEY 后可得完整 AI 评估。'
+      : '未调用大模型或调用失败：分数为关键词估算；未能结构化正文（常见于扫描件 PDF）。配置 DASHSCOPE_API_KEY 并重启 API 后可得完整评估。'
   }
+  const shortSummary = hasHeurProfile
+    ? '未完成 AI 结构化评估（当前为关键词粗估，部分信息已用规则从正文提取）。建议更换可复制文字的 Word/PDF 后重新上传；持续出现请让管理员检查大模型配置。'
+    : '未能从文件中可靠识别简历信息（常见于扫描版 PDF）。请改用 Word 或可复制的 PDF 重新上传。'
   return {
     candidateName,
     ...(phoneFound ? { candidatePhone: phoneFound } : {}),
     matchScore,
-    status: '关键词估算（未调用大模型）',
-    summary:
-      `（未调用大模型或调用失败：仅根据岗位 JD 与简历文本的关键词重叠度估算分数，仅供参考。）\n` +
-      `目标岗位：${jobTitle || '—'}\n` +
-      `若要结构化 AI 评估：在根目录 .env.local 配置 DASHSCOPE_API_KEY（阿里云百炼）；可选 QWEN_RESUME_MODEL（未设置时默认 qwen-turbo，与面试出题模型无关），重启 npm run dev:api 后重新筛查。`,
+    status: '识别未完成',
+    summary: shortSummary,
+    screeningIncomplete: true,
     ...dims,
     evaluationJson: JSON.stringify(fallbackEval)
   }
@@ -1571,6 +1589,29 @@ async function extractResumePlainText(buffer: Buffer, originalname: string, mime
   throw new Error('仅支持 TXT、PDF、DOCX；旧版 .doc 请另存为 DOCX 后上传')
 }
 
+function resumeAiMaxAttempts(): number {
+  const n = Number(process.env.RESUME_AI_MAX_ATTEMPTS)
+  if (Number.isFinite(n) && n >= 1) return Math.min(5, Math.floor(n))
+  return 3
+}
+
+/** 可重试：限流、服务端错误、网络抖动；不重试：密钥/权限等明确客户端错误 */
+function isRetryableResumeAiError(err: unknown): boolean {
+  const e = err as Error & { httpStatus?: number }
+  const st = e.httpStatus
+  const msg = String(e?.message || err || '').toLowerCase()
+  if (st === 401 || st === 403) return false
+  if (st === 400) {
+    if (/rate|limit|throttl|too many|并发|quota|限流/.test(msg)) return true
+    if (/invalid|api.key|密钥|无权|unauthorized|forbidden/.test(msg)) return false
+    return false
+  }
+  if (st === 408 || st === 429 || (st != null && st >= 500)) return true
+  if (st === 0) return true
+  if (/timeout|timed out|econnreset|econnrefused|fetch failed|socket|network|网络请求失败/.test(msg)) return true
+  return false
+}
+
 async function runResumeScreeningWithAi(params: {
   resumeText: string
   jobTitle: string
@@ -1582,7 +1623,8 @@ async function runResumeScreeningWithAi(params: {
   /** 与面试题模型分离：未单独配置时固定用较快模型，避免 QWEN_QUESTION_MODEL 用 plus 时上传简历与出题同等延迟 */
   const model = process.env.QWEN_RESUME_MODEL?.trim() || 'qwen-turbo'
   const { userPrompt, systemPrompt } = buildResumeEvalPromptForServer(params)
-  const data = await dashScopeChatCompletions({
+  const maxAttempts = resumeAiMaxAttempts()
+  const reqBody = {
     model,
     temperature: 0.2,
     messages: [
@@ -1592,12 +1634,53 @@ async function runResumeScreeningWithAi(params: {
       },
       { role: 'user', content: userPrompt }
     ]
-  })
-  const raw = data?.choices?.[0]?.message?.content
-  const text = typeof raw === 'string' ? raw : ''
-  const next = parseResumeEvalToScreeningResult(text, params.resumeText)
-  if (next) return next
-  return parseResumeScreeningAiJson(text)
+  }
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const data = await dashScopeChatCompletions(reqBody)
+      const raw = data?.choices?.[0]?.message?.content
+      const text = typeof raw === 'string' ? raw : ''
+      const next = parseResumeEvalToScreeningResult(text, params.resumeText)
+      if (next) {
+        if (attempt > 1 && flowLogEnabled) {
+          flowLog('resume-screen', true, `简历 AI 评估成功（第 ${attempt} 次调用）`)
+        }
+        return next
+      }
+      const parsed = parseResumeScreeningAiJson(text)
+      if (parsed) {
+        if (attempt > 1 && flowLogEnabled) {
+          flowLog('resume-screen', true, `简历 AI JSON 解析成功（第 ${attempt} 次调用）`)
+        }
+        return parsed
+      }
+      if (attempt < maxAttempts) {
+        const delayMs = 400 + attempt * 400
+        if (flowLogEnabled) {
+          flowLog('resume-screen', false, `大模型返回无法结构化解析，${delayMs}ms 后重试 (${attempt}/${maxAttempts})`)
+        } else if (attempt === 1) {
+          console.warn('[resume-screen] 大模型返回无法解析，将自动重试')
+        }
+        await sleepMs(delayMs)
+        continue
+      }
+      return null
+    } catch (e: unknown) {
+      if (attempt >= maxAttempts || !isRetryableResumeAiError(e)) {
+        throw e
+      }
+      const delayMs = 500 * Math.pow(2, attempt - 1)
+      const m = e instanceof Error ? e.message : String(e)
+      if (flowLogEnabled) {
+        flowLog('resume-screen', false, `大模型调用失败，${delayMs}ms 后重试 (${attempt}/${maxAttempts})：${m.slice(0, 160)}`)
+      } else {
+        console.warn('[resume-screen] 大模型调用失败，将重试:', m.slice(0, 120))
+      }
+      await sleepMs(delayMs)
+    }
+  }
+  return null
 }
 
 function fallbackInterviewScore(profile: { name?: string }, answers: Array<{ answer?: string }>): AiInterviewScore {
@@ -2966,11 +3049,28 @@ function adminJobRowForJson(r: Record<string, unknown>) {
 /** HR 后台：岗位列表（与小程序 / 会话共用 jobs 表） */
 app.get('/api/admin/jobs', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
+  const token = extractAdminRequestToken(req)
   try {
-    const [rows] = await mysqlPool.query<any[]>(
-      `SELECT id, project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters
-       FROM jobs ORDER BY id DESC`
-    )
+    const scopeJobCodes = await allowedJobCodesForScreeningListToken(token)
+    if (scopeJobCodes && scopeJobCodes.length === 0) {
+      return res.json({ data: [] })
+    }
+    let rows: any[]
+    if (scopeJobCodes) {
+      const ph = scopeJobCodes.map(() => '?').join(', ')
+      const [r] = await mysqlPool.query<any[]>(
+        `SELECT id, project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters
+         FROM jobs WHERE job_code IN (${ph}) ORDER BY id DESC`,
+        scopeJobCodes
+      )
+      rows = r || []
+    } else {
+      const [r] = await mysqlPool.query<any[]>(
+        `SELECT id, project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters
+         FROM jobs ORDER BY id DESC`
+      )
+      rows = r || []
+    }
     res.json({
       data: (rows as Record<string, unknown>[]).map((r) => adminJobRowForJson(r))
     })
@@ -2983,10 +3083,32 @@ app.get('/api/admin/jobs', async (req, res) => {
 /** HR 后台：项目列表（简历筛查按项目筛选、岗位归属展示用） */
 app.get('/api/admin/projects', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
+  const token = extractAdminRequestToken(req)
   try {
-    const [rows] = await mysqlPool.query<any[]>(
-      `SELECT id, name, project_code, client, dept, status, recruitment_leads FROM projects ORDER BY updated_at DESC, id DESC LIMIT 500`
-    )
+    const scopeJobCodes = await allowedJobCodesForScreeningListToken(token)
+    if (scopeJobCodes && scopeJobCodes.length === 0) {
+      return res.json({ data: [] })
+    }
+    let rows: any[]
+    if (scopeJobCodes) {
+      const ph = scopeJobCodes.map(() => '?').join(', ')
+      const onPj = resumeScreeningsProjectIdMatchSql('p', 'j')
+      const [r] = await mysqlPool.query<any[]>(
+        `SELECT DISTINCT p.id, p.name, p.project_code, p.client, p.dept, p.status, p.recruitment_leads, p.updated_at
+         FROM projects p
+         INNER JOIN jobs j ON ${onPj}
+         WHERE j.job_code IN (${ph})
+         ORDER BY p.updated_at DESC, p.id DESC
+         LIMIT 500`,
+        scopeJobCodes
+      )
+      rows = r || []
+    } else {
+      const [r] = await mysqlPool.query<any[]>(
+        `SELECT id, name, project_code, client, dept, status, recruitment_leads FROM projects ORDER BY updated_at DESC, id DESC LIMIT 500`
+      )
+      rows = r || []
+    }
     res.json({
       data: (rows || []).map((r) => ({
         id: String(r.id ?? ''),
@@ -3357,6 +3479,73 @@ function resumeScreeningsPlainSql(
   return { sql, params }
 }
 
+type ResumeScreeningsUploaderScope =
+  | null
+  | { kind: 'recruiter'; uploaderLower: string }
+  | { kind: 'recruiting_manager_dept'; lowers: string[] }
+
+/** 管理库中与 dept 属同一部门的账号（username 小写），招聘经理按部门管理人员上传范围 */
+async function adminDeptMemberUploadersLower(dept: string): Promise<string[]> {
+  const d = String(dept || '').trim()
+  if (!d || d === '-') return []
+  try {
+    const [rows] = await mysqlAdminPool.query<RowDataPacket[]>(
+      'SELECT username, dept FROM users WHERE username IS NOT NULL AND TRIM(username) <> \'\''
+    )
+    const out = new Set<string>()
+    for (const r of rows || []) {
+      const row = r as { username?: unknown; dept?: unknown }
+      const un = String(row.username || '').trim()
+      if (!un) continue
+      const ud = String(row.dept || '').trim()
+      if (!deptNamesMatch(d, ud)) continue
+      out.add(un.toLowerCase())
+    }
+    return Array.from(out)
+  } catch {
+    return []
+  }
+}
+
+/** 简历管理 / 初面管理：专员仅本人；招聘经理仅本部门成员上传；交付经理/管理员不限上传人 */
+async function resumeScreeningsUploaderScopeForToken(token: string): Promise<ResumeScreeningsUploaderScope> {
+  const actor = await loadAdminSessionActor(token)
+  if (!actor) return null
+  if (actor.uiRole === 'recruiter') {
+    const uploaderLower = actor.username.trim().toLowerCase()
+    if (!uploaderLower) return { kind: 'recruiter', uploaderLower: '\0' }
+    return { kind: 'recruiter', uploaderLower }
+  }
+  if (actor.uiRole === 'recruiting_manager') {
+    const lowers = await adminDeptMemberUploadersLower(actor.dept)
+    return { kind: 'recruiting_manager_dept', lowers }
+  }
+  return null
+}
+
+function appendResumeScreeningsUploaderWhere(
+  whereSql: string,
+  whereParams: unknown[],
+  uploaderScope: ResumeScreeningsUploaderScope
+): { whereSql: string; whereParams: unknown[] } {
+  if (!uploaderScope) return { whereSql, whereParams }
+  if (uploaderScope.kind === 'recruiter') {
+    return {
+      whereSql: `${whereSql} AND LOWER(TRIM(COALESCE(s.uploader_username,''))) = ? `,
+      whereParams: [...whereParams, uploaderScope.uploaderLower]
+    }
+  }
+  const lowers = uploaderScope.lowers
+  if (!lowers.length) {
+    return { whereSql: `${whereSql} AND 1=0 `, whereParams }
+  }
+  const ph = lowers.map(() => '?').join(', ')
+  return {
+    whereSql: `${whereSql} AND LOWER(TRIM(COALESCE(s.uploader_username,''))) IN (${ph}) `,
+    whereParams: [...whereParams, ...lowers]
+  }
+}
+
 function resumeScreeningsPlainCountSql(
   withPipelineStage: boolean,
   projectId: string | null,
@@ -3436,7 +3625,8 @@ function isMissingMysqlColumn(e: unknown, col: string): boolean {
 
 async function queryResumeScreeningsAdminList(
   listQ: ResumeScreeningsAdminListQuery,
-  scopeJobCodes: string[] | null
+  scopeJobCodes: string[] | null,
+  uploaderScope: ResumeScreeningsUploaderScope
 ): Promise<{ rows: any[]; total: number }> {
   const limit = listQ.pageSize
   const offset = (listQ.page - 1) * limit
@@ -3448,6 +3638,7 @@ async function queryResumeScreeningsAdminList(
     whereSql += ` AND s.job_code IN (${ph}) `
     whereParams.push(...scopeJobCodes)
   }
+  ;({ whereSql, whereParams } = appendResumeScreeningsUploaderWhere(whereSql, whereParams, uploaderScope))
   const pageOpts: ResumeScreeningsPageOpts = {
     includeResumePlaintext: false,
     limit,
@@ -3511,7 +3702,8 @@ async function queryResumeScreeningsAdminList(
 
 async function queryResumeScreeningsAdminListPlainFallback(
   listQ: ResumeScreeningsAdminListQuery,
-  scopeJobCodes: string[] | null
+  scopeJobCodes: string[] | null,
+  uploaderScope: ResumeScreeningsUploaderScope
 ): Promise<{ rows: any[]; total: number }> {
   const limit = listQ.pageSize
   const offset = (listQ.page - 1) * limit
@@ -3523,6 +3715,7 @@ async function queryResumeScreeningsAdminListPlainFallback(
     whereSql += ` AND s.job_code IN (${ph}) `
     whereParams.push(...scopeJobCodes)
   }
+  ;({ whereSql, whereParams } = appendResumeScreeningsUploaderWhere(whereSql, whereParams, uploaderScope))
   const pageOpts: ResumeScreeningsPageOpts = {
     includeResumePlaintext: false,
     limit,
@@ -3601,11 +3794,12 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
   const token = extractAdminRequestToken(req)
   const listQ = parseResumeScreeningsAdminListQuery(req)
   const scopeJobCodes = await allowedJobCodesForScreeningListToken(token)
+  const uploaderScope = await resumeScreeningsUploaderScopeForToken(token)
   if (scopeJobCodes && scopeJobCodes.length === 0) {
     return res.json({ data: [], total: 0, page: listQ.page, pageSize: listQ.pageSize })
   }
   try {
-    const { rows, total } = await queryResumeScreeningsAdminList(listQ, scopeJobCodes)
+    const { rows, total } = await queryResumeScreeningsAdminList(listQ, scopeJobCodes, uploaderScope)
     const data = (rows || []).map((r) => ({
       ...r,
       id: jsonSafeMysqlCell((r as { id?: unknown }).id),
@@ -3620,7 +3814,11 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
     const code = (e as { code?: string })?.code
     if (code === 'ER_NO_SUCH_TABLE') {
       try {
-        const { rows, total } = await queryResumeScreeningsAdminListPlainFallback(listQ, scopeJobCodes)
+        const { rows, total } = await queryResumeScreeningsAdminListPlainFallback(
+          listQ,
+          scopeJobCodes,
+          uploaderScope
+        )
         const patched = (rows || []).map((r) => ({
           ...r,
           id: jsonSafeMysqlCell((r as { id?: unknown }).id),
@@ -5101,7 +5299,8 @@ app.post(
           educationScore: result.educationScore,
           stabilityScore: result.stabilityScore,
           status: result.status,
-          summary: result.summary
+          summary: result.summary,
+          screeningIncomplete: result.screeningIncomplete === true
         }
       })
     } catch (e: unknown) {

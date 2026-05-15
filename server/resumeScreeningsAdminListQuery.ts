@@ -17,6 +17,8 @@ export type ResumeScreeningsAdminListQuery = {
   channel: string
   salary: string
   keyword: string
+  /** 上传人登录账号（精确匹配，小写比较） */
+  uploaderUsername: string
   /** 与 deriveScreeningFlowLabels 的 flowStage 文案一致 */
   flowStage: '' | '简历筛查完成' | '已发面试邀请' | 'AI面试完成'
   listScore: 'all' | 'high' | 'mid' | 'low'
@@ -48,6 +50,9 @@ export function parseResumeScreeningsAdminListQuery(req: Request): ResumeScreeni
   const channel = String(req.query.channel ?? '').trim()
   const salary = String(req.query.salary ?? '').trim()
   const keyword = String(req.query.keyword ?? '').trim()
+  const uploaderUsername = String(
+    req.query.uploaderUsername ?? req.query.uploader_username ?? ''
+  ).trim()
   const fs = String(req.query.flowStage ?? req.query.flow_stage ?? '').trim()
   const flowStage: ResumeScreeningsAdminListQuery['flowStage'] =
     fs === '简历筛查完成' || fs === '已发面试邀请' || fs === 'AI面试完成' ? fs : ''
@@ -69,6 +74,7 @@ export function parseResumeScreeningsAdminListQuery(req: Request): ResumeScreeni
     channel,
     salary,
     keyword,
+    uploaderUsername,
     flowStage,
     listScore
   }
@@ -150,6 +156,12 @@ export function buildResumeScreeningsAdminListWhere(
     parts.push(' AND LOWER(TRIM(s.candidate_name)) LIKE LOWER(?) ')
     const esc = cand.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')
     params.push(`%${esc}%`)
+  }
+
+  const uploader = q.uploaderUsername.trim().toLowerCase()
+  if (uploader) {
+    parts.push(` AND LOWER(TRIM(COALESCE(s.uploader_username,''))) = ? `)
+    params.push(uploader)
   }
 
   if (q.gender !== 'all') {

@@ -717,12 +717,17 @@ export default function App() {
   }, [showHrApiLogin, hrCaptchaEnabled, refreshLoginCaptcha]);
 
   const [changePwdOpen, setChangePwdOpen] = useState(false);
+  const changePwdLoadingRef = useRef(false);
   const [changePwdCurrent, setChangePwdCurrent] = useState('');
   const [changePwdNew, setChangePwdNew] = useState('');
   const [changePwdConfirm, setChangePwdConfirm] = useState('');
   const [changePwdLoading, setChangePwdLoading] = useState(false);
   const [changePwdErr, setChangePwdErr] = useState('');
   const [changePwdOk, setChangePwdOk] = useState('');
+  changePwdLoadingRef.current = changePwdLoading;
+  useAdminOverlayLockAndEscape(changePwdOpen && !showHrApiLogin, () => {
+    if (!changePwdLoadingRef.current) setChangePwdOpen(false);
+  });
 
   const openChangePassword = () => {
     setChangePwdErr('');
@@ -1604,6 +1609,10 @@ function projectRecruitingLeadDisplay(p: { recruitmentLeads?: string[]; manager?
   return '—';
 }
 
+/** 多弹层叠加时计数，避免先关一层误恢复滚动 */
+let adminOverlayScrollLockDepth = 0
+let adminOverlaySavedBodyOverflow = ''
+
 /** 管理端轻量弹层：打开时锁背景滚动，Esc 关闭（与 AdminConfirmModal 共用约定） */
 function useAdminOverlayLockAndEscape(open: boolean, onEscape: () => void) {
   const onEscapeRef = useRef(onEscape);
@@ -1611,10 +1620,17 @@ function useAdminOverlayLockAndEscape(open: boolean, onEscape: () => void) {
 
   useEffect(() => {
     if (!open || typeof document === 'undefined') return;
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
+    if (adminOverlayScrollLockDepth === 0) {
+      adminOverlaySavedBodyOverflow = document.body.style.overflow
+      document.body.style.overflow = 'hidden'
+    }
+    adminOverlayScrollLockDepth += 1
     return () => {
-      document.body.style.overflow = prevOverflow;
+      adminOverlayScrollLockDepth -= 1
+      if (adminOverlayScrollLockDepth <= 0) {
+        adminOverlayScrollLockDepth = 0
+        document.body.style.overflow = adminOverlaySavedBodyOverflow
+      }
     };
   }, [open]);
 
@@ -1824,6 +1840,8 @@ function ProjectManagementView({
     setEditingProjectId(null);
     setFormProjectRecruitmentLeads('');
   };
+
+  useAdminOverlayLockAndEscape(createOpen, closeProjectModal);
 
   const openCreateModal = () => {
     const code = defaultNewProjectCode();
@@ -3642,6 +3660,11 @@ function JobEditorModal({
 }) {
   const jobRoleBaseOptions = useJobRoleBasesList();
   const [jdGenerating, setJdGenerating] = useState(false);
+  const jdGeneratingRef = useRef(false);
+  jdGeneratingRef.current = jdGenerating;
+  useAdminOverlayLockAndEscape(Boolean(jobForm), () => {
+    if (!jobForm?.submitting && !jdGeneratingRef.current) onClose();
+  });
   useEffect(() => {
     if (!jobForm) setJdGenerating(false);
   }, [jobForm]);
@@ -3775,7 +3798,7 @@ function JobEditorModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="job-form-title"
-        onClick={() => !jobForm.submitting && onClose()}
+        onClick={() => !jobForm.submitting && !jdGenerating && onClose()}
       >
         <motion.div
           key="job-form-modal"
@@ -3794,7 +3817,7 @@ function JobEditorModal({
             </div>
             <button
               type="button"
-              disabled={jobForm.submitting}
+              disabled={jobForm.submitting || jdGenerating}
               onClick={onClose}
               className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
               aria-label="关闭"
@@ -4192,6 +4215,12 @@ function JobQueryView({
   const [adminMsg, setAdminMsg] = useState<null | { title: string; message: string }>(null);
   const [deleteJobConfirm, setDeleteJobConfirm] = useState<Job | null>(null);
   const [deleteJobBusy, setDeleteJobBusy] = useState(false);
+  const rmBatchApplyingRef = useRef(false);
+  rmBatchApplyingRef.current = rmBatchApplying;
+
+  useAdminOverlayLockAndEscape(rmBatchAssignOpen, () => {
+    if (!rmBatchApplyingRef.current) setRmBatchAssignOpen(false);
+  });
 
   const loadData = useCallback(() => {
     void fetch('/api/projects')
@@ -5326,6 +5355,17 @@ function resumeDimensionEvidenceText(
     .join('；')
 }
 
+/** 大模型未走通时的入库记录（含历史「关键词估算」文案） */
+function isResumeScreeningFallbackRow(
+  evalJson: Resume['evaluationJson'] | undefined,
+  dbStatus: string
+): boolean {
+  const st = String(dbStatus || '').trim()
+  if (st === '识别未完成' || /关键词估算/.test(st)) return true
+  const o = evalJson as Record<string, unknown> | undefined
+  return o?.job_type === 'fallback'
+}
+
 /** 流程：AI 筛查 → 发面试邀请 → 候选人答题/面试 → 面试报告；与 pipeline_stage、interview_reports 关联展示。初面管理「阶段」筛选项同下文案且与服务端 flowStage 一致。 */
 const APPLICATION_SCREENING_FLOW_STAGES = ['简历筛查完成', '已发面试邀请', 'AI面试完成'] as const
 
@@ -5535,7 +5575,6 @@ function mapScreeningRow(r: {
   const uploadTime = formatScreeningUploadDate(created)
   const overall = Math.max(0, Math.min(100, Number(r.match_score) || 0))
   const d = dimsFromScreeningDbRow(r, overall)
-  const { flowStage, aiConclusion } = deriveScreeningFlowLabels(r as unknown as Record<string, unknown>)
   const parsedEval = (() => {
     const raw = r.evaluation_json
     if (raw == null) return undefined
@@ -5546,6 +5585,11 @@ function mapScreeningRow(r: {
       return undefined
     }
   })()
+  const { flowStage, aiConclusion: rawAiConclusion } = deriveScreeningFlowLabels(
+    r as unknown as Record<string, unknown>
+  )
+  const isFb = isResumeScreeningFallbackRow(parsedEval, String(r.status || ''))
+  const aiConclusion = isFb ? '识别未完成' : rawAiConclusion
   const evalObj = parsedEval as Record<string, unknown> | undefined
   const cp = evalObj && typeof evalObj.candidate_profile === 'object' && evalObj.candidate_profile
     ? (evalObj.candidate_profile as Record<string, unknown>)
@@ -5591,7 +5635,9 @@ function mapScreeningRow(r: {
     flowStage,
     uploadTime,
     uploadTimeFull: uploadTimeFull.trim() || undefined,
-    reportSummary: String(r.report_summary || ''),
+    reportSummary: isFb
+      ? '未完成 AI 结构化评估（当前为关键词粗估）。请改用 Word 或可复制的 PDF 重新上传，或联系管理员配置大模型。'
+      : String(r.report_summary || ''),
     evaluationJson: parsedEval,
     fileName:
       r.file_name != null && String(r.file_name).trim() ? String(r.file_name).trim().slice(0, 255) : undefined,
@@ -5990,6 +6036,12 @@ function ResumeProfileEditDialog({
   const [profileLoading, setProfileLoading] = useState(false)
   const [profileSaving, setProfileSaving] = useState(false)
   const [profileError, setProfileError] = useState('')
+  const profileSavingRef = useRef(false)
+  profileSavingRef.current = profileSaving
+
+  useAdminOverlayLockAndEscape(Boolean(resume), () => {
+    if (!profileSavingRef.current) onClose()
+  })
 
   useEffect(() => {
     if (!resume || !apiBase || !hasToken) {
@@ -6511,6 +6563,8 @@ function ResumeLibraryView({
     if (d.channel.trim()) n += 1;
     return n;
   }, [libFilterApplied]);
+
+  useAdminOverlayLockAndEscape(Boolean(deliveryHistoryModal), () => setDeliveryHistoryModal(null));
 
   const { codes: recruiterJobCodes, loading: recruiterScopeLoading } = useRecruiterScopedJobCodes(
     currentRole,
@@ -7402,10 +7456,22 @@ function ResumeScreeningView({
   const [sfChannel, setSfChannel] = useState('');
   const [sfSalary, setSfSalary] = useState('');
   const [sfKeyword, setSfKeyword] = useState('');
+  const [sfUploader, setSfUploader] = useState('');
   const [screenFilterMoreOpen, setScreenFilterMoreOpen] = useState(false);
   const [screeningHrUsers, setScreeningHrUsers] = useState<User[]>([]);
   const [screeningAdminMsg, setScreeningAdminMsg] = useState<null | { title: string; message: string }>(null);
   const [bulkDeleteIds, setBulkDeleteIds] = useState<string[] | null>(null);
+
+  const uploadingRef = useRef(false);
+  uploadingRef.current = uploading;
+  useAdminOverlayLockAndEscape(Boolean(inviteModal), () => setInviteModal(null));
+  useAdminOverlayLockAndEscape(uploadModalOpen, () => {
+    if (!uploadingRef.current) {
+      setUploadModalOpen(false);
+      setUploadHint('');
+    }
+  });
+  useAdminOverlayLockAndEscape(Boolean(reportResume), () => setReportResume(null));
 
   const screenAdvancedFilterCount = useMemo(() => {
     let n = 0;
@@ -7499,6 +7565,7 @@ function ResumeScreeningView({
     if (sfChannel.trim()) sp.set('channel', sfChannel.trim());
     if (sfSalary.trim()) sp.set('salary', sfSalary.trim());
     if (sfKeyword.trim()) sp.set('keyword', sfKeyword.trim());
+    if (sfUploader.trim()) sp.set('uploaderUsername', sfUploader.trim());
     const screeningUrl = `/api/admin/resume-screenings?${sp.toString()}`;
     void miniappApiFetch(screeningUrl)
       .then(async (r) => {
@@ -7555,7 +7622,8 @@ function ResumeScreeningView({
     sfVerifiable,
     sfChannel,
     sfSalary,
-    sfKeyword
+    sfKeyword,
+    sfUploader
   ]);
 
   useEffect(() => {
@@ -7587,8 +7655,25 @@ function ResumeScreeningView({
     sfVerifiable,
     sfChannel,
     sfSalary,
-    sfKeyword
+    sfKeyword,
+    sfUploader
   ]);
+
+  const screeningUploaderOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const out: { username: string; label: string }[] = [];
+    for (const u of screeningHrUsers) {
+      const username = String(u.username || '').trim();
+      if (!username) continue;
+      const key = username.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const nm = String(u.name || '').trim();
+      out.push({ username, label: nm ? `${nm}（${username}）` : username });
+    }
+    out.sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'));
+    return out;
+  }, [screeningHrUsers]);
 
   const resetScreeningListFilters = useCallback(() => {
     setResumeProjectFilter('');
@@ -7601,6 +7686,7 @@ function ResumeScreeningView({
     setSfChannel('');
     setSfSalary('');
     setSfKeyword('');
+    setSfUploader('');
     setSelectedJobCode('');
     setScreeningSelection({});
   }, []);
@@ -7900,10 +7986,23 @@ function ResumeScreeningView({
     fd.append('jobCode', selectedJobCode);
     void miniappApiFetch('/api/admin/resume-screen', { method: 'POST', body: fd })
       .then(async (r) => {
-        const j = (await r.json()) as { message?: string }
+        const j = (await r.json()) as {
+          message?: string
+          data?: {
+            screeningIncomplete?: boolean
+            status?: string
+            summary?: string
+          }
+        }
         if (!r.ok) throw adminJsonFailError(r, j, '上传或筛查失败');
         loadScreenings();
-        setUploadHint('解析与打分已完成，已加入下方列表。');
+        if (j.data?.screeningIncomplete === true) {
+          setUploadHint(
+            '未完成 AI 识别，记录已暂存，列表「AI 结论」显示为「识别未完成」。请尽量使用 Word 或可复制的 PDF（避免纯扫描件）重新上传；若已配置大模型仍如此，请联系管理员。也可删除本条后重传。'
+          );
+        } else {
+          setUploadHint('解析与打分已完成，已加入下方列表。');
+        }
         setUploadModalOpen(false);
       })
       .catch((e: unknown) => {
@@ -8041,6 +8140,22 @@ function ResumeScreeningView({
                   placeholder="姓名"
                   className={screeningFilterCtrl}
                 />
+              </div>
+              <div className="min-w-0">
+                <label className={screeningFilterLabel}>上传人</label>
+                <select
+                  value={sfUploader}
+                  onChange={(e) => setSfUploader(e.target.value)}
+                  disabled={!screeningHrUsers.length}
+                  className={screeningFilterCtrl}
+                >
+                  <option value="">全部</option>
+                  {screeningUploaderOptions.map((o) => (
+                    <option key={o.username} value={o.username}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
               </div>
               <div className="min-w-0">
                 <label className={screeningFilterLabel}>性别</label>
@@ -8907,6 +9022,7 @@ function ApplicationManagementView({
     updatedAt: string
   }>(null)
   const [appAdminMsg, setAppAdminMsg] = useState<null | { title: string; message: string }>(null)
+  useAdminOverlayLockAndEscape(Boolean(reportModal), () => setReportModal(null))
   const [appListPage, setAppListPage] = useState(1)
   const [appPageSize, setAppPageSize] = useState(10)
   const [appListTotal, setAppListTotal] = useState(0)
@@ -9512,6 +9628,7 @@ function SystemCrudModal({
   children: React.ReactNode;
   footer: React.ReactNode;
 }) {
+  useAdminOverlayLockAndEscape(open, onClose);
   if (!open) return null;
   return createPortal(
     <div
