@@ -15,7 +15,7 @@ import {
   jobLevelValidationMessage,
   jobTitleValidationMessage
 } from './shared/jobTaxonomy';
-import { mysqlConnectionTimezoneOptions, wireMysqlSessionTimezone } from './shared/mysqlSessionTimezone';
+import { createResilientMysqlPool } from './shared/mysqlResilientPool';
 
 const envLocalPath = path.resolve(process.cwd(), '.env.local');
 if (fs.existsSync(envLocalPath)) {
@@ -27,7 +27,7 @@ if (fs.existsSync(envLocalPath)) {
 const adminDb = process.env.MYSQL_ADMIN_DATABASE || 'ai_recruit_admin';
 const bizDb = process.env.MYSQL_DATABASE || 'ai_recruit';
 
-const adminPool = mysql.createPool({
+const adminPool = createResilientMysqlPool({
   host: process.env.MYSQL_HOST || '127.0.0.1',
   port: Number(process.env.MYSQL_PORT || 3306),
   user: process.env.MYSQL_USER || 'root',
@@ -35,12 +35,10 @@ const adminPool = mysql.createPool({
   database: adminDb,
   waitForConnections: true,
   connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 10),
-  queueLimit: 0,
-  ...mysqlConnectionTimezoneOptions
+  queueLimit: 0
 });
-wireMysqlSessionTimezone(adminPool);
 
-const bizPool = mysql.createPool({
+const bizPool = createResilientMysqlPool({
   host: process.env.MYSQL_HOST || '127.0.0.1',
   port: Number(process.env.MYSQL_PORT || 3306),
   user: process.env.MYSQL_USER || 'root',
@@ -48,10 +46,8 @@ const bizPool = mysql.createPool({
   database: bizDb,
   waitForConnections: true,
   connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 10),
-  queueLimit: 0,
-  ...mysqlConnectionTimezoneOptions
+  queueLimit: 0
 });
-wireMysqlSessionTimezone(bizPool);
 
 /** jobs.recruiters JSON 列：mysql2 可能返回数组 / 字符串 */
 function parseRecruiters(raw: unknown): string[] {

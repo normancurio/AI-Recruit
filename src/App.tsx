@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -110,7 +110,8 @@ const ADMIN_ROLE_MENU_OPTIONS: { group: string; items: { id: string; label: stri
     items: [
       { id: 'resume-screening', label: '简历管理' },
       { id: 'resume-library', label: '简历库' },
-      { id: 'application-mgmt', label: '初面管理' }
+      { id: 'application-mgmt', label: '初面管理' },
+      { id: 'recruiter-quality-report', label: '招聘质量报表' }
     ]
   },
   {
@@ -245,6 +246,12 @@ const NAV_TEMPLATE: NavItem[] = [
         title: '初面管理',
         roles: ['admin', 'recruiter', 'recruiting_manager'],
         icon: <UserCheck className="w-4 h-4" />
+      },
+      {
+        id: 'recruiter-quality-report',
+        title: '招聘质量报表',
+        roles: ['admin', 'recruiting_manager', 'delivery_manager', 'recruiter'],
+        icon: <FileBarChart className="w-4 h-4" />
       }
     ]
   },
@@ -1029,9 +1036,12 @@ export default function App() {
       case 'clients': return <ClientManagementView />;
       case 'project-list': return <ProjectManagementView role={currentRole} onNavigate={setActiveMenu} authProfile={authProfile} />;
       case 'job-query': return <JobQueryView onNavigate={setActiveMenu} currentRole={currentRole} authProfile={authProfile} />;
-      case 'resume-screening': return <ResumeScreeningView currentRole={currentRole} authProfile={authProfile} />;
+      case 'resume-screening':
+        return <ResumeScreeningView currentRole={currentRole} authProfile={authProfile} />;
       case 'resume-library': return <ResumeLibraryView currentRole={currentRole} authProfile={authProfile} />;
       case 'application-mgmt': return <ApplicationManagementView currentRole={currentRole} authProfile={authProfile} />;
+      case 'recruiter-quality-report':
+        return <RecruiterQualityReportView currentRole={currentRole} />;
       case 'sys-dept': return <SystemDeptView />;
       case 'sys-user': return <SystemUserView currentRole={currentRole} authProfile={authProfile} />;
       case 'sys-role': return <SystemRoleView />;
@@ -1288,7 +1298,7 @@ export default function App() {
         />
       ) : null}
       <aside
-        className={`fixed inset-y-0 left-0 z-30 flex h-[100dvh] shrink-0 flex-col border-r border-slate-800/80 bg-slate-900 text-slate-300 shadow-xl transition-[width,transform] duration-200 ease-out md:static md:inset-auto md:z-0 md:h-screen md:min-h-[100dvh] md:shadow-xl ${
+        className={`fixed inset-y-0 left-0 z-30 flex h-[100dvh] shrink-0 flex-col border-r border-slate-800/80 bg-slate-900 text-slate-300 shadow-xl transition-[width,transform] duration-200 ease-out md:static md:inset-auto md:z-30 md:h-screen md:min-h-[100dvh] md:shadow-xl ${
           desktopSidebarCollapsed ? 'w-64 max-w-[min(100vw,16rem)] md:w-[4.5rem] md:min-w-[4.5rem] md:max-w-[4.5rem]' : 'w-64 max-w-[min(100vw,16rem)] md:w-64'
         } ${mobileNavOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 relative`}
       >
@@ -1425,7 +1435,7 @@ export default function App() {
             return (
               <div
                 data-sidebar-flyout
-                className="pointer-events-auto absolute left-full top-14 z-50 ml-1 hidden w-[13.5rem] flex-col rounded-xl border border-slate-700 bg-slate-950 py-2 shadow-2xl ring-1 ring-black/20 md:top-16 md:flex"
+                className="pointer-events-auto absolute left-full top-14 z-[100] ml-1 hidden w-[13.5rem] flex-col rounded-xl border border-slate-700 bg-slate-950 py-2 shadow-2xl ring-1 ring-black/20 md:top-16 md:flex"
                 role="menu"
                 aria-label={`${fly.title}子菜单`}
               >
@@ -1845,10 +1855,11 @@ function ProjectManagementView({
 
   const openCreateModal = () => {
     const code = defaultNewProjectCode();
+    const ud = String(authProfile?.dept || '').trim();
     setEditingProjectId(null);
     setFormId(code);
     setFormName('');
-    setFormDept('');
+    setFormDept(role === 'delivery_manager' && ud && ud !== '-' ? ud : '');
     setFormStart('');
     setFormEnd('');
     setFormDesc('');
@@ -1931,12 +1942,16 @@ function ProjectManagementView({
       return;
     }
     const memberCount = Math.max(0, Math.min(9999, Number(formMemberCount) || 0));
+    const dmDeptLocked =
+      role === 'delivery_manager' ? String(authProfile?.dept || '').trim() : '';
+    const projectDept =
+      dmDeptLocked && dmDeptLocked !== '-' ? dmDeptLocked : formDept.trim();
     setCreateSubmitting(true);
     try {
       if (isEdit) {
         const patchBody: Record<string, unknown> = {
             name,
-            dept: formDept.trim() || null,
+            dept: projectDept || null,
             status: formStatus.trim() || '进行中',
             startDate: formStart || null,
             endDate: formEnd || null,
@@ -1959,7 +1974,7 @@ function ProjectManagementView({
             id,
             name,
             projectCode: id,
-            dept: formDept.trim() || undefined,
+            dept: projectDept || undefined,
             status: formStatus.trim() || undefined,
             startDate: formStart || undefined,
             endDate: formEnd || undefined,
@@ -1996,15 +2011,25 @@ function ProjectManagementView({
     [depts, dmUserDept]
   );
 
-  const projectFormDeptOptions = useMemo(() => {
-    if (role === 'admin') return depts;
-    const base = scopedDeptsForProjectForm;
+  const projectFormDeptSelectRows = useMemo(() => {
+    let pool: Dept[] = role === 'admin' ? depts : scopedDeptsForProjectForm;
     const cur = formDept.trim();
-    if (!cur) return base;
-    if (base.some((d) => deptNamesMatch(cur, d.name))) return base;
-    const hit = depts.find((d) => deptNamesMatch(cur, d.name));
-    if (hit) return [hit, ...base.filter((d) => d.id !== hit.id)];
-    return [{ id: '__edit_dept__', name: cur, deptType: '', level: 0, manager: '-', count: 0, parentId: null }, ...base];
+    if (role !== 'admin' && cur && !pool.some((d) => deptNamesMatch(cur, d.name))) {
+      const hit = depts.find((d) => deptNamesMatch(cur, d.name));
+      if (hit) pool = [hit, ...pool.filter((d) => d.id !== hit.id)];
+      else {
+        pool = [
+          { id: '__edit_dept__', name: cur, deptType: '', level: 0, manager: '-', count: 0, parentId: null },
+          ...pool
+        ];
+      }
+    }
+    const rows = flattenVisibleDeptsForSelect(depts, pool);
+    const seen = new Set(rows.map((r) => r.dept.id));
+    for (const d of pool) {
+      if (d.id && !seen.has(d.id)) rows.push({ dept: d, depth: 0 });
+    }
+    return rows;
   }, [role, depts, scopedDeptsForProjectForm, formDept]);
 
   const projectRecruitmentLeadDeptOptions = useMemo(
@@ -2603,18 +2628,20 @@ function ProjectManagementView({
                   ) : null}
                   <div>
                     <label className="block text-xs font-medium text-slate-500 mb-1.5">所属部门</label>
-                    <select
-                      value={formDept}
-                      onChange={(e) => setFormDept(e.target.value)}
-                      className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-slate-900/20 focus:border-slate-400 outline-none"
-                    >
-                      <option value="">选择部门</option>
-                      {projectFormDeptOptions.map((d) => (
-                        <option key={d.id} value={d.name}>
-                          {d.name}
-                        </option>
-                      ))}
-                    </select>
+                    {role === 'delivery_manager' ? (
+                      <div className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-800">
+                        <span className="font-medium">{dmUserDept || '—'}</span>
+                        <p className="mt-1 text-xs text-slate-500">已按您账号所属部门自动填写，无需选择</p>
+                      </div>
+                    ) : (
+                      <DeptTreePicker
+                        value={formDept}
+                        onChange={setFormDept}
+                        allDepts={depts}
+                        rows={projectFormDeptSelectRows}
+                        disabled={createSubmitting}
+                      />
+                    )}
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {(role === 'admin' || role === 'delivery_manager') && (
@@ -6528,6 +6555,7 @@ function ResumeLibraryView({
   const libJobRoleOptions = useJobRoleBasesList();
 
   const [libRows, setLibRows] = useState<ResumeLibraryApiRow[]>([]);
+  const [libTotalScreenings, setLibTotalScreenings] = useState<number | null>(null);
   const [libError, setLibError] = useState('');
   const [listPage, setListPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
@@ -6704,12 +6732,21 @@ function ResumeLibraryView({
     setLibError('');
     void miniappApiFetch('/api/admin/resume-library')
       .then(async (r) => {
-        const j = (await r.json()) as { data?: ResumeLibraryApiRow[]; message?: string };
+        const j = (await r.json()) as {
+          data?: ResumeLibraryApiRow[];
+          totalScreenings?: number;
+          message?: string;
+        };
         if (!r.ok) throw adminJsonFailError(r, j, '简历库加载失败');
-        setLibRows(j.data || []);
+        const data = j.data || [];
+        setLibRows(data);
+        setLibTotalScreenings(
+          typeof j.totalScreenings === 'number' ? Math.max(0, j.totalScreenings) : data.length
+        );
       })
       .catch((e) => {
         setLibRows([]);
+        setLibTotalScreenings(null);
         setLibError(userFacingApiError(e, '简历库数据暂时无法加载，请稍后重试或联系管理员检查库表是否已升级。'));
       });
   }, [apiBase, hasToken, sessRev]);
@@ -6738,17 +6775,8 @@ function ResumeLibraryView({
       .finally(() => setDeliveryHistoryLoading(false));
   }, []);
 
-  const scopedLibRows = useMemo(() => {
-    let list = libRows;
-    if (isRecruiter) {
-      list = list.filter((r) => recruiterCodeSet.has(String(r.job_code)));
-    } else if (isDeliveryManager || isRecruitingManager) {
-      const allow = new Set(inviteJobs.map((j) => String(j.job_code || '').trim()).filter(Boolean));
-      if (allow.size === 0) return [];
-      list = list.filter((r) => allow.has(String(r.job_code || '').trim()));
-    }
-    return list;
-  }, [libRows, isRecruiter, isDeliveryManager, isRecruitingManager, inviteJobs, recruiterCodeSet]);
+  /** 可见范围由接口与简历管理一致；前端不再二次按岗位截断（避免与列表总数不一致） */
+  const scopedLibRows = libRows;
 
   const filteredLibRows = useMemo(() => {
     const f = libFilterApplied;
@@ -7098,9 +7126,17 @@ function ResumeLibraryView({
           <span className="shrink-0 text-xs text-slate-500">
             {inviteJobsLoading
               ? '同步岗位…'
-              : filteredLibRows.length !== viewLibRows.length
-                ? `当前 ${viewLibRows.length} 人（${filteredLibRows.length} 条投递已合并）`
-                : `当前 ${viewLibRows.length} 条`}
+              : (() => {
+                  const deliveries = filteredLibRows.length;
+                  const people = viewLibRows.length;
+                  const scopeTotal = libTotalScreenings ?? deliveries;
+                  if (deliveries !== people) {
+                    const scopeHint =
+                      scopeTotal !== deliveries ? `（可见范围共 ${scopeTotal} 条，与简历管理一致）` : '';
+                    return `投递 ${deliveries} 条${scopeHint}，合并显示 ${people} 人`;
+                  }
+                  return `共 ${people} 条`;
+                })()}
           </span>
         </div>
         <div className="min-h-0 flex-1 overflow-auto p-2 sm:p-3">
@@ -7459,6 +7495,7 @@ function ResumeScreeningView({
   const [sfUploader, setSfUploader] = useState('');
   const [screenFilterMoreOpen, setScreenFilterMoreOpen] = useState(false);
   const [screeningHrUsers, setScreeningHrUsers] = useState<User[]>([]);
+  const [screeningDepts, setScreeningDepts] = useState<Dept[]>([]);
   const [screeningAdminMsg, setScreeningAdminMsg] = useState<null | { title: string; message: string }>(null);
   const [bulkDeleteIds, setBulkDeleteIds] = useState<string[] | null>(null);
 
@@ -7565,7 +7602,7 @@ function ResumeScreeningView({
     if (sfChannel.trim()) sp.set('channel', sfChannel.trim());
     if (sfSalary.trim()) sp.set('salary', sfSalary.trim());
     if (sfKeyword.trim()) sp.set('keyword', sfKeyword.trim());
-    if (sfUploader.trim()) sp.set('uploaderUsername', sfUploader.trim());
+    if (isRecruitingManager && sfUploader.trim()) sp.set('uploaderUsername', sfUploader.trim());
     const screeningUrl = `/api/admin/resume-screenings?${sp.toString()}`;
     void miniappApiFetch(screeningUrl)
       .then(async (r) => {
@@ -7623,7 +7660,8 @@ function ResumeScreeningView({
     sfChannel,
     sfSalary,
     sfKeyword,
-    sfUploader
+    sfUploader,
+    isRecruitingManager
   ]);
 
   useEffect(() => {
@@ -7640,6 +7678,34 @@ function ResumeScreeningView({
       .then((data: unknown) => setScreeningHrUsers(usersFromApiPayload(data)))
       .catch(() => setScreeningHrUsers([]));
   }, [apiBase, hasToken, sessRev]);
+
+  useEffect(() => {
+    if (!isRecruitingManager) {
+      setScreeningDepts([]);
+      return;
+    }
+    void fetch('/api/depts')
+      .then((r) => r.json())
+      .then((rows: unknown) =>
+        setScreeningDepts(
+          Array.isArray(rows)
+            ? rows.map((row) => {
+                const d = row as Record<string, unknown>;
+                return {
+                  id: String(d.id ?? ''),
+                  name: String(d.name ?? '').trim(),
+                  deptType: String(d.deptType ?? d.dept_type ?? '').trim(),
+                  level: Number(d.level) || 0,
+                  manager: String(d.manager ?? '-'),
+                  count: Number(d.count) || 0,
+                  parentId: d.parentId != null ? String(d.parentId) : d.parent_id != null ? String(d.parent_id) : null
+                };
+              })
+            : []
+        )
+      )
+      .catch(() => setScreeningDepts([]));
+  }, [apiBase, hasToken, isRecruitingManager, sessRev]);
 
   useEffect(() => {
     setScreenListPage(1);
@@ -7659,10 +7725,20 @@ function ResumeScreeningView({
     sfUploader
   ]);
 
+  /** 招聘经理：本招聘部门（含子部门）内可上传简历的人员 */
   const screeningUploaderOptions = useMemo(() => {
+    if (!isRecruitingManager) return [];
+    const ud = String(authProfile?.dept || '').trim();
+    if (!ud || ud === '-') return [];
+    const subtree = screeningDepts.length ? deliveryManagerDeptSubtree(screeningDepts, ud) : [];
     const seen = new Set<string>();
     const out: { username: string; label: string }[] = [];
     for (const u of screeningHrUsers) {
+      if (u.status && u.status !== '正常') continue;
+      const inDept = subtree.length
+        ? userDeptInSubtree(u.dept, subtree)
+        : deptNamesMatch(u.dept, ud);
+      if (!inDept) continue;
       const username = String(u.username || '').trim();
       if (!username) continue;
       const key = username.toLowerCase();
@@ -7673,7 +7749,19 @@ function ResumeScreeningView({
     }
     out.sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'));
     return out;
-  }, [screeningHrUsers]);
+  }, [screeningHrUsers, screeningDepts, isRecruitingManager, authProfile?.dept]);
+
+  useEffect(() => {
+    if (!isRecruitingManager) {
+      setSfUploader('');
+      return;
+    }
+    if (!sfUploader.trim()) return;
+    const ok = screeningUploaderOptions.some(
+      (o) => o.username.toLowerCase() === sfUploader.trim().toLowerCase()
+    );
+    if (!ok) setSfUploader('');
+  }, [isRecruitingManager, screeningUploaderOptions, sfUploader]);
 
   const resetScreeningListFilters = useCallback(() => {
     setResumeProjectFilter('');
@@ -7998,7 +8086,7 @@ function ResumeScreeningView({
         loadScreenings();
         if (j.data?.screeningIncomplete === true) {
           setUploadHint(
-            '未完成 AI 识别，记录已暂存，列表「AI 结论」显示为「识别未完成」。请尽量使用 Word 或可复制的 PDF（避免纯扫描件）重新上传；若已配置大模型仍如此，请联系管理员。也可删除本条后重传。'
+            '未完成 AI 识别，记录已暂存。请尽量使用 Word 或可复制的 PDF（避免纯扫描件）重新上传；若已配置大模型仍如此，请联系管理员。也可删除本条后重传。'
           );
         } else {
           setUploadHint('解析与打分已完成，已加入下方列表。');
@@ -8141,22 +8229,25 @@ function ResumeScreeningView({
                   className={screeningFilterCtrl}
                 />
               </div>
-              <div className="min-w-0">
-                <label className={screeningFilterLabel}>上传人</label>
-                <select
-                  value={sfUploader}
-                  onChange={(e) => setSfUploader(e.target.value)}
-                  disabled={!screeningHrUsers.length}
-                  className={screeningFilterCtrl}
-                >
-                  <option value="">全部</option>
-                  {screeningUploaderOptions.map((o) => (
-                    <option key={o.username} value={o.username}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {isRecruitingManager ? (
+                <div className="min-w-0">
+                  <label className={screeningFilterLabel}>上传人</label>
+                  <select
+                    value={sfUploader}
+                    onChange={(e) => setSfUploader(e.target.value)}
+                    disabled={!screeningUploaderOptions.length}
+                    className={screeningFilterCtrl}
+                    title="仅本招聘部门（含下级部门）内账号"
+                  >
+                    <option value="">全部</option>
+                    {screeningUploaderOptions.map((o) => (
+                      <option key={o.username} value={o.username}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
               <div className="min-w-0">
                 <label className={screeningFilterLabel}>性别</label>
                 <select
@@ -8387,7 +8478,6 @@ function ResumeScreeningView({
                         <th className="w-[9%] px-1 py-3 font-medium">手机</th>
                         <th className="w-[12%] py-3 pl-1 pr-0 font-medium">匹配岗位</th>
                         <th className="w-[6%] py-3 pl-0 pr-1 text-center font-medium">匹配分</th>
-                        <th className="w-[7%] min-w-[4.5rem] max-w-[6.5rem] px-1 py-3 font-medium">AI 结论</th>
                         <th className="w-[9%] px-2 py-3 font-medium">流程</th>
                         <th className="w-[7%] px-2 py-3 font-medium">上传人</th>
                         <th className="w-[6.25rem] min-w-[6.25rem] max-w-[6.25rem] shrink-0 px-1 py-3 font-medium whitespace-nowrap">
@@ -8453,14 +8543,6 @@ function ResumeScreeningView({
                                   }`}
                                 >
                                   {resume.matchScore}
-                                </span>
-                              </td>
-                              <td className="max-w-0 min-w-0 px-1 py-2.5 text-[10px] leading-tight text-slate-600">
-                                <span
-                                  className="block w-full truncate rounded bg-slate-100 px-1 py-0.5 text-center font-medium text-slate-700"
-                                  title={resume.status}
-                                >
-                                  {resume.status}
                                 </span>
                               </td>
                               <td className="max-w-0 px-2 py-3 text-xs">
@@ -9597,6 +9679,299 @@ function ApplicationManagementView({
   )
 }
 
+type RecruiterQualityReportRow = {
+  dept: string
+  username: string
+  displayName: string
+  role: string
+  uploadCount: number
+  highQualityCount: number
+  highQualityRate: number
+  avgMatchScore: number
+  qualifiedCount: number
+  invitedCount: number
+  inviteRate: number
+  interviewDoneCount: number
+  interviewPassCount: number
+  interviewPassRate: number | null
+  avgInterviewScore: number | null
+  qualityScore: number | null
+  sampleInsufficient: boolean
+}
+
+function defaultReportDateRange(): { from: string; to: string } {
+  const to = new Date()
+  const from = new Date(to)
+  from.setDate(from.getDate() - 30)
+  const fmt = (d: Date) => {
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day}`
+  }
+  return { from: fmt(from), to: fmt(to) }
+}
+
+function RecruiterQualityReportView({ currentRole }: { currentRole: Role }) {
+  const initialRange = useMemo(() => defaultReportDateRange(), [])
+  const [dateFrom, setDateFrom] = useState(initialRange.from)
+  const [dateTo, setDateTo] = useState(initialRange.to)
+  const [deptFilter, setDeptFilter] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [rows, setRows] = useState<RecruiterQualityReportRow[]>([])
+  const [summary, setSummary] = useState({
+    uploadCount: 0,
+    interviewDoneCount: 0,
+    interviewPassCount: 0,
+    avgQualityScore: null as number | null
+  })
+  const [meta, setMeta] = useState<{
+    minUploads: number
+    thresholds: { highQuality: number; qualified: number }
+  } | null>(null)
+  const [deptOptions, setDeptOptions] = useState<string[]>([])
+
+  const showDeptFilter = currentRole === 'admin' || currentRole === 'recruiting_manager'
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const qs = new URLSearchParams()
+      if (dateFrom) qs.set('dateFrom', dateFrom)
+      if (dateTo) qs.set('dateTo', dateTo)
+      if (deptFilter.trim()) qs.set('dept', deptFilter.trim())
+      const r = await miniappApiFetch(`/api/admin/reports/recruiter-quality?${qs.toString()}`)
+      const payload = (await r.json()) as {
+        rows?: RecruiterQualityReportRow[]
+        summary?: typeof summary
+        meta?: { minUploads: number; thresholds: { highQuality: number; qualified: number } }
+        deptOptions?: string[]
+        message?: string
+      }
+      if (!r.ok) throw adminJsonFailError(r, payload, '加载报表失败')
+      setRows(Array.isArray(payload.rows) ? payload.rows : [])
+      setSummary(
+        payload.summary ?? { uploadCount: 0, interviewDoneCount: 0, interviewPassCount: 0, avgQualityScore: null }
+      )
+      setMeta(payload.meta ?? null)
+      setDeptOptions(Array.isArray(payload.deptOptions) ? payload.deptOptions : [])
+    } catch (e) {
+      setError(userFacingApiError(e, '加载报表失败'))
+      setRows([])
+    } finally {
+      setLoading(false)
+    }
+  }, [dateFrom, dateTo, deptFilter])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const exportCsv = () => {
+    const header = [
+      '招聘部门',
+      '姓名',
+      '登录账号',
+      '角色',
+      '上传数',
+      '高质量数',
+      '高质量率%',
+      '平均匹配分',
+      '合格简历发邀率%',
+      '面试完成数',
+      '面试通过数',
+      '面试通过率%',
+      '面试均分',
+      '综合质量分'
+    ]
+    const lines = rows.map((r) =>
+      [
+        r.dept,
+        r.displayName,
+        r.username,
+        r.role,
+        r.uploadCount,
+        r.highQualityCount,
+        r.highQualityRate,
+        r.avgMatchScore,
+        r.inviteRate,
+        r.interviewDoneCount,
+        r.interviewPassCount,
+        r.interviewPassRate ?? '',
+        r.avgInterviewScore ?? '',
+        r.qualityScore ?? ''
+      ]
+        .map((c) => `"${String(c).replace(/"/g, '""')}"`)
+        .join(',')
+    )
+    const blob = new Blob(['\uFEFF' + [header.join(','), ...lines].join('\n')], {
+      type: 'text/csv;charset=utf-8'
+    })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `招聘质量报表_${dateFrom}_${dateTo}.csv`
+    a.click()
+    URL.revokeObjectURL(a.href)
+  }
+
+  return (
+    <div className="space-y-4 sm:space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">招聘质量报表</h1>
+          <p className="mt-1 text-sm text-slate-500">
+            按招聘部门与人员统计上传、发邀与 AI 面试结果；综合分 = 25% 高质量简历 + 25% 合格发邀率 + 50% 面试通过率
+          </p>
+        </div>
+        <button type="button" onClick={exportCsv} disabled={!rows.length} className={btnSecondarySm}>
+          <Download className="inline h-4 w-4 mr-1" />
+          导出 CSV
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-slate-500">开始日期</label>
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            className="rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-slate-500">结束日期</label>
+          <input
+            type="date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            className="rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+        </div>
+        {showDeptFilter ? (
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-500">招聘部门</label>
+            <select
+              value={deptFilter}
+              onChange={(e) => setDeptFilter(e.target.value)}
+              className="min-w-[10rem] rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="">全部部门</option>
+              {deptOptions.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
+        <button type="button" onClick={() => void load()} disabled={loading} className={btnPrimarySmFlex}>
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+          查询
+        </button>
+      </div>
+
+      {meta ? (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+            <div className="text-xs text-slate-500">期间上传</div>
+            <div className="text-xl font-bold text-slate-900">{summary.uploadCount}</div>
+          </div>
+          <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+            <div className="text-xs text-slate-500">完成 AI 面试</div>
+            <div className="text-xl font-bold text-slate-900">{summary.interviewDoneCount}</div>
+          </div>
+          <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+            <div className="text-xs text-slate-500">面试通过</div>
+            <div className="text-xl font-bold text-emerald-700">{summary.interviewPassCount}</div>
+          </div>
+          <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+            <div className="text-xs text-slate-500">平均综合分</div>
+            <div className="text-xl font-bold text-indigo-700">
+              {summary.avgQualityScore != null ? summary.avgQualityScore : '—'}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {error ? (
+        <div className="rounded-lg border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
+      ) : null}
+
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        {loading ? (
+          <div className="flex items-center justify-center gap-2 py-16 text-slate-500">
+            <Loader2 className="h-5 w-5 animate-spin" />
+            加载中…
+          </div>
+        ) : rows.length === 0 ? (
+          <div className="py-16 text-center text-sm text-slate-500">所选条件下暂无数据</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[960px] text-left text-sm">
+              <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                <tr>
+                  <th className="px-3 py-3 font-medium">招聘部门</th>
+                  <th className="px-3 py-3 font-medium">招聘人员</th>
+                  <th className="px-3 py-3 font-medium text-right">上传</th>
+                  <th className="px-3 py-3 font-medium text-right">高质量率</th>
+                  <th className="px-3 py-3 font-medium text-right">均匹配分</th>
+                  <th className="px-3 py-3 font-medium text-right">合格发邀率</th>
+                  <th className="px-3 py-3 font-medium text-right">面试完成</th>
+                  <th className="px-3 py-3 font-medium text-right">面试通过率</th>
+                  <th className="px-3 py-3 font-medium text-right">面试均分</th>
+                  <th className="px-3 py-3 font-medium text-right">综合分</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {rows.map((r) => (
+                  <tr key={`${r.dept}-${r.username}`} className="hover:bg-slate-50/80">
+                    <td className="px-3 py-3 text-slate-700">{r.dept}</td>
+                    <td className="px-3 py-3">
+                      <div className="font-medium text-slate-900">{r.displayName}</div>
+                      <div className="text-xs text-slate-500">{r.role}</div>
+                    </td>
+                    <td className="px-3 py-3 text-right tabular-nums">{r.uploadCount}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">
+                      {r.highQualityRate}%
+                      <div className="text-xs text-slate-400">≥{meta?.thresholds.highQuality ?? 80}分</div>
+                    </td>
+                    <td className="px-3 py-3 text-right tabular-nums">{r.avgMatchScore}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">
+                      {r.inviteRate}%
+                      <div className="text-xs text-slate-400">匹配≥{meta?.thresholds.qualified ?? 70}</div>
+                    </td>
+                    <td className="px-3 py-3 text-right tabular-nums">{r.interviewDoneCount}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">
+                      {r.interviewPassRate != null ? `${r.interviewPassRate}%` : '—'}
+                    </td>
+                    <td className="px-3 py-3 text-right tabular-nums">{r.avgInterviewScore ?? '—'}</td>
+                    <td className="px-3 py-3 text-right">
+                      {r.sampleInsufficient ? (
+                        <span className="text-xs text-amber-600" title={`上传不足 ${meta?.minUploads ?? 3} 条`}>
+                          样本不足
+                        </span>
+                      ) : (
+                        <span className="font-semibold text-indigo-700 tabular-nums">{r.qualityScore}</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {currentRole === 'recruiter' ? (
+        <p className="text-xs text-slate-500">当前仅展示您本人数据。招聘经理可见本部门；交付经理可见负责项目范围内数据。</p>
+      ) : null}
+    </div>
+  )
+}
+
 // --- System Management Views ---
 
 async function adminFetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -9662,9 +10037,10 @@ function SystemCrudModal({
 
 function mapDeptRow(r: Record<string, unknown>): Dept {
   const rawType = r.dept_type ?? r.deptType ?? (r as { DEPT_TYPE?: unknown }).DEPT_TYPE;
+  const rawParent = r.parent_id ?? r.parentId ?? (r as { PARENT_ID?: unknown }).PARENT_ID;
   return {
     id: String(r.id ?? ''),
-    parentId: r.parent_id != null && String(r.parent_id).trim() ? String(r.parent_id) : null,
+    parentId: rawParent != null && String(rawParent).trim() ? String(rawParent).trim() : null,
     name: String(r.name ?? ''),
     deptType: String(rawType ?? '').trim(),
     level: Number(r.level) || 0,
@@ -9673,8 +10049,22 @@ function mapDeptRow(r: Record<string, unknown>): Dept {
   };
 }
 
-/** 按 parent_id 建树后深度优先展开；无 parent_id 的老数据按 level+名称排序为顶级 */
+function deptsHaveParentLinks(depts: Dept[]): boolean {
+  return depts.some((d) => String(d.parentId || '').trim());
+}
+
+/** 按 parent_id 建树后深度优先展开；无 parent_id 时按 level 作缩进层级 */
 function flattenDeptTree(depts: Dept[]): { dept: Dept; depth: number }[] {
+  if (!deptsHaveParentLinks(depts)) {
+    return [...depts]
+      .sort((a, b) => {
+        const la = Number(a.level) || 0;
+        const lb = Number(b.level) || 0;
+        if (la !== lb) return la - lb;
+        return String(a.name).localeCompare(String(b.name), 'zh-CN');
+      })
+      .map((d) => ({ dept: d, depth: Math.max(0, Number(d.level) || 0) }));
+  }
   const byParent = new Map<string, Dept[]>();
   for (const d of depts) {
     const pid = d.parentId || '';
@@ -9716,6 +10106,289 @@ function flattenDeptTree(depts: Dept[]): { dept: Dept; depth: number }[] {
   });
   for (const o of orphans) out.push({ dept: o, depth: 0 });
   return out;
+}
+
+/** 部门从根到当前节点的完整路径 */
+function deptBreadcrumbPath(allDepts: Dept[], dept: Dept): string {
+  const byId = new Map(allDepts.map((d) => [d.id, d]))
+  const parts: string[] = []
+  let cur: Dept | undefined = dept
+  const seen = new Set<string>()
+  while (cur?.id && !seen.has(cur.id)) {
+    seen.add(cur.id)
+    const nm = String(cur.name || '').trim()
+    if (nm) parts.unshift(nm)
+    const pid = String(cur.parentId || '').trim()
+    cur = pid ? byId.get(pid) : undefined
+  }
+  return parts.length ? parts.join(' / ') : String(dept.name || '').trim()
+}
+
+/** 在完整组织树上按 DFS 展开，仅保留 visible 集合中的节点（保留真实 depth） */
+function flattenVisibleDeptsForSelect(allDepts: Dept[], visibleDepts: Dept[]): { dept: Dept; depth: number }[] {
+  const visibleIds = new Set(visibleDepts.map((d) => d.id).filter(Boolean))
+  if (!visibleIds.size) return []
+  return flattenDeptTree(allDepts).filter((row) => visibleIds.has(row.dept.id))
+}
+
+function deptTypeBadgeEl(deptType: string) {
+  const t = String(deptType || '').trim()
+  if (!t) return null
+  const cls =
+    t === '招聘'
+      ? 'rounded bg-emerald-50 text-emerald-700'
+      : t === '交付'
+        ? 'rounded bg-sky-50 text-sky-700'
+        : 'rounded bg-slate-100 text-slate-600'
+  return <span className={`shrink-0 px-1.5 py-0.5 text-[10px] font-medium ${cls}`}>{t}</span>
+}
+
+/** 树形部门选择器（替代原生 select，支持折叠、搜索） */
+function DeptTreePicker({
+  value,
+  onChange,
+  allDepts,
+  rows,
+  placeholder = '选择部门',
+  disabled = false
+}: {
+  value: string
+  onChange: (name: string) => void
+  allDepts: Dept[]
+  rows: { dept: Dept; depth: number }[]
+  placeholder?: string
+  disabled?: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const [q, setQ] = useState('')
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
+  const [panelRect, setPanelRect] = useState<{ top: number; left: number; width: number } | null>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+
+  const childCountById = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const d of allDepts) {
+      const pid = String(d.parentId || '').trim()
+      if (!pid) continue
+      m.set(pid, (m.get(pid) || 0) + 1)
+    }
+    return m
+  }, [allDepts])
+
+  const selectedDept = useMemo(
+    () => allDepts.find((d) => deptNamesMatch(value, d.name)) ?? null,
+    [allDepts, value]
+  )
+
+  const selectedPath = useMemo(() => {
+    if (!selectedDept) return ''
+    return deptBreadcrumbPath(allDepts, selectedDept)
+  }, [allDepts, selectedDept])
+
+  const displayRows = useMemo(() => {
+    const qq = q.trim().toLowerCase()
+    if (qq) {
+      return rows.filter(({ dept }) => {
+        const path = deptBreadcrumbPath(allDepts, dept).toLowerCase()
+        return path.includes(qq) || String(dept.name).toLowerCase().includes(qq)
+      })
+    }
+    const out: { dept: Dept; depth: number }[] = []
+    let hiddenDepth: number | null = null
+    for (const row of rows) {
+      if (hiddenDepth !== null) {
+        if (row.depth > hiddenDepth) continue
+        hiddenDepth = null
+      }
+      out.push(row)
+      if (collapsed.has(row.dept.id)) hiddenDepth = row.depth
+    }
+    return out
+  }, [rows, q, collapsed, allDepts])
+
+  const updatePanelRect = useCallback(() => {
+    const el = triggerRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    const vw = window.innerWidth
+    const width = Math.max(r.width, 280)
+    const left = Math.min(Math.max(8, r.left), Math.max(8, vw - width - 8))
+    const top = r.bottom + 4
+    setPanelRect({ top, left, width })
+  }, [])
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPanelRect(null)
+      return
+    }
+    updatePanelRect()
+  }, [open, updatePanelRect])
+
+  useEffect(() => {
+    if (!open) return
+    const onLayout = () => updatePanelRect()
+    window.addEventListener('resize', onLayout)
+    window.addEventListener('scroll', onLayout, true)
+    return () => {
+      window.removeEventListener('resize', onLayout)
+      window.removeEventListener('scroll', onLayout, true)
+    }
+  }, [open, updatePanelRect])
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (triggerRef.current?.contains(t)) return
+      const panel = document.getElementById('dept-tree-picker-panel')
+      if (panel?.contains(t)) return
+      setOpen(false)
+      setQ('')
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpen(false)
+        setQ('')
+      }
+    }
+    const timer = window.setTimeout(() => {
+      document.addEventListener('mousedown', onDoc)
+    }, 0)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      window.clearTimeout(timer)
+      document.removeEventListener('mousedown', onDoc)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const closePicker = () => {
+    setOpen(false)
+    setQ('')
+  }
+
+  const pickerPanel =
+    open && panelRect && typeof document !== 'undefined'
+      ? createPortal(
+          <div
+            id="dept-tree-picker-panel"
+            className="fixed z-[300] rounded-xl border border-slate-200 bg-white shadow-xl"
+            style={{ top: panelRect.top, left: panelRect.left, width: panelRect.width }}
+          >
+            <div className="border-b border-slate-100 p-2">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="search"
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="搜索部门…"
+                  className="w-full rounded-lg border border-slate-200 py-2 pl-8 pr-3 text-sm outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-900/10"
+                  autoFocus
+                />
+              </div>
+            </div>
+            <ul className="max-h-60 overflow-y-auto py-1" role="listbox">
+              {displayRows.length === 0 ? (
+                <li className="px-3 py-8 text-center text-xs text-slate-400">
+                  {rows.length === 0 ? '暂无部门，请先在「部门管理」中维护' : '无匹配部门'}
+                </li>
+              ) : (
+                displayRows.map(({ dept, depth }) => {
+                  const selected = deptNamesMatch(value, dept.name)
+                  const hasKids = (childCountById.get(dept.id) || 0) > 0
+                  const searching = Boolean(q.trim())
+                  return (
+                    <li
+                      key={dept.id}
+                      role="option"
+                      aria-selected={selected}
+                      className={`flex w-full items-center gap-1.5 py-2 pr-3 text-sm transition-colors hover:bg-slate-50 ${
+                        selected ? 'bg-indigo-50 text-indigo-900' : 'text-slate-800'
+                      }`}
+                      style={{ paddingLeft: `${depth * 1.25 + 0.75}rem` }}
+                    >
+                      {hasKids && !searching ? (
+                        <button
+                          type="button"
+                          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-500 hover:bg-slate-50"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setCollapsed((prev) => {
+                              const next = new Set(prev)
+                              if (next.has(dept.id)) next.delete(dept.id)
+                              else next.add(dept.id)
+                              return next
+                            })
+                          }}
+                          aria-label={collapsed.has(dept.id) ? '展开子部门' : '折叠子部门'}
+                        >
+                          {collapsed.has(dept.id) ? (
+                            <ChevronRight className="h-3.5 w-3.5" />
+                          ) : (
+                            <ChevronDown className="h-3.5 w-3.5" />
+                          )}
+                        </button>
+                      ) : (
+                        <span className="w-5 shrink-0" />
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onChange(dept.name)
+                          closePicker()
+                        }}
+                        className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                      >
+                        <Network className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+                        <span className="min-w-0 flex-1 truncate font-medium">{dept.name}</span>
+                        {deptTypeBadgeEl(dept.deptType || '')}
+                        {selected ? <CheckCircle2 className="h-4 w-4 shrink-0 text-indigo-600" /> : null}
+                      </button>
+                    </li>
+                  )
+                })
+              )}
+            </ul>
+          </div>,
+          document.body
+        )
+      : null
+
+  return (
+    <div className="relative w-full">
+      <button
+        ref={triggerRef}
+        type="button"
+        disabled={disabled}
+        onClick={() => {
+          if (disabled) return
+          setOpen((v) => !v)
+        }}
+        className={`flex w-full items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left text-sm outline-none transition-colors focus:border-slate-400 focus:ring-2 focus:ring-slate-900/20 disabled:cursor-not-allowed disabled:bg-slate-50 ${
+          open ? 'border-slate-400 ring-2 ring-slate-900/20' : ''
+        }`}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <div className="min-w-0 flex-1">
+          {value.trim() ? (
+            <>
+              <div className="truncate font-medium text-slate-900">{value.trim()}</div>
+              {selectedPath && selectedPath !== value.trim() ? (
+                <div className="truncate text-xs text-slate-500">{selectedPath}</div>
+              ) : null}
+            </>
+          ) : (
+            <span className="text-slate-400">{placeholder}</span>
+          )}
+        </div>
+        <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {pickerPanel}
+    </div>
+  )
 }
 
 const RECRUITMENT_DEPT_BUSINESS_TYPE = '招聘';
@@ -10632,7 +11305,9 @@ function SystemUserView({
     if (!userDialog) return;
     const name = ufName.trim();
     const username = ufUsername.trim();
-    const dept = ufDept.trim() || '-';
+    const deptLocked =
+      currentRole === 'delivery_manager' && myDeptOk ? myDept : ufDept.trim() || '-';
+    const dept = deptLocked;
     const role = ufRole.trim() || '招聘人员';
     if (!name.trim()) {
       setError('请填写姓名');
@@ -11018,31 +11693,40 @@ function SystemUserView({
         </div>
         <div>
           <label className="block text-xs font-medium text-slate-500 mb-1">所属部门</label>
-          <select
-            className={systemFieldClass}
-            value={deptNames.includes(ufDept) ? ufDept : ufDept ? `__other:${ufDept}` : ''}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v.startsWith('__other:')) setUfDept(v.slice('__other:'.length));
-              else setUfDept(v);
-            }}
-            disabled={saving || (!listAllUsers && myDeptOk && deptNames.length <= 1)}
-          >
-            <option value="">请选择部门</option>
-            {deptNames.map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-            {ufDept.trim() && !deptNames.includes(ufDept) ? (
-              <option value={`__other:${ufDept}`}>{ufDept}（当前值，不在部门列表中）</option>
-            ) : null}
-          </select>
-          {deptNames.length === 0 ? (
-            <p className="text-[11px] text-amber-700 mt-1.5">
-              暂无部门数据，请先在「部门管理」中新增部门后再创建用户。
-            </p>
-          ) : null}
+          {currentRole === 'delivery_manager' && myDeptOk ? (
+            <div className={`${systemFieldClass} bg-slate-50 text-slate-800`}>
+              <span className="font-medium">{myDept}</span>
+              <p className="mt-1 text-[11px] text-slate-500">已按您账号所属部门自动填写</p>
+            </div>
+          ) : (
+            <>
+              <select
+                className={systemFieldClass}
+                value={deptNames.includes(ufDept) ? ufDept : ufDept ? `__other:${ufDept}` : ''}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v.startsWith('__other:')) setUfDept(v.slice('__other:'.length));
+                  else setUfDept(v);
+                }}
+                disabled={saving || (!listAllUsers && myDeptOk && deptNames.length <= 1)}
+              >
+                <option value="">请选择部门</option>
+                {deptNames.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+                {ufDept.trim() && !deptNames.includes(ufDept) ? (
+                  <option value={`__other:${ufDept}`}>{ufDept}（当前值，不在部门列表中）</option>
+                ) : null}
+              </select>
+              {deptNames.length === 0 ? (
+                <p className="text-[11px] text-amber-700 mt-1.5">
+                  暂无部门数据，请先在「部门管理」中新增部门后再创建用户。
+                </p>
+              ) : null}
+            </>
+          )}
         </div>
         <div>
           <label className="block text-xs font-medium text-slate-500 mb-1">角色</label>

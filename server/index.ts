@@ -32,12 +32,17 @@ function matchJobTitleToStandardProfileOption(raw: string): string | null {
   if (base && set.has(base)) return base
   return null
 }
-import { mysqlConnectionTimezoneOptions, wireMysqlSessionTimezone } from '../shared/mysqlSessionTimezone'
+import { createResilientMysqlPool, isMysqlTransientError } from '../shared/mysqlResilientPool'
 import {
   buildResumeScreeningsAdminListWhere,
   parseResumeScreeningsAdminListQuery,
   type ResumeScreeningsAdminListQuery
 } from './resumeScreeningsAdminListQuery.ts'
+import {
+  buildRecruiterQualityReport,
+  recruiterQualityReportDeptOptions,
+  type RecruiterQualityUiRole
+} from './recruiterQualityReport.ts'
 
 const requireCjs = createRequire(import.meta.url)
 
@@ -80,7 +85,7 @@ function normalizeMultipartFilename(name: string | undefined | null): string {
   }
 }
 
-const mysqlPool = mysql.createPool({
+const mysqlPool = createResilientMysqlPool({
   host: process.env.MYSQL_HOST || '127.0.0.1',
   port: Number(process.env.MYSQL_PORT || 3306),
   user: process.env.MYSQL_USER || 'root',
@@ -88,10 +93,8 @@ const mysqlPool = mysql.createPool({
   database: process.env.MYSQL_DATABASE || 'ai_recruit',
   waitForConnections: true,
   connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 10),
-  queueLimit: 0,
-  ...mysqlConnectionTimezoneOptions
+  queueLimit: 0
 })
-wireMysqlSessionTimezone(mysqlPool)
 
 /** 标准岗位序列：与表 standard_job_role_bases 同步到 shared 内存，供 compose / 校验 */
 async function refreshStandardJobRoleBasesCache(): Promise<void> {
@@ -127,7 +130,7 @@ async function refreshStandardJobRoleBasesCache(): Promise<void> {
 }
 
 /** 管理端演示库（HR users 等），与 MYSQL_DATABASE 业务库分离 */
-const mysqlAdminPool = mysql.createPool({
+const mysqlAdminPool = createResilientMysqlPool({
   host: process.env.MYSQL_HOST || '127.0.0.1',
   port: Number(process.env.MYSQL_PORT || 3306),
   user: process.env.MYSQL_USER || 'root',
@@ -135,10 +138,8 @@ const mysqlAdminPool = mysql.createPool({
   database: process.env.MYSQL_ADMIN_DATABASE || 'ai_recruit_admin',
   waitForConnections: true,
   connectionLimit: Math.min(5, Number(process.env.MYSQL_CONNECTION_LIMIT || 10)),
-  queueLimit: 0,
-  ...mysqlConnectionTimezoneOptions
+  queueLimit: 0
 })
-wireMysqlSessionTimezone(mysqlAdminPool)
 
 const ADMIN_SESSION_KEY_PREFIX = String(process.env.REDIS_ADMIN_SESSION_PREFIX || 'ar:admin:sess:').trim() || 'ar:admin:sess:'
 
@@ -582,10 +583,19 @@ async function sleepMs(ms: number): Promise<void> {
   await new Promise((r) => setTimeout(r, ms))
 }
 
-async function dashScopeChatCompletions(body: Record<string, unknown>) {
+async function dashScopeChatCompletions(
+  body: Record<string, unknown>,
+  opts?: { timeoutMs?: number }
+) {
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
   if (!apiKey) throw new Error('DASHSCOPE_API_KEY missing')
   const base = dashScopeCompatibleBaseUrl()
+  const timeoutMs = Math.max(0, Number(opts?.timeoutMs) || 0)
+  const controller = timeoutMs > 0 ? new AbortController() : null
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  if (controller && timeoutMs > 0) {
+    timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+  }
   let resp: Response
   try {
     resp = await fetch(`${base}/chat/completions`, {
@@ -594,14 +604,24 @@ async function dashScopeChatCompletions(body: Record<string, unknown>) {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: controller?.signal
     })
   } catch (netErr) {
+    const aborted =
+      netErr instanceof Error &&
+      (netErr.name === 'AbortError' || /aborted|abort/i.test(netErr.message))
     const e = new Error(
-      netErr instanceof Error ? `网络请求失败：${netErr.message}` : '网络请求失败'
+      aborted
+        ? `大模型请求超时（${timeoutMs}ms）`
+        : netErr instanceof Error
+          ? `网络请求失败：${netErr.message}`
+          : '网络请求失败'
     ) as Error & { httpStatus?: number }
-    e.httpStatus = 0
+    e.httpStatus = aborted ? 408 : 0
     throw e
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId)
   }
   const data = (await resp.json()) as { choices?: { message?: { content?: string } }[]; error?: { message?: string }; message?: string }
   if (!resp.ok) {
@@ -935,44 +955,43 @@ function parseResumeScreeningAiJson(raw: string): ResumeScreeningAiResult | null
   }
 }
 
+function resumeAiClipChars(kind: 'resume' | 'jd'): number {
+  const envKey = kind === 'resume' ? 'RESUME_AI_RESUME_CHARS' : 'RESUME_AI_JD_CHARS'
+  const def = kind === 'resume' ? 9000 : 3500
+  const n = Number(process.env[envKey])
+  if (Number.isFinite(n) && n >= 2000) return Math.min(kind === 'resume' ? 20000 : 12000, Math.floor(n))
+  return def
+}
+
 function buildResumeEvalPromptForServer(params: {
   jobTitle: string
   department: string
   jdText: string
   resumeText: string
 }): { userPrompt: string; systemPrompt: string } {
-  const clipResume = params.resumeText.replace(/\s+/g, ' ').slice(0, 14000)
-  const clipJd = (params.jdText || '').replace(/\s+/g, ' ').slice(0, 8000)
+  const clipResume = params.resumeText.replace(/\s+/g, ' ').slice(0, resumeAiClipChars('resume'))
+  const clipJd = (params.jdText || '').replace(/\s+/g, ' ').slice(0, resumeAiClipChars('jd'))
   const isRisk = /风控|反欺诈|信用|催收|合规|授信|风险/.test(
     `${params.jobTitle} ${params.department} ${params.jdText}`
   )
   const userPrompt = [
-    `岗位名称：${params.jobTitle}`,
+    `岗位：${params.jobTitle}`,
     `部门：${params.department || '—'}`,
-    `JD：${clipJd || '（无正文）'}`,
-    `简历全文（节选）：${clipResume}`
+    `JD：${clipJd || '（无）'}`,
+    `简历：${clipResume}`
   ].join('\n')
   const riskDimKeys = 'risk_fit,depth,impact,data_skill,stability_growth,communication_business'
   const engDimKeys = 'tech_fit,engineering_depth,impact,code_quality,stability_growth,communication_business'
   const dimKeys = isRisk ? riskDimKeys : engDimKeys
   const systemPrompt =
-    (isRisk
-      ? '你是资深招聘评估专家。根据岗位JD与简历文本进行风控运营岗位评估。'
-      : '你是资深招聘评估专家。根据岗位JD与简历文本进行研发岗位评估。') +
-    '只输出 JSON 对象，不要 markdown，不要多余文本。' +
-    '必须输出字段：schema_version,job_type,hard_gate,dimension_scores,total_score,strengths,risks,decision,summary,candidate_profile,candidate_name。' +
-    'candidate_name：从简历中识别的候选人真实姓名（2～30 个字符）；能识别则必填，无法识别时填空字符串 ""（不要用「未知」「候选人」等占位）。' +
-    'candidate_profile 为对象，从简历原文抽取候选人静态信息（无依据填 null；字符串可填空串）；其中可含 name 或「姓名」键，与 candidate_name 一致即可。' +
-    '必填尽量填写：school（毕业/就读院校）、job_title（应聘职位，仅填标准岗位序列名称，勿带初级/中级等级别前缀，勿写 JD 要求）、email、candidate_phone、current_company（现任或最近工作单位全称，勿写职位名）、' +
-    'gender（男|女|未知）、age（整数|null）、work_experience_years（工作年限年数|null）、major、education、' +
-    'current_address、graduation_date、arrival_time、id_number、is_third_party、' +
-    'has_degree、is_unified_enrollment、expected_salary、verifiable、recruitment_channel、resume_uploaded（布尔，无依据 null）。' +
-    '禁止编造：无法从简历判断的字段必须为 null。' +
-    `dimension_scores 必须包含：${dimKeys}。` +
-    '关键：dimension_scores 的每个维度都必须是对象，格式为 {"score":0-100数字,"evidence":["证据点：...｜摘录：..."]}，evidence 至少 1 条。' +
-    '不要把维度写成纯数字。' +
-    'risks 必须是对象数组，格式为 {"risk":"...","interview_question":"..."}。' +
-    'decision 仅允许：建议进入面试 / 建议备选 / 不建议推进。'
+    (isRisk ? '招聘评估（风控岗）。' : '招聘评估（研发岗）。') +
+    '只输出一个 JSON 对象，无 markdown。' +
+    '字段：schema_version,job_type,hard_gate,dimension_scores,total_score,strengths,risks,decision,summary,candidate_profile,candidate_name。' +
+    'candidate_name 为简历姓名，无法识别用 ""。' +
+    'candidate_profile 从简历抽取，无依据 null；尽量填 school,job_title,email,candidate_phone,current_company,gender,age,work_experience_years,major,education；禁止编造。' +
+    `dimension_scores 每项 {"score":0-100,"evidence":["…"]}，须含 ${dimKeys}。` +
+    'risks 为 {"risk","interview_question"} 数组。' +
+    'decision 仅：建议进入面试|建议备选|不建议推进。'
   return { userPrompt, systemPrompt }
 }
 
@@ -1592,7 +1611,24 @@ async function extractResumePlainText(buffer: Buffer, originalname: string, mime
 function resumeAiMaxAttempts(): number {
   const n = Number(process.env.RESUME_AI_MAX_ATTEMPTS)
   if (Number.isFinite(n) && n >= 1) return Math.min(5, Math.floor(n))
-  return 3
+  return 2
+}
+
+function resumeAiTimeoutMs(): number {
+  const n = Number(process.env.RESUME_AI_TIMEOUT_MS)
+  if (Number.isFinite(n) && n >= 15000) return Math.min(180000, Math.floor(n))
+  return 90000
+}
+
+function resumeAiMaxTokens(): number {
+  const n = Number(process.env.RESUME_AI_MAX_TOKENS)
+  if (Number.isFinite(n) && n >= 800) return Math.min(4096, Math.floor(n))
+  return 2200
+}
+
+function resumeAiUseJsonMode(): boolean {
+  const v = String(process.env.RESUME_AI_JSON_MODE ?? '1').trim().toLowerCase()
+  return v !== '0' && v !== 'false' && v !== 'off'
 }
 
 /** 可重试：限流、服务端错误、网络抖动；不重试：密钥/权限等明确客户端错误 */
@@ -1624,9 +1660,10 @@ async function runResumeScreeningWithAi(params: {
   const model = process.env.QWEN_RESUME_MODEL?.trim() || 'qwen-turbo'
   const { userPrompt, systemPrompt } = buildResumeEvalPromptForServer(params)
   const maxAttempts = resumeAiMaxAttempts()
-  const reqBody = {
+  const reqBody: Record<string, unknown> = {
     model,
     temperature: 0.2,
+    max_tokens: resumeAiMaxTokens(),
     messages: [
       {
         role: 'system',
@@ -1635,10 +1672,13 @@ async function runResumeScreeningWithAi(params: {
       { role: 'user', content: userPrompt }
     ]
   }
+  if (resumeAiUseJsonMode()) {
+    reqBody.response_format = { type: 'json_object' }
+  }
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const data = await dashScopeChatCompletions(reqBody)
+      const data = await dashScopeChatCompletions(reqBody, { timeoutMs: resumeAiTimeoutMs() })
       const raw = data?.choices?.[0]?.message?.content
       const text = typeof raw === 'string' ? raw : ''
       const next = parseResumeEvalToScreeningResult(text, params.resumeText)
@@ -1656,7 +1696,7 @@ async function runResumeScreeningWithAi(params: {
         return parsed
       }
       if (attempt < maxAttempts) {
-        const delayMs = 400 + attempt * 400
+        const delayMs = 200 + attempt * 200
         if (flowLogEnabled) {
           flowLog('resume-screen', false, `大模型返回无法结构化解析，${delayMs}ms 后重试 (${attempt}/${maxAttempts})`)
         } else if (attempt === 1) {
@@ -3565,9 +3605,18 @@ function resumeScreeningsPlainCountSql(
   return { sql, params: [...jobParams, ...whereParams] }
 }
 
-/** 简历库列表：筛查主表 + 结构化详情（profiles）+ 项目名；字段贴合简历详情编辑 */
-function resumeLibraryListSql(projectId: string | null): { sql: string; params: unknown[] } {
+/** 简历库列表：筛查主表 + 结构化详情（profiles）+ 项目名；与简历管理同范围，不截断条数（原 LIMIT 500 会导致总数偏少） */
+function resumeLibraryListSql(
+  projectId: string | null,
+  whereSql: string,
+  whereParams: unknown[]
+): { sql: string; params: unknown[]; countSql: string; countParams: unknown[] } {
   const { fragment: jobJoin, params: jobParams } = resumeScreeningsJobFilterJoinSql(projectId)
+  const fromWhere = `FROM resume_screenings s
+       ${jobJoin}
+       ${resumeScreeningsProjectJoinSql()}
+       LEFT JOIN resume_screening_profiles p ON p.screening_id = s.id
+       WHERE 1=1 ${whereSql}`
   const sql = `SELECT s.id,
               s.candidate_id,
               s.candidate_name,
@@ -3592,13 +3641,11 @@ function resumeLibraryListSql(projectId: string | null): { sql: string; params: 
               p.verifiable,
               p.recruitment_channel,
               p.resume_uploaded
-       FROM resume_screenings s
-       ${jobJoin}
-       ${resumeScreeningsProjectJoinSql()}
-       LEFT JOIN resume_screening_profiles p ON p.screening_id = s.id
-       ORDER BY s.id DESC
-       LIMIT 500`
-  return { sql, params: jobParams }
+       ${fromWhere}
+       ORDER BY s.id DESC`
+  const countSql = `SELECT COUNT(DISTINCT s.id) AS total ${fromWhere}`
+  const params = [...jobParams, ...whereParams]
+  return { sql, params, countSql, countParams: params }
 }
 
 function isMissingPipelineStageColumn(e: unknown): boolean {
@@ -3860,9 +3907,27 @@ app.get('/api/admin/resume-library', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const rawPid = String(req.query.projectId ?? req.query.project_id ?? '').trim()
   const projectId = rawPid.length ? rawPid : null
+  const token = extractAdminRequestToken(req)
   try {
-    const { sql, params } = resumeLibraryListSql(projectId)
-    const [rows] = await mysqlPool.query<any[]>(sql, params)
+    const scopeJobCodes = await allowedJobCodesForScreeningListToken(token)
+    const uploaderScope = await resumeScreeningsUploaderScopeForToken(token)
+    let whereSql = ''
+    let whereParams: unknown[] = []
+    if (scopeJobCodes) {
+      if (!scopeJobCodes.length) {
+        return res.json({ data: [], totalScreenings: 0 })
+      }
+      const ph = scopeJobCodes.map(() => '?').join(', ')
+      whereSql += ` AND s.job_code IN (${ph}) `
+      whereParams.push(...scopeJobCodes)
+    }
+    ;({ whereSql, whereParams } = appendResumeScreeningsUploaderWhere(whereSql, whereParams, uploaderScope))
+    const { sql, params, countSql, countParams } = resumeLibraryListSql(projectId, whereSql, whereParams)
+    const [[rows], [countRows]] = await Promise.all([
+      mysqlPool.query<any[]>(sql, params),
+      mysqlPool.query<RowDataPacket[]>(countSql, countParams)
+    ])
+    const totalScreenings = Number((countRows[0] as { total?: unknown } | undefined)?.total) || 0
     const data = (rows || []).map((r) => ({
       ...r,
       id: jsonSafeMysqlCell((r as { id?: unknown }).id),
@@ -3876,7 +3941,7 @@ app.get('/api/admin/resume-library', async (req, res) => {
           ? normalizeMultipartFilename(String(r.file_name)).slice(0, 255)
           : r.file_name
     }))
-    res.json({ data })
+    res.json({ data, totalScreenings })
   } catch (e: unknown) {
     const code = (e as { code?: string })?.code
     if (code === 'ER_NO_SUCH_TABLE') {
@@ -4070,6 +4135,12 @@ app.get('/api/admin/job-role-bases', async (req, res) => {
       })
     }
     console.error('[GET /api/admin/job-role-bases]', e)
+    if (isMysqlTransientError(e)) {
+      return res.status(503).json({
+        message:
+          '数据库连接中断（ECONNRESET），请稍后重试。若频繁出现，请检查 MySQL 是否运行、网络是否稳定，或调大服务端 wait_timeout。'
+      })
+    }
     res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
@@ -4754,6 +4825,62 @@ app.get('/api/admin/workbench-stats', async (req, res) => {
   }
 })
 
+/** 招聘质量报表：按招聘部门、招聘人员聚合上传/发邀/面试通过等指标 */
+app.get('/api/admin/reports/recruiter-quality', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const token = extractAdminRequestToken(req)
+  const actor = await loadAdminSessionActor(token)
+  if (!actor) {
+    return res.status(401).json({ message: '登录已失效，请重新登录' })
+  }
+  const uiRole = actor.uiRole as RecruiterQualityUiRole
+  if (
+    uiRole !== 'recruiter' &&
+    uiRole !== 'admin' &&
+    uiRole !== 'recruiting_manager' &&
+    uiRole !== 'delivery_manager'
+  ) {
+    return res.status(403).json({ message: '没有权限查看招聘质量报表' })
+  }
+  try {
+    let allowedJobCodes: string[] | null = null
+    let allowedUploaderLowers: string[] | null = null
+    if (uiRole === 'recruiter') {
+      const me = actor.username.trim().toLowerCase()
+      allowedUploaderLowers = me ? [me] : ['\0']
+    } else if (uiRole === 'recruiting_manager') {
+      allowedUploaderLowers = await adminDeptMemberUploadersLower(actor.dept)
+    } else if (uiRole === 'delivery_manager') {
+      allowedJobCodes = await allowedJobCodesForScreeningListToken(token)
+    }
+    const deptOptions = await recruiterQualityReportDeptOptions(mysqlAdminPool, actor, allowedUploaderLowers)
+    const report = await buildRecruiterQualityReport({
+      bizPool: mysqlPool,
+      adminPool: mysqlAdminPool,
+      actor: {
+        username: actor.username,
+        displayName: actor.displayName,
+        uiRole,
+        dept: actor.dept
+      },
+      allowedJobCodes,
+      allowedUploaderLowers,
+      query: req.query as Record<string, unknown>
+    })
+    return res.json({ ...report, deptOptions })
+  } catch (e: unknown) {
+    const msg = (e as Error)?.message || ''
+    if (msg === 'MISSING_SCREENINGS_TABLE') {
+      return res.status(503).json({ message: 'resume_screenings 表未创建，请先执行迁移脚本' })
+    }
+    if (isMysqlTransientError(e)) {
+      return res.status(503).json({ message: '数据库连接中断，请稍后重试' })
+    }
+    console.error('[GET /api/admin/reports/recruiter-quality]', e)
+    return res.status(500).json({ message: '报表生成失败，请稍后重试' })
+  }
+})
+
 app.get('/api/admin/interview-report', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const screeningId = Number(req.query?.screeningId)
@@ -4836,14 +4963,16 @@ app.post(
     try {
       const uploadFileName = normalizeMultipartFilename(req.file.originalname).slice(0, 255)
       const actorToken = extractAdminRequestToken(req)
-      const uploaderUsername = (await resolveAdminDbUsernameFromToken(actorToken)) || ''
+      const [uploaderUsername, jobQuery] = await Promise.all([
+        resolveAdminDbUsernameFromToken(actorToken).then((u) => String(u || '').trim()),
+        mysqlPool.query<any[]>('SELECT title, department, jd_text FROM jobs WHERE job_code=? LIMIT 1', [
+          jobCode
+        ])
+      ])
       if (!uploaderUsername) {
         return res.status(403).json({ message: '当前登录方式缺少账号标识，无法上传简历用于后续手机号权限校验' })
       }
-      const [jobRows] = await mysqlPool.query<any[]>(
-        'SELECT title, department, jd_text FROM jobs WHERE job_code=? LIMIT 1',
-        [jobCode]
-      )
+      const jobRows = jobQuery[0]
       if (!jobRows.length) return res.status(404).json({ message: '未找到对应岗位' })
       const job = jobRows[0] as { title: string; department: string | null; jd_text: string | null }
       let plain: string
@@ -4880,14 +5009,24 @@ app.post(
         console.warn('[resume-screen] duplicate body check skipped:', dupErr)
       }
 
+      const nameGuessEarly = guessCandidateNameFromResume(plain)
+      const phoneFromTextEarly = extractPhoneFromResumeText(plain)
+      const normPhoneEarly = normalizeCnMobile(phoneFromTextEarly || '')
+
       let result: ResumeScreeningAiResult
+      let preResolveCandidateId: number | null = null
       try {
-        const ai = await runResumeScreeningWithAi({
+        const aiPromise = runResumeScreeningWithAi({
           resumeText: plain,
           jobTitle: String(job.title || ''),
           department: String(job.department || ''),
           jdText: String(job.jd_text || '')
         })
+        const candPromise = normPhoneEarly
+          ? ensureResumeCandidateIdForPhone(normPhoneEarly, nameGuessEarly).catch(() => null)
+          : Promise.resolve(null)
+        const [ai, preCand] = await Promise.all([aiPromise, candPromise])
+        preResolveCandidateId = preCand
         if (!ai && flowLogEnabled) {
           flowLog('resume-screen', false, '未配置 DASHSCOPE_API_KEY 或大模型返回空，使用关键词回退')
         }
@@ -4899,13 +5038,11 @@ app.post(
         result = fallbackResumeScreening(plain, String(job.jd_text || ''), String(job.title || ''))
       }
 
-      const candidateName = sanitizeCandidateName(result.candidateName) || guessCandidateNameFromResume(plain)
+      const candidateName = sanitizeCandidateName(result.candidateName) || nameGuessEarly
       const phoneFromResult = normalizeCnMobile(String(result.candidatePhone || ''))
-      const phoneFromText = extractPhoneFromResumeText(plain)
-      const candidatePhone: string | null = phoneFromResult || phoneFromText || null
+      const candidatePhone: string | null = phoneFromResult || normPhoneEarly || null
       const normForCandidate = normalizeCnMobile(String(candidatePhone || ''))
-      let preResolveCandidateId: number | null = null
-      if (normForCandidate) {
+      if (normForCandidate && !preResolveCandidateId) {
         try {
           preResolveCandidateId = await ensureResumeCandidateIdForPhone(normForCandidate, candidateName)
         } catch (preCandErr) {
@@ -5127,7 +5264,8 @@ app.post(
         candidateName
       )
       const fileShaHex = crypto.createHash('sha256').update(req.file.buffer).digest('hex').toLowerCase()
-      try {
+      const saveScreeningFileTask = (async () => {
+        try {
         let saved: { storageKey: string; originalName: string; mimeType: string; sizeBytes: number }
         const cidForFile = screeningCandidateId ?? preResolveCandidateId
         if (cidForFile) {
@@ -5210,10 +5348,12 @@ app.post(
              updated_at=NOW()`,
           [screeningId, saved.originalName, saved.mimeType, saved.sizeBytes, saved.storageKey]
         )
-      } catch (fileErr) {
-        console.warn('[resume-screen] save original file skipped:', fileErr)
-      }
-      try {
+        } catch (fileErr) {
+          console.warn('[resume-screen] save original file skipped:', fileErr)
+        }
+      })()
+      const saveScreeningProfileTask = (async () => {
+        try {
         const parsedEval =
           result.evaluationJson && String(result.evaluationJson).trim()
             ? (JSON.parse(String(result.evaluationJson)) as Record<string, unknown>)
@@ -5281,9 +5421,11 @@ app.post(
             profile.resumeUploaded
           ]
         )
-      } catch (profileErr) {
-        console.warn('[resume-screen] save structured profile skipped:', profileErr)
-      }
+        } catch (profileErr) {
+          console.warn('[resume-screen] save structured profile skipped:', profileErr)
+        }
+      })()
+      await Promise.all([saveScreeningFileTask, saveScreeningProfileTask])
       flowLog('resume-screen', true, `job=${jobCode} score=${result.matchScore}`)
       res.json({
         data: {
