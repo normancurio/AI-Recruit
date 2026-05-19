@@ -43,6 +43,10 @@ import {
   recruiterQualityReportDeptOptions,
   type RecruiterQualityUiRole
 } from './recruiterQualityReport.ts'
+import {
+  buildDeliveryManagerPerformanceReport,
+  type DeliveryPerformanceUiRole
+} from './deliveryManagerPerformanceReport.ts'
 
 const requireCjs = createRequire(import.meta.url)
 
@@ -1176,6 +1180,128 @@ function sanitizeCandidateName(raw: unknown): string {
   const zhName = /^[\u4e00-\u9fa5·•．]{2,16}$/.test(n)
   const enName = /^[A-Za-z][A-Za-z\s.'-]{1,29}$/.test(n)
   return zhName || enName ? n.slice(0, 64) : ''
+}
+
+const FILENAME_NAME_STOP_WORDS = new Set([
+  '申朴',
+  '简历',
+  '个人简历',
+  '求职简历',
+  '候选人',
+  '保单',
+  '可出差',
+  '加水印',
+  '北京',
+  '上海',
+  '深圳',
+  '苏州',
+  '杭州',
+  '广州',
+  '成都',
+  '武汉',
+  '南京',
+  '太仓',
+  '重庆'
+])
+
+const FILENAME_ROLE_WORD_RE =
+  /^(java|python|android|ios|mes|labview|web|前端|后端|全栈|测试|太仓测试|测试台架|产品|产品经理|项目经理|经理|运维|大数据|数据|建模|数据建模|算法|视觉算法|采购|采购专员|市场|市场专员|开发|开发工程师|工程师|架构师|资深|高级|中级|初级|技术|研发)$/i
+
+function normalizeChineseNameToken(raw: string): string {
+  let s = String(raw || '').replace(/[^\u4e00-\u9fa5]/g, '').trim()
+  if (s.length >= 3 && /[男女]$/.test(s)) {
+    const withoutGender = s.slice(0, -1)
+    if (withoutGender.length >= 2) s = withoutGender
+  }
+  return s
+}
+
+function isPlausibleFilenameCandidateName(raw: string): boolean {
+  const s = normalizeChineseNameToken(raw)
+  if (!/^[\u4e00-\u9fa5]{2,4}$/.test(s)) return false
+  if (FILENAME_NAME_STOP_WORDS.has(s)) return false
+  if (FILENAME_ROLE_WORD_RE.test(s)) return false
+  return true
+}
+
+function guessCandidateNameFromFilename(filename: string): string {
+  const original = normalizeMultipartFilename(filename)
+  const base = original
+    .replace(/\.[^.]+$/i, '')
+    .replace(/[（(][^()（）]*[）)]/g, ' ')
+    .replace(/[【\[][^】\]]*[】\]]/g, ' ')
+    .replace(/[_－—–]/g, '-')
+    .replace(/pdf/gi, ' ')
+    .replace(/加水印/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  const yearName = base.match(/(?:^|[\s\-】])([\u4e00-\u9fa5]{2,4})\s*(?:10年以上|\d+\s*年)/)
+  if (yearName?.[1] && isPlausibleFilenameCandidateName(yearName[1])) {
+    return normalizeChineseNameToken(yearName[1])
+  }
+
+  const parts = base
+    .split(/[-\s]+/)
+    .map((p) => normalizeChineseNameToken(p))
+    .filter(Boolean)
+
+  const candidates: string[] = []
+  for (let i = 0; i < parts.length; i += 1) {
+    if (FILENAME_NAME_STOP_WORDS.has(parts[i]!)) {
+      if (i > 0) candidates.push(parts[i - 1]!)
+      if (i + 1 < parts.length) candidates.push(parts[i + 1]!)
+    }
+  }
+  for (let i = parts.length - 1; i >= 0; i -= 1) candidates.push(parts[i]!)
+  if (parts[0] && parts[0] !== '申朴') candidates.push(parts[0])
+
+  for (const c of candidates) {
+    if (isPlausibleFilenameCandidateName(c)) return normalizeChineseNameToken(c)
+  }
+  return ''
+}
+
+function isLikelyBadCandidateName(raw: string): boolean {
+  const s = String(raw || '').trim()
+  if (!s || isPlaceholderCandidateName(s)) return true
+  if (['技能', '技能特长', '个人优势', '教育经历', '工作经历', '项目经验', '性别'].includes(s)) return true
+  if (/[性别：:]/.test(s)) return true
+  if (/^[A-Za-z]{1,3}$/.test(s)) return true
+  if (s.length > 4 && /^[\u4e00-\u9fa5]+男$/.test(s)) return true
+  if (s.length === 3 && /^[\u4e00-\u9fa5]{2}[男女]$/.test(s)) return true
+  return false
+}
+
+function chooseCandidateName(aiName: string, resumeName: string, filenameName: string): string {
+  const ai = sanitizeCandidateName(aiName)
+  const resume = sanitizeCandidateName(resumeName)
+  const file = sanitizeCandidateName(filenameName)
+  // 上传文件名通常由招聘侧人工命名，形如「申朴-Java-张三-上海.pdf」。
+  // 只要文件名能抽出可信中文姓名，就优先作为候选人姓名，避免 AI 从正文中误取联系人、
+  // 推荐人、证明人或上一段项目人员姓名。
+  if (file) return file
+  return ai || resume || file || '候选人'
+}
+
+function rewriteEvaluationCandidateName(evaluationJson: string, candidateName: string): string {
+  const name = sanitizeCandidateName(candidateName)
+  const raw = String(evaluationJson || '').trim()
+  if (!raw || !name) return evaluationJson
+  try {
+    const obj = JSON.parse(raw) as Record<string, unknown>
+    obj.candidate_name = name
+    const profile =
+      obj.candidate_profile && typeof obj.candidate_profile === 'object' && !Array.isArray(obj.candidate_profile)
+        ? { ...(obj.candidate_profile as Record<string, unknown>) }
+        : {}
+    profile.name = name
+    profile.candidate_name = name
+    obj.candidate_profile = profile
+    return JSON.stringify(obj)
+  } catch {
+    return evaluationJson
+  }
 }
 
 function extractCandidateNameFromEvalParsed(parsed: Record<string, unknown>, rawProfile: unknown): string {
@@ -4881,6 +5007,44 @@ app.get('/api/admin/reports/recruiter-quality', async (req, res) => {
   }
 })
 
+/** 交付经理业绩报表：按项目负责人聚合需求、推荐、邀约、面试通过、风险岗位等指标 */
+app.get('/api/admin/reports/delivery-performance', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const token = extractAdminRequestToken(req)
+  const actor = await loadAdminSessionActor(token)
+  if (!actor) {
+    return res.status(401).json({ message: '登录已失效，请重新登录' })
+  }
+  const uiRole = actor.uiRole as DeliveryPerformanceUiRole
+  if (uiRole !== 'admin' && uiRole !== 'delivery_manager') {
+    return res.status(403).json({ message: '没有权限查看交付经理业绩报表' })
+  }
+  try {
+    const report = await buildDeliveryManagerPerformanceReport({
+      bizPool: mysqlPool,
+      adminPool: mysqlAdminPool,
+      actor: {
+        username: actor.username,
+        displayName: actor.displayName,
+        uiRole,
+        dept: actor.dept
+      },
+      query: req.query as Record<string, unknown>
+    })
+    return res.json(report)
+  } catch (e: unknown) {
+    const code = (e as { code?: string })?.code
+    if (code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({ message: '项目、岗位或简历筛查表未创建，请先执行迁移脚本' })
+    }
+    if (isMysqlTransientError(e)) {
+      return res.status(503).json({ message: '数据库连接中断，请稍后重试' })
+    }
+    console.error('[GET /api/admin/reports/delivery-performance]', e)
+    return res.status(500).json({ message: '报表生成失败，请稍后重试' })
+  }
+})
+
 app.get('/api/admin/interview-report', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const screeningId = Number(req.query?.screeningId)
@@ -5009,6 +5173,7 @@ app.post(
         console.warn('[resume-screen] duplicate body check skipped:', dupErr)
       }
 
+      const nameGuessFromFilename = guessCandidateNameFromFilename(uploadFileName)
       const nameGuessEarly = guessCandidateNameFromResume(plain)
       const phoneFromTextEarly = extractPhoneFromResumeText(plain)
       const normPhoneEarly = normalizeCnMobile(phoneFromTextEarly || '')
@@ -5022,8 +5187,9 @@ app.post(
           department: String(job.department || ''),
           jdText: String(job.jd_text || '')
         })
+        const preCandidateName = chooseCandidateName('', nameGuessEarly, nameGuessFromFilename)
         const candPromise = normPhoneEarly
-          ? ensureResumeCandidateIdForPhone(normPhoneEarly, nameGuessEarly).catch(() => null)
+          ? ensureResumeCandidateIdForPhone(normPhoneEarly, preCandidateName).catch(() => null)
           : Promise.resolve(null)
         const [ai, preCand] = await Promise.all([aiPromise, candPromise])
         preResolveCandidateId = preCand
@@ -5038,7 +5204,10 @@ app.post(
         result = fallbackResumeScreening(plain, String(job.jd_text || ''), String(job.title || ''))
       }
 
-      const candidateName = sanitizeCandidateName(result.candidateName) || nameGuessEarly
+      const candidateName = chooseCandidateName(result.candidateName, nameGuessEarly, nameGuessFromFilename)
+      if (candidateName && result.evaluationJson) {
+        result.evaluationJson = rewriteEvaluationCandidateName(result.evaluationJson, candidateName)
+      }
       const phoneFromResult = normalizeCnMobile(String(result.candidatePhone || ''))
       const candidatePhone: string | null = phoneFromResult || normPhoneEarly || null
       const normForCandidate = normalizeCnMobile(String(candidatePhone || ''))

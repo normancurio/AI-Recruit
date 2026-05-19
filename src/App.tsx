@@ -111,6 +111,7 @@ const ADMIN_ROLE_MENU_OPTIONS: { group: string; items: { id: string; label: stri
       { id: 'resume-screening', label: '简历管理' },
       { id: 'resume-library', label: '简历库' },
       { id: 'application-mgmt', label: '初面管理' },
+      { id: 'delivery-performance-report', label: '交付业绩报表' },
       { id: 'recruiter-quality-report', label: '招聘质量报表' }
     ]
   },
@@ -251,6 +252,12 @@ const NAV_TEMPLATE: NavItem[] = [
         id: 'recruiter-quality-report',
         title: '招聘质量报表',
         roles: ['admin', 'recruiting_manager', 'delivery_manager', 'recruiter'],
+        icon: <FileBarChart className="w-4 h-4" />
+      },
+      {
+        id: 'delivery-performance-report',
+        title: '交付业绩报表',
+        roles: ['admin', 'delivery_manager'],
         icon: <FileBarChart className="w-4 h-4" />
       }
     ]
@@ -1042,6 +1049,8 @@ export default function App() {
       case 'application-mgmt': return <ApplicationManagementView currentRole={currentRole} authProfile={authProfile} />;
       case 'recruiter-quality-report':
         return <RecruiterQualityReportView currentRole={currentRole} />;
+      case 'delivery-performance-report':
+        return <DeliveryPerformanceReportView currentRole={currentRole} />;
       case 'sys-dept': return <SystemDeptView />;
       case 'sys-user': return <SystemUserView currentRole={currentRole} authProfile={authProfile} />;
       case 'sys-role': return <SystemRoleView />;
@@ -9968,6 +9977,370 @@ function RecruiterQualityReportView({ currentRole }: { currentRole: Role }) {
       {currentRole === 'recruiter' ? (
         <p className="text-xs text-slate-500">当前仅展示您本人数据。招聘经理可见本部门；交付经理可见负责项目范围内数据。</p>
       ) : null}
+    </div>
+  )
+}
+
+type DeliveryPerformanceDetailRow = {
+  jobCode: string
+  projectName: string
+  jobTitle: string
+  demand: number
+  resumeCount: number
+  invitedCount: number
+  interviewDoneCount: number
+  interviewPassCount: number
+  firstPushHours: number | null
+  risk: boolean
+}
+
+type DeliveryPerformanceReportRow = {
+  manager: string
+  username: string
+  dept: string
+  projectCount: number
+  jobCount: number
+  demandCount: number
+  resumeCount: number
+  invitedCount: number
+  interviewDoneCount: number
+  interviewPassCount: number
+  completionRate: number
+  inviteRate: number
+  interviewRate: number
+  passRate: number | null
+  avgFirstPushHours: number | null
+  riskJobCount: number
+  performanceScore: number
+  details: DeliveryPerformanceDetailRow[]
+}
+
+function DeliveryPerformanceReportView({ currentRole }: { currentRole: Role }) {
+  const initialRange = useMemo(() => defaultReportDateRange(), [])
+  const [dateFrom, setDateFrom] = useState(initialRange.from)
+  const [dateTo, setDateTo] = useState(initialRange.to)
+  const [managerFilter, setManagerFilter] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [rows, setRows] = useState<DeliveryPerformanceReportRow[]>([])
+  const [summary, setSummary] = useState({
+    projectCount: 0,
+    jobCount: 0,
+    demandCount: 0,
+    resumeCount: 0,
+    invitedCount: 0,
+    interviewDoneCount: 0,
+    interviewPassCount: 0,
+    completionRate: 0,
+    riskJobCount: 0,
+    avgPerformanceScore: null as number | null
+  })
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const qs = new URLSearchParams()
+      if (dateFrom) qs.set('dateFrom', dateFrom)
+      if (dateTo) qs.set('dateTo', dateTo)
+      if (managerFilter.trim()) qs.set('manager', managerFilter.trim())
+      const r = await miniappApiFetch(`/api/admin/reports/delivery-performance?${qs.toString()}`)
+      const payload = (await r.json()) as {
+        rows?: DeliveryPerformanceReportRow[]
+        summary?: typeof summary
+        message?: string
+      }
+      if (!r.ok) throw adminJsonFailError(r, payload, '加载报表失败')
+      setRows(Array.isArray(payload.rows) ? payload.rows : [])
+      setSummary(
+        payload.summary ?? {
+          projectCount: 0,
+          jobCount: 0,
+          demandCount: 0,
+          resumeCount: 0,
+          invitedCount: 0,
+          interviewDoneCount: 0,
+          interviewPassCount: 0,
+          completionRate: 0,
+          riskJobCount: 0,
+          avgPerformanceScore: null
+        }
+      )
+    } catch (e) {
+      setError(userFacingApiError(e, '加载报表失败'))
+      setRows([])
+    } finally {
+      setLoading(false)
+    }
+  }, [dateFrom, dateTo, managerFilter])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const exportCsv = () => {
+    const header = [
+      '交付经理',
+      '账号',
+      '部门',
+      '项目数',
+      '岗位数',
+      '需求人数',
+      '推荐人数',
+      '邀约人数',
+      '面试人数',
+      '通过人数',
+      '完成率%',
+      '邀约转化率%',
+      '面试转化率%',
+      '面试通过率%',
+      '平均首推小时',
+      '风险岗位',
+      '综合分'
+    ]
+    const lines = rows.map((r) =>
+      [
+        r.manager,
+        r.username,
+        r.dept,
+        r.projectCount,
+        r.jobCount,
+        r.demandCount,
+        r.resumeCount,
+        r.invitedCount,
+        r.interviewDoneCount,
+        r.interviewPassCount,
+        r.completionRate,
+        r.inviteRate,
+        r.interviewRate,
+        r.passRate ?? '',
+        r.avgFirstPushHours ?? '',
+        r.riskJobCount,
+        r.performanceScore
+      ]
+        .map((c) => `"${String(c).replace(/"/g, '""')}"`)
+        .join(',')
+    )
+    const blob = new Blob(['\uFEFF' + [header.join(','), ...lines].join('\n')], {
+      type: 'text/csv;charset=utf-8'
+    })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `交付业绩报表_${dateFrom}_${dateTo}.csv`
+    a.click()
+    URL.revokeObjectURL(a.href)
+  }
+
+  const toggleExpanded = (key: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const rowKey = (r: DeliveryPerformanceReportRow) => r.username || r.manager
+
+  return (
+    <div className="space-y-4 sm:space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">交付业绩报表</h1>
+          <p className="mt-1 text-sm text-slate-500">
+            按项目负责人统计需求、推荐、邀约、AI 面试、通过与风险岗位；完成率暂按面试通过人数 / 需求人数计算
+          </p>
+        </div>
+        <button type="button" onClick={exportCsv} disabled={!rows.length} className={btnSecondarySm}>
+          <Download className="inline h-4 w-4 mr-1" />
+          导出 CSV
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-slate-500">开始日期</label>
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            className="rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-slate-500">结束日期</label>
+          <input
+            type="date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            className="rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+        </div>
+        {currentRole === 'admin' ? (
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-500">交付经理</label>
+            <input
+              value={managerFilter}
+              onChange={(e) => setManagerFilter(e.target.value)}
+              placeholder="姓名关键词"
+              className="w-36 rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+        ) : null}
+        <button type="button" onClick={() => void load()} disabled={loading} className={btnPrimarySmFlex}>
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+          查询
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+        <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="text-xs text-slate-500">需求人数</div>
+          <div className="text-xl font-bold text-slate-900">{summary.demandCount}</div>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="text-xs text-slate-500">推荐人数</div>
+          <div className="text-xl font-bold text-slate-900">{summary.resumeCount}</div>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="text-xs text-slate-500">面试人数</div>
+          <div className="text-xl font-bold text-slate-900">{summary.interviewDoneCount}</div>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="text-xs text-slate-500">完成率</div>
+          <div className="text-xl font-bold text-emerald-700">{summary.completionRate}%</div>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="text-xs text-slate-500">风险岗位</div>
+          <div className="text-xl font-bold text-rose-700">{summary.riskJobCount}</div>
+        </div>
+      </div>
+
+      {error ? (
+        <div className="rounded-lg border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
+      ) : null}
+
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        {loading ? (
+          <div className="flex items-center justify-center gap-2 py-16 text-slate-500">
+            <Loader2 className="h-5 w-5 animate-spin" />
+            加载中…
+          </div>
+        ) : rows.length === 0 ? (
+          <div className="py-16 text-center text-sm text-slate-500">所选条件下暂无数据</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1120px] text-left text-sm">
+              <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                <tr>
+                  <th className="px-3 py-3 font-medium">交付经理</th>
+                  <th className="px-3 py-3 font-medium text-right">项目/岗位</th>
+                  <th className="px-3 py-3 font-medium text-right">需求</th>
+                  <th className="px-3 py-3 font-medium text-right">推荐</th>
+                  <th className="px-3 py-3 font-medium text-right">邀约</th>
+                  <th className="px-3 py-3 font-medium text-right">面试</th>
+                  <th className="px-3 py-3 font-medium text-right">通过</th>
+                  <th className="px-3 py-3 font-medium text-right">完成率</th>
+                  <th className="px-3 py-3 font-medium text-right">面试通过率</th>
+                  <th className="px-3 py-3 font-medium text-right">平均首推</th>
+                  <th className="px-3 py-3 font-medium text-right">风险岗位</th>
+                  <th className="px-3 py-3 font-medium text-right">综合分</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {rows.map((r) => {
+                  const key = rowKey(r)
+                  const open = expanded.has(key)
+                  return (
+                    <React.Fragment key={key}>
+                      <tr className="hover:bg-slate-50/80">
+                        <td className="px-3 py-3">
+                          <button
+                            type="button"
+                            onClick={() => toggleExpanded(key)}
+                            className="inline-flex items-center gap-2 font-medium text-slate-900 hover:text-indigo-700"
+                          >
+                            {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                            {r.manager}
+                          </button>
+                          <div className="ml-6 text-xs text-slate-500">{r.dept || '—'}</div>
+                        </td>
+                        <td className="px-3 py-3 text-right tabular-nums">{r.projectCount} / {r.jobCount}</td>
+                        <td className="px-3 py-3 text-right tabular-nums">{r.demandCount}</td>
+                        <td className="px-3 py-3 text-right tabular-nums">{r.resumeCount}</td>
+                        <td className="px-3 py-3 text-right tabular-nums">{r.invitedCount}</td>
+                        <td className="px-3 py-3 text-right tabular-nums">{r.interviewDoneCount}</td>
+                        <td className="px-3 py-3 text-right tabular-nums">{r.interviewPassCount}</td>
+                        <td className="px-3 py-3 text-right font-semibold text-emerald-700 tabular-nums">{r.completionRate}%</td>
+                        <td className="px-3 py-3 text-right tabular-nums">{r.passRate != null ? `${r.passRate}%` : '—'}</td>
+                        <td className="px-3 py-3 text-right tabular-nums">
+                          {r.avgFirstPushHours != null ? `${r.avgFirstPushHours}h` : '—'}
+                        </td>
+                        <td className="px-3 py-3 text-right tabular-nums">
+                          <span className={r.riskJobCount ? 'font-semibold text-rose-700' : 'text-slate-500'}>
+                            {r.riskJobCount}
+                          </span>
+                        </td>
+                        <td className="px-3 py-3 text-right font-semibold text-indigo-700 tabular-nums">{r.performanceScore}</td>
+                      </tr>
+                      {open ? (
+                        <tr>
+                          <td colSpan={12} className="bg-slate-50 px-3 py-3">
+                            <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+                              <table className="w-full min-w-[860px] text-left text-xs">
+                                <thead className="bg-white text-slate-500">
+                                  <tr>
+                                    <th className="px-3 py-2 font-medium">项目</th>
+                                    <th className="px-3 py-2 font-medium">岗位</th>
+                                    <th className="px-3 py-2 font-medium text-right">需求</th>
+                                    <th className="px-3 py-2 font-medium text-right">推荐</th>
+                                    <th className="px-3 py-2 font-medium text-right">邀约</th>
+                                    <th className="px-3 py-2 font-medium text-right">面试</th>
+                                    <th className="px-3 py-2 font-medium text-right">通过</th>
+                                    <th className="px-3 py-2 font-medium text-right">首推</th>
+                                    <th className="px-3 py-2 font-medium text-right">风险</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                  {r.details.map((d) => (
+                                    <tr key={`${key}-${d.jobCode}`}>
+                                      <td className="px-3 py-2 text-slate-700">{d.projectName}</td>
+                                      <td className="px-3 py-2">
+                                        <div className="font-medium text-slate-800">{d.jobTitle}</div>
+                                        <div className="font-mono text-[11px] text-slate-400">{d.jobCode}</div>
+                                      </td>
+                                      <td className="px-3 py-2 text-right tabular-nums">{d.demand}</td>
+                                      <td className="px-3 py-2 text-right tabular-nums">{d.resumeCount}</td>
+                                      <td className="px-3 py-2 text-right tabular-nums">{d.invitedCount}</td>
+                                      <td className="px-3 py-2 text-right tabular-nums">{d.interviewDoneCount}</td>
+                                      <td className="px-3 py-2 text-right tabular-nums">{d.interviewPassCount}</td>
+                                      <td className="px-3 py-2 text-right tabular-nums">
+                                        {d.firstPushHours != null ? `${d.firstPushHours}h` : '—'}
+                                      </td>
+                                      <td className="px-3 py-2 text-right">
+                                        {d.risk ? (
+                                          <span className="rounded bg-rose-50 px-2 py-1 text-rose-700">是</span>
+                                        ) : (
+                                          <span className="text-slate-400">否</span>
+                                        )}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </td>
+                        </tr>
+                      ) : null}
+                    </React.Fragment>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
