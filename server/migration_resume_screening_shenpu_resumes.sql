@@ -20,3 +20,33 @@ CREATE TABLE IF NOT EXISTS resume_screening_shenpu_resumes (
   UNIQUE KEY uk_shenpu_resume_screening (screening_id),
   KEY idx_shenpu_resume_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+SET @db := DATABASE();
+
+SET @has_col := (
+  SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = @db AND TABLE_NAME = 'resume_screening_shenpu_resumes' AND COLUMN_NAME = 'progress_percent'
+);
+SET @sql := IF(@has_col = 0, 'ALTER TABLE resume_screening_shenpu_resumes ADD COLUMN progress_percent TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER content_json', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_col := (
+  SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = @db AND TABLE_NAME = 'resume_screening_shenpu_resumes' AND COLUMN_NAME = 'progress_stage'
+);
+SET @sql := IF(@has_col = 0, 'ALTER TABLE resume_screening_shenpu_resumes ADD COLUMN progress_stage VARCHAR(64) NULL AFTER progress_percent', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_col := (
+  SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = @db AND TABLE_NAME = 'resume_screening_shenpu_resumes' AND COLUMN_NAME = 'error_message'
+);
+SET @sql := IF(@has_col = 0, 'ALTER TABLE resume_screening_shenpu_resumes ADD COLUMN error_message VARCHAR(500) NULL AFTER progress_stage', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_idx := (
+  SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+  WHERE TABLE_SCHEMA = @db AND TABLE_NAME = 'resume_screening_shenpu_resumes' AND INDEX_NAME = 'idx_shenpu_resume_status'
+);
+SET @sql := IF(@has_idx = 0, 'CREATE INDEX idx_shenpu_resume_status ON resume_screening_shenpu_resumes (status)', 'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;

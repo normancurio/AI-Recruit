@@ -3213,6 +3213,18 @@ async function miniappApiFetch(path: string, init?: RequestInit): Promise<Respon
   return res;
 }
 
+async function miniappApiJson<T>(res: Response, fallback: string): Promise<T> {
+  const data = (await res.json().catch(() => null)) as unknown;
+  if (!data || typeof data !== 'object') {
+    throw new Error(
+      res.ok
+        ? `${fallback}：接口返回了非 JSON 内容，请确认本地 API 服务已重启且代理路径命中后端。`
+        : formatApiErrorForDisplay({ status: res.status, fallback })
+    );
+  }
+  return data as T;
+}
+
 type WorkbenchTodo = {
   key: string;
   title: string;
@@ -10940,13 +10952,13 @@ function RecruiterQualityReportView({ currentRole }: { currentRole: Role }) {
       if (dateTo) qs.set('dateTo', dateTo)
       if (deptFilter.trim()) qs.set('dept', deptFilter.trim())
       const r = await miniappApiFetch(`/api/admin/reports/recruiter-quality?${qs.toString()}`)
-      const payload = (await r.json()) as {
+      const payload = await miniappApiJson<{
         rows?: RecruiterQualityReportRow[]
         summary?: typeof summary
         meta?: { minUploads: number; thresholds: { highQuality: number; qualified: number } }
         deptOptions?: string[]
         message?: string
-      }
+      }>(r, '加载报表失败')
       if (!r.ok) throw adminJsonFailError(r, payload, '加载报表失败')
       setRows(Array.isArray(payload.rows) ? payload.rows : [])
       setSummary(
@@ -11234,11 +11246,11 @@ function DeliveryPerformanceReportView({ currentRole }: { currentRole: Role }) {
       if (dateTo) qs.set('dateTo', dateTo)
       if (managerFilter.trim()) qs.set('manager', managerFilter.trim())
       const r = await miniappApiFetch(`/api/admin/reports/delivery-performance?${qs.toString()}`)
-      const payload = (await r.json()) as {
+      const payload = await miniappApiJson<{
         rows?: DeliveryPerformanceReportRow[]
         summary?: typeof summary
         message?: string
-      }
+      }>(r, '加载报表失败')
       if (!r.ok) throw adminJsonFailError(r, payload, '加载报表失败')
       setRows(Array.isArray(payload.rows) ? payload.rows : [])
       setSummary(
