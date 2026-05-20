@@ -8,6 +8,11 @@ FROM ${NODE_IMAGE}
 
 WORKDIR /app
 
+# 申朴简历：用 Chromium 将服务端 HTML/SVG 模板稳定转成 PDF；Noto CJK 保证中文字形。
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends chromium fonts-noto-cjk \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY package.json package-lock.json ./
 COPY miniapp-candidate/package.json miniapp-candidate/package-lock.json ./miniapp-candidate/
 

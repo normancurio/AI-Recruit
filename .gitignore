@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+storage/resumes/
+1#
+.local-dumps/

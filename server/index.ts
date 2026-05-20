@@ -3,6 +3,8 @@ import dotenv from 'dotenv'
 import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { createRequire } from 'node:module'
 import mysql, { type PoolConnection, type ResultSetHeader, type RowDataPacket } from 'mysql2/promise'
 import multer from 'multer'
@@ -21,6 +23,8 @@ import {
   matchRoleBaseFromJobTitle
 } from '../shared/jobTaxonomy'
 import { deptNamesMatch } from '../shared/deptMatch'
+
+const execFileAsync = promisify(execFile)
 
 /** 将解析/抽取的应聘职位对齐为标准岗位序列（不含级别），供简历详情下拉落库 */
 function matchJobTitleToStandardProfileOption(raw: string): string | null {
@@ -71,6 +75,66 @@ const uploadResumeMemory = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 12 * 1024 * 1024 }
 })
+
+type ResumeScreenTaskStatus = 'queued' | 'running' | 'done' | 'failed'
+
+type ResumeScreenTask = {
+  taskId: string
+  status: ResumeScreenTaskStatus
+  jobCode: string
+  fileName?: string
+  uploadProgress: number
+  uploadStage: string
+  shenpuProgress: number
+  shenpuStage: string
+  shenpuStatus: 'missing' | 'generating' | 'ready' | 'failed'
+  screeningId?: number
+  existingId?: number
+  candidateName?: string
+  message?: string
+  error?: string
+  createdAt: number
+  updatedAt: number
+}
+
+type UploadedResumeMemoryFile = {
+  buffer: Buffer
+  originalname: string
+  mimetype: string
+  size: number
+}
+
+class ResumeScreenTaskError extends Error {
+  statusCode: number
+  extra?: Record<string, unknown>
+
+  constructor(message: string, statusCode = 500, extra?: Record<string, unknown>) {
+    super(message)
+    this.statusCode = statusCode
+    this.extra = extra
+  }
+}
+
+const resumeScreenTasks = new Map<string, ResumeScreenTask>()
+const RESUME_SCREEN_TASK_TTL_MS = 1000 * 60 * 60
+
+function snapshotResumeScreenTask(task: ResumeScreenTask): ResumeScreenTask {
+  return { ...task }
+}
+
+function patchResumeScreenTask(taskId: string, patch: Partial<ResumeScreenTask>): ResumeScreenTask | null {
+  const task = resumeScreenTasks.get(taskId)
+  if (!task) return null
+  Object.assign(task, patch, { updatedAt: Date.now() })
+  return task
+}
+
+function pruneResumeScreenTasks(): void {
+  const now = Date.now()
+  for (const [id, task] of resumeScreenTasks) {
+    if (now - task.updatedAt > RESUME_SCREEN_TASK_TTL_MS) resumeScreenTasks.delete(id)
+  }
+}
 
 /**
  * Multer/busboy 常将 UTF-8 文件名按 latin1 逐字节解码，导致中文乱码。
@@ -319,6 +383,21 @@ async function exchangeWechatJsCode(code: string): Promise<{ openid: string; ses
   return { openid: wechatData.openid, sessionKey: wechatData.session_key, appid: wechatEnv.appId }
 }
 
+function resolveH5DevLoginCode(code: string): { openid: string; appid: string } | null {
+  if (process.env.ALLOW_H5_DEV_LOGIN !== '1') return null
+  if (!code.startsWith('h5-dev:')) return null
+  const raw = code.slice('h5-dev:'.length).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 96)
+  if (!raw) return null
+  const appid = checkWechatEnv().appId || 'h5-dev'
+  return { openid: raw, appid }
+}
+
+async function resolveLoginCode(code: string): Promise<{ openid: string; sessionKey?: string; appid: string }> {
+  const h5 = resolveH5DevLoginCode(code)
+  if (h5) return h5
+  return exchangeWechatJsCode(code)
+}
+
 /** 岗位码（jobs.job_code）或 interview_invitations.invite_code（形如 岗位码-发起人账号-筛查记录id） */
 type ResolvedInviteOrJob = {
   jobCode: string
@@ -393,7 +472,7 @@ app.use(express.json({ limit: '1mb' }))
 app.use((_, res, next) => {
   res.header('Access-Control-Allow-Origin', '*')
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Admin-Token')
-  res.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,OPTIONS')
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS')
   if (_.method === 'OPTIONS') return res.sendStatus(204)
   next()
 })
@@ -453,6 +532,25 @@ const JOBS = {
 const RESUME_PLAINTEXT_MAX_SAVE = 60000
 
 const PERSONALIZED_INTERVIEW_TOTAL = 6
+const DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE =
+  '你是资深技术面试官。请严格输出恰好 6 道中文面试题，放在一个 JSON 对象里，格式：{"questions":[{"id":"Q1","text":"题干"},…]}。' +
+  '要求：\n' +
+  '1) Q1：开场自我介绍题，约 2～3 分钟，可提示包含教育、工作/项目亮点。\n' +
+  '2) Q2、Q3：必须围绕简历中的具体项目、实习或工作经历追问（技术细节、职责边界、难点与结果）；若上文说明无简历则结合 JD 设计两道「项目/交付」情景深挖题。\n' +
+  '3) Q4、Q5、Q6：与岗位 JD 强相关的纯技术题（可含原理、方案对比、排错、性能、安全等），不要行为面或空泛的「你怎么看」。\n' +
+  'id 必须为 Q1 到 Q6 递增；不要 markdown 代码块，不要其它说明文字。'
+const DEFAULT_INTERVIEW_QUESTION_USER_PROMPT_TEMPLATE = [
+  '候选人姓名：{{candidateName}}',
+  '岗位名称：{{title}}',
+  '部门：{{department}}',
+  'JD：{{jdText}}',
+  '{{resumeBlock}}'
+].join('\n')
+const BUILTIN_INTERVIEW_PROMPT_TEMPLATE_ID = 'builtin-shenpu-ai'
+const BUILTIN_INTERVIEW_PROMPT_TEMPLATE_NAME = '申朴面试官AI'
+const AI_INTERVIEWER_MANAGER_ROLE_NAME = 'AI面试官管理员'
+let interviewPromptConfigTableReady = false
+let interviewPromptTemplateStorageReady = false
 /** Docker 建议挂载卷并可选设置 RESUME_STORAGE_DIR=/data/resumes（见 docker-compose.yml） */
 const RESUME_STORAGE_DIR = (() => {
   const fromEnv = process.env.RESUME_STORAGE_DIR?.trim()
@@ -495,6 +593,21 @@ function saveResumeOriginalFile(file: { buffer: Buffer; originalname?: string; m
     sizeBytes: Number(file.buffer?.length || 0),
     originalName
   }
+}
+
+function saveGeneratedResumePdf(buffer: Buffer, preferredName: string): {
+  storageKey: string
+  absPath: string
+  sizeBytes: number
+  originalName: string
+} {
+  ensureResumeStorageDir()
+  const originalName =
+    normalizeMultipartFilename(preferredName || 'shenpu-resume.pdf').replace(/\.[^.]+$/, '').slice(0, 220) + '.pdf'
+  const key = `shenpu-${Date.now()}-${crypto.randomUUID()}.pdf`
+  const absPath = path.join(RESUME_STORAGE_DIR, key)
+  fs.writeFileSync(absPath, buffer)
+  return { storageKey: key, absPath, sizeBytes: buffer.length, originalName }
 }
 
 /** 将库内 storage_path（历史可能为绝对路径）解析为当前可读绝对路径 */
@@ -627,7 +740,7 @@ async function dashScopeChatCompletions(
   } finally {
     if (timeoutId) clearTimeout(timeoutId)
   }
-  const data = (await resp.json()) as { choices?: { message?: { content?: string } }[]; error?: { message?: string }; message?: string }
+  const data = (await resp.json()) as { choices?: { message?: { content?: string }; finish_reason?: string }[]; error?: { message?: string }; message?: string }
   if (!resp.ok) {
     const msg = data?.error?.message || data?.message || JSON.stringify(data)
     const e = new Error(msg) as Error & { httpStatus?: number }
@@ -658,6 +771,322 @@ function parseQuestionsJson(raw: string, count: number): { id: string; text: str
       .filter((q) => q.text)
   } catch {
     return null
+  }
+}
+
+type InterviewQuestionPromptConfig = {
+  systemPromptTemplate: string
+  userPromptTemplate: string
+  enabled: boolean
+  updatedBy: string
+  updatedAt: string
+}
+
+async function ensureInterviewPromptConfigTable(): Promise<void> {
+  if (interviewPromptConfigTableReady) return
+  await mysqlPool.query(`
+    CREATE TABLE IF NOT EXISTS ai_interview_prompt_configs (
+      id TINYINT UNSIGNED NOT NULL DEFAULT 1,
+      system_prompt MEDIUMTEXT NOT NULL,
+      user_prompt_template MEDIUMTEXT NOT NULL,
+      enabled TINYINT NOT NULL DEFAULT 1,
+      updated_by VARCHAR(128) NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `)
+  await mysqlPool.query(
+    `INSERT IGNORE INTO ai_interview_prompt_configs (id, system_prompt, user_prompt_template, enabled, updated_by)
+     VALUES (1, ?, ?, 1, 'system')`,
+    [DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE, DEFAULT_INTERVIEW_QUESTION_USER_PROMPT_TEMPLATE]
+  )
+  interviewPromptConfigTableReady = true
+}
+
+function normalizeInterviewPromptText(raw: unknown, fallback: string): string {
+  const s = String(raw ?? '')
+  return s.trim() ? s : fallback
+}
+
+async function loadInterviewQuestionPromptConfig(): Promise<InterviewQuestionPromptConfig> {
+  await ensureInterviewPromptConfigTable()
+  const [rows] = await mysqlPool.query<RowDataPacket[]>(
+    `SELECT system_prompt, user_prompt_template, enabled, updated_by,
+            DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+     FROM ai_interview_prompt_configs WHERE id = 1 LIMIT 1`
+  )
+  const row = rows[0] as
+    | {
+        system_prompt?: unknown
+        user_prompt_template?: unknown
+        enabled?: unknown
+        updated_by?: unknown
+        updated_at?: unknown
+      }
+    | undefined
+  return {
+    systemPromptTemplate: normalizeInterviewPromptText(
+      row?.system_prompt,
+      DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE
+    ),
+    userPromptTemplate: normalizeInterviewPromptText(
+      row?.user_prompt_template,
+      DEFAULT_INTERVIEW_QUESTION_USER_PROMPT_TEMPLATE
+    ),
+    enabled: Number(row?.enabled ?? 1) === 1,
+    updatedBy: String(row?.updated_by || ''),
+    updatedAt: String(row?.updated_at || '')
+  }
+}
+
+function renderInterviewPromptTemplate(template: string, vars: Record<string, string | number | boolean>): string {
+  return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, key: string) => {
+    const v = vars[key]
+    return v == null ? '' : String(v)
+  })
+}
+
+type AdminUiRoleForPrompt = string
+type InterviewPromptTemplate = {
+  id: string
+  name: string
+  systemPrompt: string
+  enabled: boolean
+  isDefault: boolean
+  visibleRoles: AdminUiRoleForPrompt[]
+  editableRoles: AdminUiRoleForPrompt[]
+  updatedBy: string
+  updatedAt: string
+}
+
+const ALL_INTERVIEW_PROMPT_ROLES: AdminUiRoleForPrompt[] = [
+  'admin',
+  'delivery_manager',
+  'recruiter',
+  'recruiting_manager'
+]
+
+function parsePromptRoles(raw: unknown, fallback: AdminUiRoleForPrompt[]): AdminUiRoleForPrompt[] {
+  let arr: unknown = raw
+  if (typeof raw === 'string') {
+    try {
+      arr = JSON.parse(raw)
+    } catch {
+      arr = raw
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean)
+    }
+  }
+  const roles = Array.isArray(arr) ? arr.map((x) => String(x).trim()).filter(Boolean) : []
+  return roles.length ? Array.from(new Set(roles)) : fallback
+}
+
+function actorPromptRole(actor: Awaited<ReturnType<typeof loadAdminSessionActor>> | null): AdminUiRoleForPrompt {
+  const r = String(actor?.uiRole || '').trim()
+  if (r) return r
+  return 'admin'
+}
+
+function actorPromptRoleKeys(actor: Awaited<ReturnType<typeof loadAdminSessionActor>> | null): string[] {
+  const keys = [String(actor?.uiRole || '').trim(), ...(actor?.roleNames || [])].filter(Boolean)
+  return Array.from(new Set(keys))
+}
+
+function canViewPromptTemplate(role: AdminUiRoleForPrompt, t: Pick<InterviewPromptTemplate, 'visibleRoles'>, keys?: string[]): boolean {
+  const all = keys?.length ? keys : [role]
+  return all.includes('admin') || all.some((k) => t.visibleRoles.includes(k))
+}
+
+function canEditPromptTemplate(role: AdminUiRoleForPrompt, t: Pick<InterviewPromptTemplate, 'editableRoles'>, keys?: string[]): boolean {
+  const all = keys?.length ? keys : [role]
+  return all.includes('admin') || all.some((k) => t.editableRoles.includes(k))
+}
+
+function actorCanUseAiInterviewerMenu(actor: Awaited<ReturnType<typeof loadAdminSessionActor>> | null): boolean {
+  if (!actor) return true
+  if (actor.uiRole === 'admin') return true
+  return Array.isArray(actor.allowedMenuKeys) && actor.allowedMenuKeys.includes('sys-interview-prompt')
+}
+
+async function ensureInterviewPromptTemplateStorage(): Promise<void> {
+  if (interviewPromptTemplateStorageReady) return
+  await mysqlPool.query(`
+    CREATE TABLE IF NOT EXISTS ai_interview_prompt_templates (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      name VARCHAR(128) NOT NULL,
+      system_prompt MEDIUMTEXT NOT NULL,
+      enabled TINYINT NOT NULL DEFAULT 1,
+      is_default TINYINT NOT NULL DEFAULT 0,
+      visible_roles TEXT NULL,
+      editable_roles TEXT NULL,
+      updated_by VARCHAR(128) NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uk_ai_interview_prompt_name (name),
+      KEY idx_ai_interview_prompt_enabled (enabled),
+      KEY idx_ai_interview_prompt_default (is_default)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `)
+  await mysqlPool.query(
+    `DELETE FROM ai_interview_prompt_templates
+     WHERE id = 1 AND name = '默认 AI 面试题模板' AND updated_by = 'system'`
+  )
+  await mysqlPool.query(
+    `INSERT INTO ai_interview_prompt_templates
+       (id, name, system_prompt, enabled, is_default, visible_roles, editable_roles, updated_by)
+     VALUES (1, ?, ?, 1, 1, ?, ?, 'system')
+     ON DUPLICATE KEY UPDATE
+       name = VALUES(name),
+       system_prompt = IF(TRIM(COALESCE(system_prompt, '')) = '', VALUES(system_prompt), system_prompt),
+       enabled = 1,
+       is_default = 1,
+       visible_roles = IF(visible_roles IS NULL OR TRIM(visible_roles) = '', VALUES(visible_roles), visible_roles),
+       editable_roles = IF(editable_roles IS NULL OR TRIM(editable_roles) = '', VALUES(editable_roles), editable_roles)`,
+    [
+      BUILTIN_INTERVIEW_PROMPT_TEMPLATE_NAME,
+      DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE,
+      JSON.stringify(['平台管理员', AI_INTERVIEWER_MANAGER_ROLE_NAME]),
+      JSON.stringify(['平台管理员', AI_INTERVIEWER_MANAGER_ROLE_NAME])
+    ]
+  )
+  await mysqlPool.query(
+    `UPDATE ai_interview_prompt_templates
+     SET system_prompt = ?
+     WHERE id = 1 AND name = ? AND system_prompt LIKE '%{{total}}%'`,
+    [DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE, BUILTIN_INTERVIEW_PROMPT_TEMPLATE_NAME]
+  )
+  try {
+    await mysqlPool.query('ALTER TABLE interview_invitations ADD COLUMN prompt_template_id BIGINT UNSIGNED NULL')
+  } catch (e: unknown) {
+    const err = e as { code?: string; errno?: number }
+    if (err.code !== 'ER_DUP_FIELDNAME' && err.errno !== 1060) throw e
+  }
+  interviewPromptTemplateStorageReady = true
+}
+
+function builtinInterviewPromptTemplate(): InterviewPromptTemplate {
+  return {
+    id: BUILTIN_INTERVIEW_PROMPT_TEMPLATE_ID,
+    name: BUILTIN_INTERVIEW_PROMPT_TEMPLATE_NAME,
+    systemPrompt: DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE,
+    enabled: true,
+    isDefault: true,
+    visibleRoles: ALL_INTERVIEW_PROMPT_ROLES,
+    editableRoles: [],
+    updatedBy: 'system',
+    updatedAt: ''
+  }
+}
+
+function mapPromptTemplateRow(row: RowDataPacket): InterviewPromptTemplate {
+  return {
+    id: String(jsonSafeMysqlCell((row as { id?: unknown }).id)),
+    name: String((row as { name?: unknown }).name || '').trim(),
+    systemPrompt: normalizeInterviewPromptText(
+      (row as { system_prompt?: unknown }).system_prompt,
+      DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE
+    ),
+    enabled: Number((row as { enabled?: unknown }).enabled ?? 1) === 1,
+    isDefault: Number((row as { is_default?: unknown }).is_default ?? 0) === 1,
+    visibleRoles: parsePromptRoles((row as { visible_roles?: unknown }).visible_roles, ALL_INTERVIEW_PROMPT_ROLES),
+    editableRoles: parsePromptRoles((row as { editable_roles?: unknown }).editable_roles, ['admin']),
+    updatedBy: String((row as { updated_by?: unknown }).updated_by || ''),
+    updatedAt: String((row as { updated_at?: unknown }).updated_at || '')
+  }
+}
+
+function isBuiltinInterviewPromptTemplate(t: InterviewPromptTemplate | null | undefined): boolean {
+  return String(t?.name || '').trim() === BUILTIN_INTERVIEW_PROMPT_TEMPLATE_NAME
+}
+
+async function loadInterviewPromptTemplateById(id: number | null): Promise<InterviewPromptTemplate | null> {
+  await ensureInterviewPromptTemplateStorage()
+  if (!id || !Number.isFinite(id) || id <= 0) {
+    const [rows] = await mysqlPool.query<RowDataPacket[]>(
+      `SELECT id, name, system_prompt, enabled, is_default, visible_roles, editable_roles, updated_by,
+              DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM ai_interview_prompt_templates
+       WHERE enabled = 1
+       ORDER BY is_default DESC, id ASC
+       LIMIT 1`
+    )
+    return rows.length ? mapPromptTemplateRow(rows[0]) : builtinInterviewPromptTemplate()
+  }
+  if (id && Number.isFinite(id) && id > 0) {
+    const [rows] = await mysqlPool.query<RowDataPacket[]>(
+      `SELECT id, name, system_prompt, enabled, is_default, visible_roles, editable_roles, updated_by,
+              DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM ai_interview_prompt_templates WHERE id = ? LIMIT 1`,
+      [Math.floor(id)]
+    )
+    if (rows.length) return mapPromptTemplateRow(rows[0])
+  }
+  return loadInterviewPromptTemplateById(null)
+}
+
+async function resolveInterviewPromptTemplateIdForQuestion(params: {
+  jobCode: string
+  resumeScreeningIdRaw: string
+  inviteCodeRaw?: string
+  sessionIdRaw?: string
+}): Promise<number | null> {
+  const jobCode = String(params.jobCode || '').trim().toUpperCase()
+  const inviteCode = String(params.inviteCodeRaw || '').trim().toUpperCase()
+  const sessionId = String(params.sessionIdRaw || '').trim()
+  const screeningId = Number(params.resumeScreeningIdRaw)
+  try {
+    await ensureInterviewPromptTemplateStorage()
+    await ensureAdminAiInterviewerManagerRole()
+    if (inviteCode) {
+      const [rows] = await mysqlPool.query<RowDataPacket[]>(
+        `SELECT inv.prompt_template_id AS promptTemplateId
+         FROM interview_invitations inv
+         JOIN jobs j ON j.id = inv.job_id
+         WHERE inv.invite_code = ?
+           AND UPPER(TRIM(j.job_code)) = UPPER(TRIM(?))
+           AND inv.prompt_template_id IS NOT NULL
+         LIMIT 1`,
+        [inviteCode, jobCode]
+      )
+      const v = Number((rows[0] as { promptTemplateId?: unknown } | undefined)?.promptTemplateId)
+      if (Number.isFinite(v) && v > 0) return Math.floor(v)
+    }
+    if (sessionId) {
+      const [rows] = await mysqlPool.query<RowDataPacket[]>(
+        `SELECT inv.prompt_template_id AS promptTemplateId
+         FROM interview_sessions s
+         JOIN interview_invitations inv ON inv.id = s.invitation_id
+         JOIN jobs j ON j.id = inv.job_id
+         WHERE s.session_id = ?
+           AND UPPER(TRIM(j.job_code)) = UPPER(TRIM(?))
+           AND inv.prompt_template_id IS NOT NULL
+         LIMIT 1`,
+        [sessionId, jobCode]
+      )
+      const v = Number((rows[0] as { promptTemplateId?: unknown } | undefined)?.promptTemplateId)
+      if (Number.isFinite(v) && v > 0) return Math.floor(v)
+    }
+    if (!Number.isFinite(screeningId) || screeningId <= 0) return null
+    const [rows] = await mysqlPool.query<RowDataPacket[]>(
+      `SELECT inv.prompt_template_id AS promptTemplateId
+       FROM interview_invitations inv
+       JOIN jobs j ON j.id = inv.job_id
+       WHERE UPPER(TRIM(j.job_code)) = UPPER(TRIM(?))
+         AND inv.resume_screening_id = ?
+         AND inv.prompt_template_id IS NOT NULL
+       ORDER BY inv.accepted_at DESC, inv.updated_at DESC, inv.id DESC
+       LIMIT 1`,
+      [jobCode, Math.floor(screeningId)]
+    )
+    const v = Number((rows[0] as { promptTemplateId?: unknown } | undefined)?.promptTemplateId)
+    return Number.isFinite(v) && v > 0 ? Math.floor(v) : null
+  } catch (e: unknown) {
+    const err = e as { code?: string; errno?: number }
+    if (err.code === 'ER_BAD_FIELD_ERROR' || err.errno === 1054) return null
+    throw e
   }
 }
 
@@ -2231,6 +2660,562 @@ async function runResumeScreeningWithAi(params: {
   return null
 }
 
+type ShenpuResumeDocument = {
+  headline: string
+  professionalSummary: string
+  targetMatchSummary: string
+  coreSkills: string[]
+  workExperiences: Array<{ company: string; title: string; period: string; highlights: string[] }>
+  projectExperiences: Array<{ name: string; role: string; period: string; highlights: string[] }>
+  educationExperiences: Array<{ school: string; major: string; degree: string; period: string }>
+  strengths: string[]
+  risks: string[]
+  clientRequirements: string[]
+  responsibilities: string[]
+  portrait: {
+    dimensions: Array<{ label: string; candidate: number; requirement: number }>
+    conclusion: string
+  }
+}
+
+function clampPortraitScore(v: unknown): number {
+  return Math.max(0, Math.min(100, Math.round(Number(v) || 0)))
+}
+
+function safeTextArray(v: unknown, max = 8): string[] {
+  return Array.isArray(v)
+    ? v.map((x) => String(x || '').trim()).filter(Boolean).slice(0, max)
+    : []
+}
+
+function sanitizeShenpuResumeDocument(raw: unknown, fallback: ShenpuResumeDocument): ShenpuResumeDocument {
+  const obj = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  const arr = (v: unknown) => (Array.isArray(v) ? v : [])
+  const portraitObj =
+    obj.portrait && typeof obj.portrait === 'object' ? (obj.portrait as Record<string, unknown>) : {}
+  const dimensions = arr(portraitObj.dimensions)
+    .map((x) => {
+      const d = x && typeof x === 'object' ? (x as Record<string, unknown>) : {}
+      const label = String(d.label || '').trim()
+      if (!label) return null
+      return {
+        label: label.slice(0, 24),
+        candidate: clampPortraitScore(d.candidate),
+        requirement: clampPortraitScore(d.requirement)
+      }
+    })
+    .filter(Boolean)
+    .slice(0, 6) as ShenpuResumeDocument['portrait']['dimensions']
+  return {
+    headline: String(obj.headline || fallback.headline).trim().slice(0, 80) || fallback.headline,
+    professionalSummary:
+      String(obj.professionalSummary || fallback.professionalSummary).trim().slice(0, 500) ||
+      fallback.professionalSummary,
+    targetMatchSummary:
+      String(obj.targetMatchSummary || fallback.targetMatchSummary).trim().slice(0, 500) ||
+      fallback.targetMatchSummary,
+    coreSkills: safeTextArray(obj.coreSkills, 12).length ? safeTextArray(obj.coreSkills, 12) : fallback.coreSkills,
+    workExperiences:
+      arr(obj.workExperiences)
+        .map((x) => {
+          const r = x && typeof x === 'object' ? (x as Record<string, unknown>) : {}
+          return {
+            company: String(r.company || '').trim().slice(0, 80),
+            title: String(r.title || '').trim().slice(0, 80),
+            period: String(r.period || '').trim().slice(0, 60),
+            highlights: safeTextArray(r.highlights, 5)
+          }
+        })
+        .filter((x) => x.company || x.title || x.highlights.length)
+        .slice(0, 5) || fallback.workExperiences,
+    projectExperiences:
+      arr(obj.projectExperiences)
+        .map((x) => {
+          const r = x && typeof x === 'object' ? (x as Record<string, unknown>) : {}
+          return {
+            name: String(r.name || '').trim().slice(0, 100),
+            role: String(r.role || '').trim().slice(0, 80),
+            period: String(r.period || '').trim().slice(0, 60),
+            highlights: safeTextArray(r.highlights, 5)
+          }
+        })
+        .filter((x) => x.name || x.role || x.highlights.length)
+        .slice(0, 6) || fallback.projectExperiences,
+    educationExperiences:
+      arr(obj.educationExperiences)
+        .map((x) => {
+          const r = x && typeof x === 'object' ? (x as Record<string, unknown>) : {}
+          return {
+            school: String(r.school || '').trim().slice(0, 80),
+            major: String(r.major || '').trim().slice(0, 80),
+            degree: String(r.degree || '').trim().slice(0, 60),
+            period: String(r.period || '').trim().slice(0, 60)
+          }
+        })
+        .filter((x) => x.school || x.major || x.degree)
+        .slice(0, 3) || fallback.educationExperiences,
+    strengths: safeTextArray(obj.strengths, 5).length ? safeTextArray(obj.strengths, 5) : fallback.strengths,
+    risks: safeTextArray(obj.risks, 5).length ? safeTextArray(obj.risks, 5) : fallback.risks,
+    clientRequirements: safeTextArray(obj.clientRequirements, 8).length
+      ? safeTextArray(obj.clientRequirements, 8)
+      : fallback.clientRequirements,
+    responsibilities: safeTextArray(obj.responsibilities, 8).length
+      ? safeTextArray(obj.responsibilities, 8)
+      : fallback.responsibilities,
+    portrait: {
+      dimensions: dimensions.length >= 3 ? dimensions : fallback.portrait.dimensions,
+      conclusion: String(portraitObj.conclusion || fallback.portrait.conclusion).trim().slice(0, 300)
+    }
+  }
+}
+
+function splitJdSections(jdText: string): { clientRequirements: string[]; responsibilities: string[] } {
+  const text = String(jdText || '').replace(/\r/g, '\n').trim()
+  if (!text) return { clientRequirements: [], responsibilities: [] }
+  const reqHeadRe = /(任职要求|任职资格|岗位要求|客户要求|应聘要求|招聘要求|候选人要求|要求)\s*[:：]?/
+  const dutyHeadRe = /(岗位职责|工作职责|岗位描述|职责描述|主要职责|工作内容|职位描述|岗位简介)\s*[:：]?/
+  const reqIdx = text.search(reqHeadRe)
+  const dutyIdx = text.search(dutyHeadRe)
+  const cleanLines = (raw: string): string[] =>
+    raw
+      .split(/\n+/)
+      .map((x) => x.replace(/^[\s\-•·●◆▪︎\d\.、)\(]+/, '').trim())
+      .map((x) => x.replace(/\s+/g, ' '))
+      .filter((x) => x.length >= 4)
+      .slice(0, 8)
+  const sliceBetween = (start: number, others: number[]): string => {
+    if (start < 0) return ''
+    const ends = others.filter((n) => n > start).sort((a, b) => a - b)
+    const end = ends.length ? ends[0] : text.length
+    return text.slice(start, end).replace(reqHeadRe, '').replace(dutyHeadRe, '').trim()
+  }
+  let responsibilities = cleanLines(sliceBetween(dutyIdx, [reqIdx]))
+  let clientRequirements = cleanLines(sliceBetween(reqIdx, [dutyIdx]))
+  if (responsibilities.length === 0 && clientRequirements.length === 0) {
+    const lines = cleanLines(text)
+    const half = Math.max(1, Math.ceil(lines.length / 2))
+    responsibilities = lines.slice(0, half)
+    clientRequirements = lines.slice(half)
+  } else if (responsibilities.length === 0) {
+    responsibilities = ['岗位 JD 中未明确给出职责说明，建议联系招聘方补充。']
+  } else if (clientRequirements.length === 0) {
+    clientRequirements = ['岗位 JD 中未明确给出客户要求，建议联系招聘方补充。']
+  }
+  return { clientRequirements, responsibilities }
+}
+
+function fallbackShenpuResumeDocument(params: {
+  candidateName: string
+  jobTitle: string
+  jdText?: string
+  result: ResumeScreeningAiResult
+  evaluationJson?: Record<string, unknown>
+}): ShenpuResumeDocument {
+  const e = params.evaluationJson || {}
+  const strengths = safeTextArray(e.strengths, 5)
+  const riskRaw = Array.isArray(e.risks) ? e.risks : []
+  const risks = riskRaw
+    .map((x) => (x && typeof x === 'object' ? String((x as Record<string, unknown>).risk || '') : String(x || '')))
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .slice(0, 5)
+  const jdSections = splitJdSections(params.jdText || '')
+  return {
+    headline: `${params.jobTitle || '目标岗位'}候选人`,
+    professionalSummary: params.result.summary || '候选人信息已完成结构化整理，建议结合原始简历进一步复核。',
+    targetMatchSummary: params.result.summary || '已根据岗位 JD 与简历完成匹配评估。',
+    coreSkills: strengths.slice(0, 6),
+    workExperiences: [],
+    projectExperiences: [],
+    educationExperiences: [],
+    strengths,
+    risks,
+    clientRequirements: jdSections.clientRequirements,
+    responsibilities: jdSections.responsibilities,
+    portrait: {
+      dimensions: [
+        { label: '技能匹配', candidate: params.result.skillScore, requirement: 80 },
+        { label: '经验匹配', candidate: params.result.experienceScore, requirement: 80 },
+        { label: '教育背景', candidate: params.result.educationScore, requirement: 70 },
+        { label: '稳定成长', candidate: params.result.stabilityScore, requirement: 75 },
+        { label: '综合匹配', candidate: params.result.matchScore, requirement: 80 }
+      ],
+      conclusion: params.result.summary || '建议结合岗位要求与面试结果综合判断。'
+    }
+  }
+}
+
+async function runShenpuResumeWithAi(params: {
+  candidateName: string
+  jobTitle: string
+  department: string
+  jdText: string
+  resumeText: string
+  result: ResumeScreeningAiResult
+}): Promise<ShenpuResumeDocument> {
+  let parsedEval: Record<string, unknown> = {}
+  try {
+    parsedEval = params.result.evaluationJson ? JSON.parse(params.result.evaluationJson) : {}
+  } catch {
+    parsedEval = {}
+  }
+  const fallback = fallbackShenpuResumeDocument({
+    candidateName: params.candidateName,
+    jobTitle: params.jobTitle,
+    jdText: params.jdText,
+    result: params.result,
+    evaluationJson: parsedEval
+  })
+  if (!process.env.DASHSCOPE_API_KEY?.trim()) return fallback
+  const model = process.env.QWEN_RESUME_MODEL?.trim() || process.env.QWEN_QUESTION_MODEL?.trim() || 'qwen-turbo'
+  const data = await dashScopeChatCompletions({
+    model,
+    temperature: 0.1,
+    messages: [
+      {
+        role: 'system',
+        content:
+          '你是资深招聘顾问。请把候选人原始简历重新整理成“统一标准简历”JSON，必须忠于原文，不得编造。输出严格 JSON，不要 markdown。'
+      },
+      {
+        role: 'user',
+        content: [
+          `候选人：${params.candidateName}`,
+          `目标岗位：${params.jobTitle}`,
+          `部门：${params.department || '未知'}`,
+          `岗位JD：${String(params.jdText || '').replace(/\\s+/g, ' ').slice(0, 12000)}`,
+          `简历全文：${String(params.resumeText || '').replace(/\\s+/g, ' ').slice(0, 20000)}`,
+          `已有评估JSON：${JSON.stringify(parsedEval).slice(0, 12000)}`,
+          '请输出字段：headline, professionalSummary, targetMatchSummary, coreSkills[], workExperiences[{company,title,period,highlights[]}], projectExperiences[{name,role,period,highlights[]}], educationExperiences[{school,major,degree,period}], strengths[], risks[], clientRequirements[], responsibilities[], portrait{dimensions[{label,candidate,requirement}], conclusion}。',
+          'portrait.dimensions 请优先给 5~6 个岗位可读的具体能力项，能细到技术栈时不要只写“技能匹配”，例如 Java、Git、MySQL、SpringBoot、沟通能力；candidate/requirement 为 0~100；缺失信息用空数组，不要臆造。',
+          'clientRequirements 是从岗位 JD 中提炼出的“客户要求 / 任职要求”要点列表（每条 8~60 字，使用陈述句，不要带项目符号）；responsibilities 是岗位职责描述要点列表，每条 12~80 字。两组都严格忠于 JD 原文，不要重复也不要凑数；若 JD 中没有明确信息，则返回空数组。'
+        ].join('\\n')
+      }
+    ]
+  })
+  const raw = data?.choices?.[0]?.message?.content
+  try {
+    const text = String(raw || '')
+      .trim()
+      .replace(/^```(?:json)?\\s*/i, '')
+      .replace(/\\s*```\\s*$/i, '')
+    return sanitizeShenpuResumeDocument(JSON.parse(text), fallback)
+  } catch {
+    return fallback
+  }
+}
+
+function escapeHtml(v: unknown): string {
+  return String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function shenpuRadarSvg(dimensions: ShenpuResumeDocument['portrait']['dimensions']): string {
+  const dims = dimensions.slice(0, 6)
+  const viewW = 560
+  const viewH = 290
+  const cx = viewW / 2
+  const cy = 132
+  const radius = 96
+  const total = dims.length || 1
+  // 统一以 0~5 满分作为评分尺度（原始 candidate/requirement 为 0~100，做归一化）
+  const toFive = (v: number) => Math.max(0, Math.min(5, Math.round((v / 100) * 50) / 10))
+  const fmt = (v: number) => (Number.isInteger(v) ? v.toFixed(0) : v.toFixed(1))
+  const point = (score5: number, i: number) => {
+    const angle = -Math.PI / 2 + (Math.PI * 2 * i) / total
+    const r = (radius * Math.max(0, Math.min(5, score5))) / 5
+    return [cx + Math.cos(angle) * r, cy + Math.sin(angle) * r]
+  }
+  const polygonPoints = (scores5: number[]) => scores5.map((s, i) => point(s, i).join(',')).join(' ')
+  const grids = [1, 2, 3, 4, 5]
+    .map(
+      (s) =>
+        `<polygon points="${polygonPoints(dims.map(() => s))}" fill="${s === 5 ? 'rgba(241,245,249,0.55)' : 'none'}" stroke="#e5e7eb" stroke-width="1"/>`
+    )
+    .join('')
+  const axesLines = dims
+    .map((_, i) => {
+      const [x, y] = point(5, i)
+      return `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="#e5e7eb" stroke-width="1"/>`
+    })
+    .join('')
+  const ticks = [1, 2, 3, 4, 5]
+    .map((n) => {
+      const y = cy - (radius * n) / 5 + 3
+      return `<text x="${cx + 4}" y="${y}" font-size="9" fill="#9ca3af">${n}</text>`
+    })
+    .join('')
+  const charWidth = (s: string) => Array.from(s).reduce((sum, ch) => sum + (/[\u4e00-\u9fff\uff00-\uffef]/.test(ch) ? 2 : 1), 0)
+  const wrapLabel = (raw: string): string[] => {
+    const text = String(raw || '').trim()
+    if (!text) return ['']
+    const maxUnits = 10
+    if (charWidth(text) <= maxUnits) return [text]
+    const parts = text.split(/\s*[\/\\、,，·]+\s*/).filter(Boolean)
+    const lines: string[] = []
+    let buf = ''
+    for (const p of parts.length > 1 ? parts : [text]) {
+      const tryNext = buf ? `${buf} / ${p}` : p
+      if (charWidth(tryNext) <= maxUnits) {
+        buf = tryNext
+      } else {
+        if (buf) lines.push(buf)
+        if (charWidth(p) <= maxUnits) {
+          buf = p
+        } else {
+          let chunk = ''
+          for (const ch of Array.from(p)) {
+            if (charWidth(chunk + ch) > maxUnits) {
+              if (chunk) lines.push(chunk)
+              chunk = ch
+            } else {
+              chunk += ch
+            }
+          }
+          buf = chunk
+        }
+      }
+    }
+    if (buf) lines.push(buf)
+    return lines.slice(0, 2)
+  }
+  const labels = dims
+    .map((d, i) => {
+      const angle = -Math.PI / 2 + (Math.PI * 2 * i) / total
+      const labelR = radius + 20
+      const lx = cx + Math.cos(angle) * labelR
+      const ly = cy + Math.sin(angle) * labelR
+      const lines = wrapLabel(d.label)
+      const anchor = Math.abs(Math.cos(angle)) < 0.25 ? 'middle' : Math.cos(angle) > 0 ? 'start' : 'end'
+      const lineH = 12
+      const baseY = ly - ((lines.length - 1) * lineH) / 2 + 3
+      return lines
+        .map(
+          (ln, idx) =>
+            `<text x="${lx}" y="${baseY + idx * lineH}" text-anchor="${anchor}" font-size="10.5" fill="#334155" font-weight="600">${escapeHtml(ln)}</text>`
+        )
+        .join('')
+    })
+    .join('')
+  const reqScores = dims.map((d) => toFive(d.requirement))
+  const candScores = dims.map((d) => toFive(d.candidate))
+  const reqPoints = polygonPoints(reqScores)
+  const candPoints = polygonPoints(candScores)
+  const candidateDots = dims
+    .map((_, i) => {
+      const [x, y] = point(candScores[i], i)
+      return `<circle cx="${x}" cy="${y}" r="2.6" fill="#111827" stroke="#fff" stroke-width="1"/>`
+    })
+    .join('')
+  const candidateValues = dims
+    .map((_, i) => {
+      const s5 = candScores[i]
+      const angle = -Math.PI / 2 + (Math.PI * 2 * i) / total
+      const r = (radius * s5) / 5
+      const offset = r < 18 ? 14 : 9
+      const vx = cx + Math.cos(angle) * (r + offset)
+      const vy = cy + Math.sin(angle) * (r + offset) + 3
+      const anchor = Math.abs(Math.cos(angle)) < 0.25 ? 'middle' : Math.cos(angle) > 0 ? 'start' : 'end'
+      return `<text x="${vx}" y="${vy}" text-anchor="${anchor}" font-size="10.5" font-weight="700" fill="#111827">${fmt(s5)}</text>`
+    })
+    .join('')
+  const requirementDots = dims
+    .map((_, i) => {
+      const [x, y] = point(reqScores[i], i)
+      return `<circle cx="${x}" cy="${y}" r="2.2" fill="#ef4444" stroke="#fff" stroke-width="1"/>`
+    })
+    .join('')
+  const requirementValues = dims
+    .map((_, i) => {
+      const s5 = reqScores[i]
+      const angle = -Math.PI / 2 + (Math.PI * 2 * i) / total
+      const r = (radius * s5) / 5
+      const vx = cx + Math.cos(angle) * Math.max(0, r - 11)
+      const vy = cy + Math.sin(angle) * Math.max(0, r - 11) + 3
+      return `<text x="${vx}" y="${vy}" text-anchor="middle" font-size="9" font-weight="700" fill="#ef4444">${fmt(s5)}</text>`
+    })
+    .join('')
+  const legendY = viewH - 12
+  return `<svg viewBox="0 0 ${viewW} ${viewH}" xmlns="http://www.w3.org/2000/svg">
+    ${grids}${axesLines}${ticks}${labels}
+    <polygon points="${reqPoints}" fill="rgba(239,68,68,0.10)" stroke="#ef4444" stroke-width="1.8" stroke-linejoin="round"/>
+    <polygon points="${candPoints}" fill="rgba(17,24,39,0.18)" stroke="#111827" stroke-width="2" stroke-linejoin="round"/>
+    ${requirementDots}${requirementValues}${candidateDots}${candidateValues}
+    <g font-size="11">
+      <line x1="${cx - 140}" y1="${legendY}" x2="${cx - 122}" y2="${legendY}" stroke="#ef4444" stroke-width="2.5"/>
+      <text x="${cx - 118}" y="${legendY + 4}" fill="#334155">岗位要求（满分 5 分）</text>
+      <line x1="${cx + 30}" y1="${legendY}" x2="${cx + 48}" y2="${legendY}" stroke="#111827" stroke-width="2.5"/>
+      <text x="${cx + 52}" y="${legendY + 4}" fill="#334155">候选人画像</text>
+    </g>
+  </svg>`
+}
+
+function shenpuPortraitScoreRows(dimensions: ShenpuResumeDocument['portrait']['dimensions']): string {
+  const clampPct = (v: number) => Math.max(0, Math.min(100, Math.round(v)))
+  const toFive = (v: number) => Math.max(0, Math.min(5, Math.round((v / 100) * 50) / 10))
+  const fmt = (v: number) => (Number.isInteger(v) ? v.toFixed(0) : v.toFixed(1))
+  return dimensions
+    .slice(0, 6)
+    .map(
+      (d) => `<div class="score-row">
+        <div class="score-name">${escapeHtml(d.label)}</div>
+        <div class="score-track"><span class="req" style="width:${clampPct(d.requirement)}%"></span><span class="cand" style="width:${clampPct(d.candidate)}%"></span></div>
+        <div class="score-num"><b>${fmt(toFive(d.candidate))}</b> / ${fmt(toFive(d.requirement))}</div>
+      </div>`
+    )
+    .join('')
+}
+
+function renderShenpuResumeHtml(params: {
+  candidateName: string
+  candidatePhone?: string | null
+  jobTitle: string
+  department?: string | null
+  doc: ShenpuResumeDocument
+}): string {
+  const li = (items: string[]) => items.map((x) => `<li>${escapeHtml(x)}</li>`).join('')
+  const exp = (title: string, subtitle: string, period: string, highlights: string[]) =>
+    `<div class="entry"><div class="entry-head"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(period)}</span></div><div class="muted">${escapeHtml(subtitle)}</div><ul>${li(highlights)}</ul></div>`
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+    @page { size: A4; margin: 10mm 12mm; }
+    * { box-sizing: border-box; } body { font-family: "Arial Unicode MS","PingFang SC","Hiragino Sans GB",sans-serif; color:#0f172a; margin:0; font-size:11.5px; line-height:1.42; }
+    h1,h2,h3,p{margin:0}.cover{border-top:7px solid #1d4ed8;padding-top:10px}.brand{color:#1d4ed8;font-weight:700;letter-spacing:.08em}.name{font-size:25px;font-weight:800;margin-top:5px}.headline{font-size:14px;color:#334155;margin-top:2px}.meta{margin-top:6px;color:#475569}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.card{border:1px solid #dbeafe;border-radius:9px;padding:9px}.card h3{font-size:13px;color:#1d4ed8;margin-bottom:4px}.section{margin-top:8px}.section h2{font-size:14px;border-left:4px solid #2563eb;padding-left:7px;margin-bottom:4px}.chips{display:flex;flex-wrap:wrap;gap:5px}.chip{background:#eff6ff;color:#1d4ed8;padding:2px 7px;border-radius:999px}.entry{margin-bottom:6px}.entry-head{display:flex;justify-content:space-between;gap:10px}.muted{color:#64748b}.portrait{display:grid;grid-template-columns:430px 1fr;gap:12px;align-items:start}.portrait svg{width:100%;height:auto;max-height:230px;display:block}.page-break{page-break-before:always}ul{margin:3px 0 0;padding-left:17px}li{margin:1px 0}.summary{background:#f8fafc;border-radius:9px;padding:10px}.score-panel{margin-top:8px}.score-row{display:grid;grid-template-columns:88px 1fr 58px;gap:8px;align-items:center;margin-top:6px}.score-name{font-weight:600;color:#334155}.score-track{position:relative;height:8px;border-radius:999px;background:#e2e8f0;overflow:hidden}.score-track .req{position:absolute;inset:0 auto 0 0;background:#fecaca}.score-track .cand{position:absolute;inset:0 auto 0 0;background:#111827;opacity:.82}.score-num{text-align:right;color:#64748b}.score-num b{color:#111827}.jd-blocks{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.jd-card{border:1px solid #e2e8f0;border-radius:9px;padding:10px;background:#fff}.jd-card h3{font-size:13px;color:#0f172a;margin-bottom:6px;display:flex;align-items:center;gap:6px}.jd-card h3::before{content:"";display:inline-block;width:3px;height:13px;background:#2563eb;border-radius:2px}.jd-card.req h3::before{background:#ef4444}.jd-card ul{padding-left:16px}.jd-card li{margin:2px 0;color:#334155;line-height:1.5}.foot{margin-top:10px;color:#64748b;font-size:10px;text-align:right}
+  </style></head><body>
+    <section class="cover">
+      <div class="brand">申朴标准简历</div>
+      <div class="name">${escapeHtml(params.candidateName || '候选人')}</div>
+      <div class="headline">${escapeHtml(params.doc.headline)}</div>
+      <div class="meta">目标岗位：${escapeHtml(params.jobTitle)}　部门：${escapeHtml(params.department || '—')}　联系电话：${escapeHtml(params.candidatePhone || '—')}</div>
+      <div class="grid">
+        <div class="card"><h3>职业概述</h3><p>${escapeHtml(params.doc.professionalSummary)}</p></div>
+        <div class="card"><h3>岗位匹配摘要</h3><p>${escapeHtml(params.doc.targetMatchSummary)}</p></div>
+      </div>
+      <div class="section"><h2>核心技能</h2><div class="chips">${params.doc.coreSkills.map((x) => `<span class="chip">${escapeHtml(x)}</span>`).join('') || '<span class="muted">暂无可提炼技能</span>'}</div></div>
+      <div class="section"><h2>工作经历</h2>${params.doc.workExperiences.map((x) => exp(x.company, x.title, x.period, x.highlights)).join('') || '<p class="muted">原始简历未提取到明确工作经历。</p>'}</div>
+      <div class="section"><h2>项目经历</h2>${params.doc.projectExperiences.map((x) => exp(x.name, x.role, x.period, x.highlights)).join('') || '<p class="muted">原始简历未提取到明确项目经历。</p>'}</div>
+      <div class="section"><h2>教育经历</h2>${params.doc.educationExperiences.map((x) => exp(x.school, `${x.major} ${x.degree}`.trim(), x.period, [])).join('') || '<p class="muted">原始简历未提取到明确教育经历。</p>'}</div>
+    </section>
+    <section class="page-break">
+      <div class="section"><h2>岗位匹配画像</h2><div class="portrait">${shenpuRadarSvg(params.doc.portrait.dimensions)}<div><div class="summary"><h3>画像结论</h3><p>${escapeHtml(params.doc.portrait.conclusion)}</p></div><div class="score-panel">${shenpuPortraitScoreRows(params.doc.portrait.dimensions)}</div></div></div></div>
+      <div class="jd-blocks">
+        <div class="jd-card req"><h3>客户要求</h3><ul>${li(params.doc.clientRequirements) || '<li class="muted">岗位 JD 中未提供明确客户要求。</li>'}</ul></div>
+        <div class="jd-card"><h3>岗位职责描述</h3><ul>${li(params.doc.responsibilities) || '<li class="muted">岗位 JD 中未提供明确职责描述。</li>'}</ul></div>
+      </div>
+      <div class="grid">
+        <div class="card"><h3>候选人优势</h3><ul>${li(params.doc.strengths) || '<li>暂无</li>'}</ul></div>
+        <div class="card"><h3>需核验风险</h3><ul>${li(params.doc.risks) || '<li>暂无明显风险</li>'}</ul></div>
+      </div>
+      <div class="foot">由申朴智能招聘系统基于岗位 JD 与候选人简历生成</div>
+    </section>
+  </body></html>`
+}
+
+async function renderHtmlToPdfBuffer(html: string): Promise<Buffer> {
+  const renderer =
+    process.env.PDF_RENDERER_BIN?.trim() ||
+    [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/usr/bin/chromium',
+      '/usr/bin/google-chrome',
+      'chromium',
+      'google-chrome'
+    ].find((candidate) => !candidate.startsWith('/') || fs.existsSync(candidate)) ||
+    'chromium'
+  const tempDir = path.join(RESUME_STORAGE_DIR, '.tmp')
+  fs.mkdirSync(tempDir, { recursive: true })
+  const token = crypto.randomUUID()
+  const htmlPath = path.join(tempDir, `${token}.html`)
+  const pdfPath = path.join(tempDir, `${token}.pdf`)
+  fs.writeFileSync(htmlPath, html, 'utf8')
+  try {
+    // 使用 new headless 才能让 --no-pdf-header-footer 真正生效，避免顶部出现 file:/// 路径与日期
+    await execFileAsync(renderer, [
+      '--headless=new',
+      '--disable-gpu',
+      '--no-sandbox',
+      '--no-pdf-header-footer',
+      '--print-to-pdf-no-header',
+      `--print-to-pdf=${pdfPath}`,
+      `file://${htmlPath}`
+    ])
+    return fs.readFileSync(pdfPath)
+  } finally {
+    fs.rmSync(htmlPath, { force: true })
+    fs.rmSync(pdfPath, { force: true })
+  }
+}
+
+async function generateShenpuResumeForScreening(params: {
+  screeningId: number
+  candidateName: string
+  candidatePhone?: string | null
+  jobTitle: string
+  department?: string | null
+  jdText: string
+  resumeText: string
+  result: ResumeScreeningAiResult
+}): Promise<void> {
+  try {
+    await ensureShenpuResumeTable()
+    await mysqlPool.query(
+      `INSERT INTO resume_screening_shenpu_resumes (screening_id, status, progress_percent, progress_stage)
+       VALUES (?, 'generating', 10, '准备画像数据')
+       ON DUPLICATE KEY UPDATE status='generating', progress_percent=10, progress_stage='准备画像数据', error_message=NULL, updated_at=NOW()`,
+      [params.screeningId]
+    )
+    await mysqlPool.query(
+      `UPDATE resume_screening_shenpu_resumes SET progress_percent=35, progress_stage='提炼标准简历' WHERE screening_id=?`,
+      [params.screeningId]
+    )
+    const doc = await runShenpuResumeWithAi({
+      candidateName: params.candidateName,
+      jobTitle: params.jobTitle,
+      department: params.department || '',
+      jdText: params.jdText,
+      resumeText: params.resumeText,
+      result: params.result
+    })
+    await mysqlPool.query(
+      `UPDATE resume_screening_shenpu_resumes SET progress_percent=70, progress_stage='排版画像图表' WHERE screening_id=?`,
+      [params.screeningId]
+    )
+    const html = renderShenpuResumeHtml({
+      candidateName: params.candidateName,
+      candidatePhone: params.candidatePhone,
+      jobTitle: params.jobTitle,
+      department: params.department,
+      doc
+    })
+    const pdf = await renderHtmlToPdfBuffer(html)
+    await mysqlPool.query(
+      `UPDATE resume_screening_shenpu_resumes SET progress_percent=90, progress_stage='写入 PDF 文件' WHERE screening_id=?`,
+      [params.screeningId]
+    )
+    const saved = saveGeneratedResumePdf(pdf, `${params.candidateName || '候选人'}-申朴简历.pdf`)
+    await mysqlPool.query(
+      `UPDATE resume_screening_shenpu_resumes
+       SET status='ready', file_name=?, mime_type='application/pdf', file_size_bytes=?, storage_path=?, content_json=?, progress_percent=100, progress_stage='已完成', error_message=NULL, generated_at=NOW(), updated_at=NOW()
+       WHERE screening_id=?`,
+      [saved.originalName, saved.sizeBytes, saved.storageKey, JSON.stringify(doc), params.screeningId]
+    )
+  } catch (e) {
+    const message = e instanceof Error ? e.message : 'generate failed'
+    console.warn('[shenpu-resume] generate failed:', message)
+    try {
+      await mysqlPool.query(
+        `UPDATE resume_screening_shenpu_resumes SET status='failed', progress_percent=0, progress_stage='生成失败', error_message=?, updated_at=NOW() WHERE screening_id=?`,
+        [message.slice(0, 500), params.screeningId]
+      )
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 function fallbackInterviewScore(profile: { name?: string }, answers: Array<{ answer?: string }>): AiInterviewScore {
   const score = Math.min(
     100,
@@ -2253,6 +3238,59 @@ function fallbackInterviewScore(profile: { name?: string }, answers: Array<{ ans
     suggestions: ['补充关键技术细节与可量化结果', '回答先给结论，再展开过程与权衡'],
     riskPoints: score >= 75 ? [] : ['回答深度不足，可能影响岗位匹配度']
   }
+}
+
+function fallbackInterviewScoreForTemplate(
+  profile: { name?: string },
+  answers: Array<{ answer?: string }>,
+  promptTemplate: InterviewPromptTemplate | null
+): AiInterviewScore {
+  if (isBuiltinInterviewPromptTemplate(promptTemplate)) return fallbackInterviewScore(profile, answers)
+  const answered = answers.filter((item) => String(item.answer || '').trim()).length
+  const total = Math.max(answers.length, 1)
+  const completionScore = Math.round((answered / total) * 45)
+  const avgLen =
+    answered > 0
+      ? Math.round(answers.reduce((sum, item) => sum + Math.min(String(item.answer || '').trim().length, 80), 0) / answered)
+      : 0
+  const score = Math.max(0, Math.min(70, 20 + completionScore + Math.min(25, Math.round(avgLen / 4))))
+  return {
+    score,
+    passed: false,
+    overallFeedback: `${profile?.name || '候选人'}的作答需要按所选 AI 面试官模板人工复核；当前未完成模板化 AI 评分，默认不自动通过。`,
+    dimensionScores: {
+      communication: Math.max(0, Math.min(100, score)),
+      templateFit: Math.max(0, Math.min(100, score - 10)),
+      answerCompleteness: Math.max(0, Math.min(100, completionScore * 2)),
+      logic: Math.max(0, Math.min(100, score)),
+      riskControl: Math.max(0, Math.min(100, score - 5))
+    },
+    suggestions: ['请结合 AI 面试官模板定义的考察领域复核回答内容'],
+    riskPoints: ['AI 评分不可用时，自定义 AI 面试官面试不自动判定通过']
+  }
+}
+
+async function loadInterviewPromptTemplateForSession(sessionId: string): Promise<InterviewPromptTemplate | null> {
+  const sid = String(sessionId || '').trim()
+  if (!sid) return loadInterviewPromptTemplateById(null)
+  try {
+    await ensureInterviewPromptTemplateStorage()
+    const [rows] = await mysqlPool.query<RowDataPacket[]>(
+      `SELECT inv.prompt_template_id AS promptTemplateId
+       FROM interview_sessions s
+       JOIN interview_invitations inv ON inv.id = s.invitation_id
+       WHERE s.session_id = ?
+         AND inv.prompt_template_id IS NOT NULL
+       LIMIT 1`,
+      [sid]
+    )
+    const v = Number((rows[0] as { promptTemplateId?: unknown } | undefined)?.promptTemplateId)
+    if (Number.isFinite(v) && v > 0) return loadInterviewPromptTemplateById(Math.floor(v))
+  } catch (e: unknown) {
+    const err = e as { code?: string; errno?: number }
+    if (err.code !== 'ER_BAD_FIELD_ERROR' && err.errno !== 1054) throw e
+  }
+  return loadInterviewPromptTemplateById(null)
 }
 
 function guessAudioMimeFromName(name: string): string {
@@ -2291,7 +3329,7 @@ function buildPersonalizedInterviewUserPromptBlock(params: {
   jdText: string
   resumeText: string
   candidateName: string
-}) {
+}, userPromptTemplate = DEFAULT_INTERVIEW_QUESTION_USER_PROMPT_TEMPLATE, options?: { templatePriority?: boolean }) {
   const hasResume = Boolean(String(params.resumeText || '').trim())
   const clipResume = String(params.resumeText || '')
     .replace(/\s+/g, ' ')
@@ -2299,15 +3337,32 @@ function buildPersonalizedInterviewUserPromptBlock(params: {
   const clipJd = String(params.jdText || '')
     .replace(/\s+/g, ' ')
     .slice(0, 12000)
-  const userPrompt = [
+  const resumeBlock = hasResume
+    ? `简历全文（节选）：${clipResume}`
+    : '（未提供匹配到该候选人姓名的简历正文：Q2、Q3 请结合 JD 设计「假设候选人具备典型背景」的项目深挖题，题干中不要写「因无简历」之类字样。）'
+  const backgroundOnlyPrompt = [
+    '以下是候选人背景资料，仅供参考。',
+    '如果背景资料与 AI 面试官模板冲突，必须忽略背景资料，以 AI 面试官模板为准。',
     `候选人姓名：${params.candidateName || '未知'}`,
-    `岗位名称：${params.title}`,
+    `岗位名称：${params.title || '未知'}`,
     `部门：${params.department || '未知'}`,
-    `JD：${clipJd || '（无正文）'}`,
-    hasResume
-      ? `简历全文（节选）：${clipResume}`
-      : '（未提供匹配到该候选人姓名的简历正文：Q2、Q3 请结合 JD 设计「假设候选人具备典型背景」的项目深挖题，题干中不要写「因无简历」之类字样。）'
+    `JD（仅供参考）：${clipJd || '（无正文）'}`,
+    hasResume ? `简历全文（节选，仅供参考）：${clipResume}` : '简历全文：未提供'
   ].join('\n')
+  if (options?.templatePriority) return { hasResume, userPrompt: backgroundOnlyPrompt }
+  const vars = {
+    candidateName: params.candidateName || '未知',
+    title: params.title,
+    department: params.department || '未知',
+    jdText: clipJd || '（无正文）',
+    resumeText: clipResume,
+    resumeBlock,
+    hasResume: hasResume ? 'true' : 'false'
+  }
+  const userPrompt = renderInterviewPromptTemplate(
+    normalizeInterviewPromptText(userPromptTemplate, DEFAULT_INTERVIEW_QUESTION_USER_PROMPT_TEMPLATE),
+    vars
+  )
   return { hasResume, userPrompt }
 }
 
@@ -2321,6 +3376,59 @@ function assertDashScopeForInterview(): { apiKey: string; model: string } {
   return { apiKey, model }
 }
 
+function chineseQuestionCountToNumber(raw: string): number | null {
+  const t = String(raw || '').trim()
+  if (!t) return null
+  const direct = Number(t)
+  if (Number.isFinite(direct) && direct > 0) return Math.floor(direct)
+  const digits: Record<string, number> = {
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9
+  }
+  if (digits[t] != null) return digits[t]
+  if (t === '十') return 10
+  const tenMatch = t.match(/^十([一二三四五六七八九])$/)
+  if (tenMatch) return 10 + digits[tenMatch[1]]
+  const unitTenMatch = t.match(/^([一二三四五六七八九])十([一二三四五六七八九])?$/)
+  if (unitTenMatch) return digits[unitTenMatch[1]] * 10 + (unitTenMatch[2] ? digits[unitTenMatch[2]] : 0)
+  return null
+}
+
+function extractInterviewQuestionCountFromPrompt(prompt: string): number {
+  const text = String(prompt || '')
+  const patterns = [
+    /恰好\s*([0-9一二两三四五六七八九十]+)\s*道/g,
+    /严格输出\s*([0-9一二两三四五六七八九十]+)\s*道/g,
+    /输出\s*([0-9一二两三四五六七八九十]+)\s*道/g,
+    /生成\s*([0-9一二两三四五六七八九十]+)\s*道/g,
+    /([0-9一二两三四五六七八九十]+)\s*道(?:中文)?(?:面试)?题/g
+  ]
+  for (const pattern of patterns) {
+    const match = pattern.exec(text)
+    const n = match ? chineseQuestionCountToNumber(match[1]) : null
+    if (n && n >= 1 && n <= 20) return n
+  }
+  return PERSONALIZED_INTERVIEW_TOTAL
+}
+
+function buildInterviewSystemPromptForGeneration(systemPrompt: string, total: number): string {
+  return [
+    systemPrompt,
+    '',
+    '【模板优先级】上方 AI 面试官模板是本场面试的最高优先级。',
+    '如果模板定义的面试官身份、岗位领域、考察能力与 user 消息里的岗位/JD/简历不一致，必须以模板为准；岗位/JD/简历只能作为候选人背景参考，不能把题目拉回其它岗位领域。',
+    `本场面试需要输出 ${total} 道题；如果模板明确写了题量，以模板题量为准，模板未写题量时默认 6 道。`
+  ].join('\n')
+}
+
 /** 仅 Q1：供小程序先开答，其余题异步拉取 */
 async function generatePersonalizedInterviewFirst(params: {
   title: string
@@ -2328,9 +3436,22 @@ async function generatePersonalizedInterviewFirst(params: {
   jdText: string
   resumeText: string
   candidateName: string
+  promptTemplateId?: number | null
 }) {
   const { model } = assertDashScopeForInterview()
-  const { userPrompt } = buildPersonalizedInterviewUserPromptBlock(params)
+  const promptTemplate = await loadInterviewPromptTemplateById(params.promptTemplateId ?? null)
+  const builtinTemplate = isBuiltinInterviewPromptTemplate(promptTemplate)
+  const systemPromptTemplate = promptTemplate?.systemPrompt || DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE
+  const systemPrompt = renderInterviewPromptTemplate(systemPromptTemplate, {
+    total: PERSONALIZED_INTERVIEW_TOTAL,
+    questionCount: PERSONALIZED_INTERVIEW_TOTAL,
+    hasResume: Boolean(String(params.resumeText || '').trim()) ? 'true' : 'false'
+  })
+  const total = builtinTemplate ? PERSONALIZED_INTERVIEW_TOTAL : extractInterviewQuestionCountFromPrompt(systemPrompt)
+  const generationSystemPrompt = builtinTemplate ? systemPrompt : buildInterviewSystemPromptForGeneration(systemPrompt, total)
+  const { userPrompt } = buildPersonalizedInterviewUserPromptBlock(params, DEFAULT_INTERVIEW_QUESTION_USER_PROMPT_TEMPLATE, {
+    templatePriority: !builtinTemplate
+  })
   try {
     const data = await dashScopeChatCompletions({
       model,
@@ -2338,8 +3459,9 @@ async function generatePersonalizedInterviewFirst(params: {
         {
           role: 'system',
           content:
-            '你是资深技术面试官。请严格输出恰好 1 道中文面试题，放在一个 JSON 对象里，格式：{"questions":[{"id":"Q1","text":"题干"}]}。\n' +
-            '要求：Q1 为开场自我介绍题，约 2～3 分钟，可提示包含教育、工作/项目亮点；不要 markdown 代码块，不要其它说明文字。'
+            `${generationSystemPrompt}\n\n` +
+            '当前为分段生成的首题阶段。请只输出 Q1，放在一个 JSON 对象里，格式：{"questions":[{"id":"Q1","text":"题干"}]}。\n' +
+            '不要 markdown 代码块，不要其它说明文字。'
         },
         { role: 'user', content: userPrompt }
       ],
@@ -2375,10 +3497,24 @@ async function generatePersonalizedInterviewRest(params: {
   resumeText: string
   candidateName: string
   firstQuestionText: string
+  promptTemplateId?: number | null
 }) {
-  const restCount = PERSONALIZED_INTERVIEW_TOTAL - 1
   const { model } = assertDashScopeForInterview()
-  const { userPrompt } = buildPersonalizedInterviewUserPromptBlock(params)
+  const promptTemplate = await loadInterviewPromptTemplateById(params.promptTemplateId ?? null)
+  const builtinTemplate = isBuiltinInterviewPromptTemplate(promptTemplate)
+  const systemPromptTemplate = promptTemplate?.systemPrompt || DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE
+  const systemPrompt = renderInterviewPromptTemplate(systemPromptTemplate, {
+    total: PERSONALIZED_INTERVIEW_TOTAL,
+    questionCount: PERSONALIZED_INTERVIEW_TOTAL,
+    hasResume: Boolean(String(params.resumeText || '').trim()) ? 'true' : 'false'
+  })
+  const total = builtinTemplate ? PERSONALIZED_INTERVIEW_TOTAL : extractInterviewQuestionCountFromPrompt(systemPrompt)
+  const restCount = Math.max(0, total - 1)
+  if (restCount === 0) return []
+  const generationSystemPrompt = builtinTemplate ? systemPrompt : buildInterviewSystemPromptForGeneration(systemPrompt, total)
+  const { userPrompt } = buildPersonalizedInterviewUserPromptBlock(params, DEFAULT_INTERVIEW_QUESTION_USER_PROMPT_TEMPLATE, {
+    templatePriority: !builtinTemplate
+  })
   const firstT = String(params.firstQuestionText || '').trim().slice(0, 2000)
   const userWithFirst = [userPrompt, `首题已向候选人展示，请勿重复首题内容，并自然衔接深度考察：\n${firstT || '（首题文本缺失，仍请输出 Q2～Q6）'}`].join(
     '\n\n'
@@ -2389,12 +3525,16 @@ async function generatePersonalizedInterviewRest(params: {
       messages: [
         {
           role: 'system',
-          content:
-            `你是资深技术面试官。请严格输出恰好 ${restCount} 道中文面试题，放在一个 JSON 对象里，格式：{"questions":[{"id":"Q2","text":"题干"},…]}。\n` +
-            '要求：\n' +
-            '1) Q2、Q3：必须围绕简历中的具体项目、实习或工作经历追问（技术细节、职责边界、难点与结果）；若用户消息中说明无简历则结合 JD 设计两道「项目/交付」情景深挖题。\n' +
-            '2) Q4、Q5、Q6：与岗位 JD 强相关的纯技术题（可含原理、方案对比、排错、性能、安全等），不要行为面或空泛的「你怎么看」。\n' +
-            `id 必须为 Q2 到 Q${PERSONALIZED_INTERVIEW_TOTAL} 递增；不要 markdown 代码块，不要其它说明文字。`
+          content: builtinTemplate
+            ? `${generationSystemPrompt}\n\n` +
+              `当前为分段生成的后续题阶段。请严格输出恰好 ${restCount} 道中文面试题，放在一个 JSON 对象里，格式：{"questions":[{"id":"Q2","text":"题干"},…]}。\n` +
+              '要求：\n' +
+              '1) Q2、Q3：必须围绕简历中的具体项目、实习或工作经历追问（技术细节、职责边界、难点与结果）；若用户消息中说明无简历则结合 JD 设计两道「项目/交付」情景深挖题。\n' +
+              '2) Q4、Q5、Q6：与岗位 JD 强相关的纯技术题（可含原理、方案对比、排错、性能、安全等），不要行为面或空泛的「你怎么看」。\n' +
+              `id 必须为 Q2 到 Q${total} 递增；不要 markdown 代码块，不要其它说明文字。`
+            : `${generationSystemPrompt}\n\n` +
+              `当前为分段生成的后续题阶段。请严格输出恰好 ${restCount} 道中文面试题，放在一个 JSON 对象里，格式：{"questions":[{"id":"Q2","text":"题干"},…]}。\n` +
+              `题目内容必须继续服从 AI 面试官模板；id 必须为 Q2 到 Q${total} 递增；不要 markdown 代码块，不要其它说明文字。`
         },
         { role: 'user', content: userWithFirst }
       ],
@@ -2436,34 +3576,46 @@ async function generatePersonalizedInterviewSix(params: {
   jdText: string
   resumeText: string
   candidateName: string
+  promptTemplateId?: number | null
 }) {
-  const total = PERSONALIZED_INTERVIEW_TOTAL
   const { model } = assertDashScopeForInterview()
-  const { userPrompt } = buildPersonalizedInterviewUserPromptBlock(params)
+  const promptTemplate = await loadInterviewPromptTemplateById(params.promptTemplateId ?? null)
+  const builtinTemplate = isBuiltinInterviewPromptTemplate(promptTemplate)
+  const systemPromptTemplate = promptTemplate?.systemPrompt || DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE
+  const systemPrompt = renderInterviewPromptTemplate(systemPromptTemplate, {
+    total: PERSONALIZED_INTERVIEW_TOTAL,
+    questionCount: PERSONALIZED_INTERVIEW_TOTAL,
+    hasResume: Boolean(String(params.resumeText || '').trim()) ? 'true' : 'false'
+  })
+  const total = builtinTemplate ? PERSONALIZED_INTERVIEW_TOTAL : extractInterviewQuestionCountFromPrompt(systemPrompt)
+  const generationSystemPrompt = builtinTemplate ? systemPrompt : buildInterviewSystemPromptForGeneration(systemPrompt, total)
+  const { userPrompt } = buildPersonalizedInterviewUserPromptBlock(params, DEFAULT_INTERVIEW_QUESTION_USER_PROMPT_TEMPLATE, {
+    templatePriority: !builtinTemplate
+  })
   try {
     const data = await dashScopeChatCompletions({
       model,
       messages: [
         {
           role: 'system',
-          content:
-            `你是资深技术面试官。请严格输出恰好 ${total} 道中文面试题，放在一个 JSON 对象里，格式：{"questions":[{"id":"Q1","text":"题干"},…]}。` +
-            '要求：\n' +
-            '1) Q1：开场自我介绍题，约 2～3 分钟，可提示包含教育、工作/项目亮点。\n' +
-            '2) Q2、Q3：必须围绕简历中的具体项目、实习或工作经历追问（技术细节、职责边界、难点与结果）；若上文说明无简历则结合 JD 设计两道「项目/交付」情景深挖题。\n' +
-            '3) Q4、Q5、Q6：与岗位 JD 强相关的纯技术题（可含原理、方案对比、排错、性能、安全等），不要行为面或空泛的「你怎么看」。\n' +
-            'id 必须为 Q1 到 Q6 递增；不要 markdown 代码块，不要其它说明文字。'
+          content: generationSystemPrompt
         },
-        { role: 'user', content: userPrompt }
+        {
+          role: 'user',
+          content:
+            `${userPrompt}\n\n` +
+            `请严格按 system 指令输出恰好 ${total} 道题，` +
+            `必须包含 Q1 到 Q${total}，缺一不可；只输出 {"questions":[...]} JSON 对象本体，不要任何前后缀文字或 markdown。`
+        }
       ],
-      temperature: 0.45
+      temperature: 0.45,
+      max_tokens: 4096
     })
     const raw = data?.choices?.[0]?.message?.content
+    const finishReason = data?.choices?.[0]?.finish_reason || ''
     const text = typeof raw === 'string' ? raw : ''
     if (!text.trim()) {
-      if (flowLogEnabled) {
-        flowLog('interview-questions AI', false, `模型返回空 model=${model} ${JSON.stringify(data).slice(0, 400)}`)
-      }
+      console.log('[interview-six] EMPTY model=%s data=%s', model, JSON.stringify(data).slice(0, 600))
       throwInterviewQuestionsHttp(502, '大模型未返回有效题目，请稍后重试')
     }
     const parsed = parseQuestionsJson(text, total)
@@ -2473,8 +3625,10 @@ async function generatePersonalizedInterviewSix(params: {
         text: q.text
       }))
       if (out.length === total && out.every((q) => q.text)) return out
+      console.log('[interview-six] PARSE_PARTIAL model=%s got=%d need=%d finish=%s rawLen=%d rawTail=%s', model, out.length, total, finishReason, text.length, text.slice(-400))
+    } else {
+      console.log('[interview-six] PARSE_FAIL model=%s finish=%s rawLen=%d rawHead=%s', model, finishReason, text.length, text.slice(0, 1200))
     }
-    if (flowLogEnabled) flowLog('interview-questions AI', false, `JSON 解析失败或题量不足 model=${model}`)
     throwInterviewQuestionsHttp(502, '大模型输出格式异常或未生成完整 6 道题，请稍后重试')
   } catch (e) {
     if ((e as InterviewQuestionsHttpError).httpStatus) throw e
@@ -2482,6 +3636,78 @@ async function generatePersonalizedInterviewSix(params: {
     if (flowLogEnabled) flowLog('interview-questions AI', false, `DashScope 异常 model=${model} ${msg}`)
     throwInterviewQuestionsHttp(502, `大模型出题失败：${msg.slice(0, 200)}`)
   }
+}
+
+type InterviewTestAnswerQuality = 'low' | 'medium' | 'high'
+
+function normalizeInterviewTestAnswerQuality(raw: unknown): InterviewTestAnswerQuality | null {
+  const q = String(raw || '').trim().toLowerCase()
+  return q === 'low' || q === 'medium' || q === 'high' ? q : null
+}
+
+function interviewTestAnswerQualityInstruction(quality: InterviewTestAnswerQuality): string {
+  if (quality === 'low') {
+    return '低分回答：内容较空泛，只有少量正确点，缺少结构、细节、量化结果和技术权衡；像准备不足的候选人现场回答。'
+  }
+  if (quality === 'medium') {
+    return '中等回答：基本答到题目核心，有一定结构和关键点，但深度、案例细节、边界条件和权衡仍不充分。'
+  }
+  return '高分回答：先给结论，再给结构化展开；结合项目或工程实践，包含技术细节、取舍、结果与反思，能体现岗位匹配度。'
+}
+
+async function generateInterviewTestAnswer(params: {
+  title: string
+  department?: string
+  jdText: string
+  resumeText: string
+  candidateName: string
+  questionId: string
+  question: string
+  quality: InterviewTestAnswerQuality
+}) {
+  const { model } = assertDashScopeForInterview()
+  const clipJd = String(params.jdText || '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 6000)
+  const clipResume = String(params.resumeText || '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 10000)
+  const userPayload = {
+    candidateName: params.candidateName || '候选人',
+    title: params.title,
+    department: params.department || '',
+    jdText: clipJd,
+    resumeText: clipResume,
+    questionId: params.questionId,
+    question: params.question,
+    targetQuality: params.quality
+  }
+  const data = await dashScopeChatCompletions({
+    model,
+    messages: [
+      {
+        role: 'system',
+        content:
+          '你是面试测试数据生成器，要扮演候选人回答当前面试题。' +
+          '请只输出候选人会说出的中文回答正文，不要标题、不要 markdown、不要解释。' +
+          '回答要自然口语化，长度控制在 80 到 260 个中文字符之间。' +
+          interviewTestAnswerQualityInstruction(params.quality)
+      },
+      {
+        role: 'user',
+        content: `请为以下面试题生成一段候选人回答：\n${JSON.stringify(userPayload)}`
+      }
+    ],
+    temperature: params.quality === 'high' ? 0.45 : 0.65
+  })
+  const answer = String(data?.choices?.[0]?.message?.content || '')
+    .trim()
+    .replace(/^```(?:text)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+  if (!answer) {
+    throw new Error('大模型未返回有效测试回答')
+  }
+  return answer
 }
 
 async function dbPing() {
@@ -2708,7 +3934,7 @@ app.post('/api/wechat/login', async (req, res) => {
 
   try {
     flowLog('wechat/login code2Session', true, 'request')
-    const { openid, sessionKey, appid } = await exchangeWechatJsCode(code)
+    const { openid, sessionKey, appid } = await resolveLoginCode(code)
     await ensureUserAndWechatAccount({
       appid,
       openid,
@@ -3024,6 +4250,7 @@ function mapAdminDbRoleToUiRole(dbRole: string): 'admin' | 'delivery_manager' | 
   if (rl === 'delivery_manager') return 'delivery_manager'
   if (rl === 'recruiting_manager') return 'recruiting_manager'
   if (rl === 'recruiter') return 'recruiter'
+  if (/AI面试官管理员/i.test(r)) return 'recruiter'
   if (/平台管理员|系统管理|超级管理/i.test(r)) return 'admin'
   if (/交付/i.test(r)) return 'delivery_manager'
   if (/招聘经理|招募经理/i.test(r)) return 'recruiting_manager'
@@ -3090,6 +4317,58 @@ async function loadAllowedMenuKeysForDbRole(roleName: string): Promise<string[] 
   }
 }
 
+async function loadAdminRoleNamesForUser(userId: string, fallbackRoleName: string): Promise<string[]> {
+  const uid = String(userId || '').trim()
+  const fallback = String(fallbackRoleName || '').trim()
+  if (!uid) return fallback ? [fallback] : []
+  try {
+    await mysqlAdminPool.query(`
+      CREATE TABLE IF NOT EXISTS user_roles (
+        user_id VARCHAR(64) NOT NULL,
+        role_id VARCHAR(64) NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, role_id),
+        KEY idx_user_roles_role (role_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `)
+    await mysqlAdminPool.query(
+      `INSERT IGNORE INTO user_roles (user_id, role_id)
+       SELECT u.id, r.id FROM users u JOIN roles r ON r.name = u.role WHERE u.id = ?`,
+      [uid]
+    )
+    const [rows] = await mysqlAdminPool.query<RowDataPacket[]>(
+      `SELECT r.name
+       FROM user_roles ur
+       JOIN roles r ON r.id = ur.role_id
+       WHERE ur.user_id = ?
+       ORDER BY r.id ASC`,
+      [uid]
+    )
+    const names = rows.map((r) => String((r as { name?: unknown }).name || '').trim()).filter(Boolean)
+    return names.length ? names : fallback ? [fallback] : []
+  } catch {
+    return fallback ? [fallback] : []
+  }
+}
+
+async function ensureAdminAiInterviewerManagerRole(): Promise<void> {
+  try {
+    await mysqlAdminPool.query(
+      `INSERT IGNORE INTO roles (id, name, \`desc\`, users, menu_keys)
+       VALUES ('R_AI_INTERVIEWER_MANAGER', ?, '可维护 AI 面试官提示词模板', 0, ?)`,
+      [AI_INTERVIEWER_MANAGER_ROLE_NAME, JSON.stringify(['sys-interview-prompt'])]
+    )
+    await mysqlAdminPool.query(
+      `UPDATE roles
+       SET menu_keys = COALESCE(NULLIF(menu_keys, ''), ?)
+       WHERE id = 'R_AI_INTERVIEWER_MANAGER'`,
+      [JSON.stringify(['sys-interview-prompt'])]
+    )
+  } catch {
+    /* 管理库角色表缺失时不影响业务 API 启动 */
+  }
+}
+
 /** 管理端登录：换会话令牌，浏览器可不再配置 VITE_ADMIN_API_TOKEN */
 app.post('/api/admin/login', async (req, res) => {
   if (!adminSessionPersistenceConfigured()) {
@@ -3141,16 +4420,19 @@ app.post('/api/admin/login', async (req, res) => {
       const uid = String(row.id || '').trim()
       const un = String(row.username || username).trim()
       const displayName = String(row.name || un).trim() || un
-      const uiRole = mapAdminDbRoleToUiRole(String(row.role || ''))
-      const allowedMenuKeys = await loadAllowedMenuKeysForDbRole(String(row.role || ''))
+      const roleNames = await loadAdminRoleNamesForUser(uid, String(row.role || ''))
+      const uiRole = mapAdminDbRoleToUiRole(roleNames[0] || String(row.role || ''))
+      const menuLists = await Promise.all(roleNames.map((rn) => loadAllowedMenuKeysForDbRole(rn)))
+      const allowedMenuKeys = Array.from(new Set(menuLists.flatMap((x) => x || [])))
       const dept = String(row.dept ?? '').trim()
       const userPayload = {
         name: displayName,
         username: un,
         uiRole,
+        roles: roleNames,
         /** 始终下发，便于前端判断「未设置」与旧缓存；空串表示库中无部门 */
         dept,
-        ...(allowedMenuKeys !== undefined ? { allowedMenuKeys } : {})
+        ...(allowedMenuKeys.length ? { allowedMenuKeys } : {})
       }
       const redisTok = await createAdminRedisSession(uid || un, un)
       if (redisTok) {
@@ -3359,22 +4641,28 @@ async function loadAdminSessionActor(token: string): Promise<{
   displayName: string
   uiRole: ReturnType<typeof mapAdminDbRoleToUiRole>
   dept: string
+  roleNames: string[]
+  allowedMenuKeys?: string[]
 } | null> {
   const un = await resolveAdminDbUsernameFromToken(token)
   if (!un) return null
   try {
     const [rows] = await mysqlAdminPool.query<RowDataPacket[]>(
-      'SELECT username, name, role, dept FROM users WHERE username = ? LIMIT 1',
+      'SELECT id, username, name, role, dept FROM users WHERE username = ? LIMIT 1',
       [un]
     )
-    const row = rows[0] as { username?: string | null; name?: string | null; role?: string | null; dept?: string | null } | undefined
+    const row = rows[0] as { id?: string | null; username?: string | null; name?: string | null; role?: string | null; dept?: string | null } | undefined
     const username = String(row?.username || un).trim() || un
     const displayName = String(row?.name || '').trim() || username
-    const uiRole = mapAdminDbRoleToUiRole(String(row?.role || ''))
+    const roleName = String(row?.role || '')
+    const roleNames = await loadAdminRoleNamesForUser(String((row as { id?: unknown })?.id || ''), roleName)
+    const uiRole = mapAdminDbRoleToUiRole(roleNames[0] || roleName)
     const dept = String(row?.dept || '').trim()
-    return { username, displayName, uiRole, dept }
+    const menuLists = await Promise.all(roleNames.map((rn) => loadAllowedMenuKeysForDbRole(rn)))
+    const allowedMenuKeys = Array.from(new Set(menuLists.flatMap((x) => x || [])))
+    return { username, displayName, uiRole, dept, roleNames, ...(allowedMenuKeys.length ? { allowedMenuKeys } : {}) }
   } catch {
-    return { username: un, displayName: un, uiRole: mapAdminDbRoleToUiRole(''), dept: '' }
+    return { username: un, displayName: un, uiRole: mapAdminDbRoleToUiRole(''), dept: '', roleNames: [] }
   }
 }
 
@@ -3925,6 +5213,49 @@ function resumeScreeningsProjectJoinSql(): string {
 }
 
 const RESUME_SCREENING_PROFILE_JOIN = `LEFT JOIN resume_screening_profiles prof ON prof.screening_id = s.id`
+let shenpuResumeTableReady = false
+
+async function ensureShenpuResumeTable(): Promise<void> {
+  if (shenpuResumeTableReady) return
+  await mysqlPool.query(`
+    CREATE TABLE IF NOT EXISTS resume_screening_shenpu_resumes (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      screening_id BIGINT UNSIGNED NOT NULL,
+      status VARCHAR(24) NOT NULL DEFAULT 'generating',
+      file_name VARCHAR(255) NULL,
+      mime_type VARCHAR(128) NULL,
+      file_size_bytes BIGINT UNSIGNED NULL,
+      storage_path VARCHAR(512) NULL,
+      content_json JSON NULL COMMENT '申朴统一标准简历结构化内容',
+      progress_percent TINYINT UNSIGNED NOT NULL DEFAULT 0,
+      progress_stage VARCHAR(64) NULL,
+      error_message VARCHAR(500) NULL,
+      generated_at TIMESTAMP NULL DEFAULT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uk_shenpu_resume_screening (screening_id),
+      KEY idx_shenpu_resume_status (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `)
+  try {
+    await mysqlPool.query(
+      `ALTER TABLE resume_screening_shenpu_resumes
+       ADD COLUMN progress_percent TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER content_json`
+    )
+  } catch (e: unknown) {
+    if ((e as { code?: string })?.code !== 'ER_DUP_FIELDNAME') throw e
+  }
+  try {
+    await mysqlPool.query(
+      `ALTER TABLE resume_screening_shenpu_resumes
+       ADD COLUMN progress_stage VARCHAR(64) NULL AFTER progress_percent`
+    )
+  } catch (e: unknown) {
+    if ((e as { code?: string })?.code !== 'ER_DUP_FIELDNAME') throw e
+  }
+  shenpuResumeTableReady = true
+}
 
 type ResumeScreeningsPageOpts = {
   includeResumePlaintext: boolean
@@ -3968,11 +5299,20 @@ function resumeScreeningsJoinSql(
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username,
               CAST(DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS CHAR(32)) AS created_at,
               EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
+              COALESCE((SELECT sr.status FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), 'missing') AS shenpu_resume_status,
+              COALESCE((SELECT sr.progress_percent FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), 0) AS shenpu_resume_progress,
+              COALESCE((SELECT sr.progress_stage FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), '') AS shenpu_resume_stage,
               ${plainCol},
               lr.overall_score AS interview_overall_score,
               lr.passed AS interview_passed,
               lr.updated_at AS interview_report_updated_at,
               lr.session_id AS interview_report_session_id,
+              CASE
+                WHEN invp.id IS NULL THEN NULL
+                WHEN invp.prompt_template_id IS NULL THEN '${BUILTIN_INTERVIEW_PROMPT_TEMPLATE_NAME}'
+                ELSE COALESCE(NULLIF(TRIM(ipt.name), ''), '${BUILTIN_INTERVIEW_PROMPT_TEMPLATE_NAME}')
+              END AS interview_prompt_template_name,
+              invp.prompt_template_id AS interview_prompt_template_id,
               TRIM(COALESCE(pn.name, '')) AS job_project_name,
               ${sessCols}
        FROM resume_screenings s
@@ -3998,6 +5338,15 @@ function resumeScreeningsJoinSql(
          ORDER BY ir.updated_at DESC, ir.id DESC
          LIMIT 1
        )
+       LEFT JOIN interview_invitations invp ON invp.id = (
+         SELECT inv2.id
+         FROM interview_invitations inv2
+         WHERE inv2.resume_screening_id = s.id
+           AND inv2.job_id = jn.id
+         ORDER BY inv2.accepted_at DESC, inv2.updated_at DESC, inv2.id DESC
+         LIMIT 1
+       )
+       LEFT JOIN ai_interview_prompt_templates ipt ON ipt.id = invp.prompt_template_id
        ${sessJoin}
        WHERE 1=1 ${pageOpts.whereSql}
        ORDER BY s.id DESC
@@ -4068,6 +5417,9 @@ function resumeScreeningsPlainSql(
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username,
               CAST(DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS CHAR(32)) AS created_at,
               EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
+              COALESCE((SELECT sr.status FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), 'missing') AS shenpu_resume_status,
+              COALESCE((SELECT sr.progress_percent FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), 0) AS shenpu_resume_progress,
+              COALESCE((SELECT sr.progress_stage FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), '') AS shenpu_resume_stage,
               ${plainCol},
               TRIM(COALESCE(pn.name, '')) AS job_project_name
        FROM resume_screenings s
@@ -4408,6 +5760,8 @@ app.get('/api/admin/resume-screenings', async (req, res) => {
     return res.json({ data: [], total: 0, page: listQ.page, pageSize: listQ.pageSize })
   }
   try {
+    await ensureInterviewPromptTemplateStorage()
+    await ensureShenpuResumeTable()
     const { rows, total } = await queryResumeScreeningsAdminList(listQ, scopeJobCodes, uploaderScope)
     const data = (rows || []).map((r) => ({
       ...r,
@@ -4707,6 +6061,220 @@ app.get('/api/admin/job-role-bases', async (req, res) => {
   }
 })
 
+app.get('/api/admin/interview-question-prompt', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  try {
+    const cfg = await loadInterviewQuestionPromptConfig()
+    res.json({
+      data: {
+        ...cfg,
+        defaults: {
+          systemPromptTemplate: DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE,
+          userPromptTemplate: DEFAULT_INTERVIEW_QUESTION_USER_PROMPT_TEMPLATE
+        }
+      }
+    })
+  } catch (e) {
+    console.error('[GET /api/admin/interview-question-prompt]', e)
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.patch('/api/admin/interview-question-prompt', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const token = extractAdminRequestToken(req)
+  const actor = await loadAdminSessionActor(token)
+  if (!actor || actor.uiRole !== 'admin') {
+    return res.status(403).json({ message: '仅管理员可维护 AI 面试提示词' })
+  }
+  const systemPromptTemplate = String(req.body?.systemPromptTemplate ?? req.body?.systemPrompt ?? '').trim()
+  const userPromptTemplate = String(req.body?.userPromptTemplate ?? '').trim()
+  const enabledRaw = req.body?.enabled
+  const enabled = enabledRaw === undefined ? 1 : Number(enabledRaw) === 0 ? 0 : 1
+  if (!systemPromptTemplate) {
+    return res.status(400).json({ message: 'systemPromptTemplate 不能为空' })
+  }
+  if (!userPromptTemplate) {
+    return res.status(400).json({ message: 'userPromptTemplate 不能为空' })
+  }
+  if (systemPromptTemplate.length > 20000 || userPromptTemplate.length > 20000) {
+    return res.status(400).json({ message: '提示词模板不能超过 20000 字符' })
+  }
+  try {
+    await ensureInterviewPromptConfigTable()
+    const updatedBy = actor.username || actor.displayName || 'admin'
+    await mysqlPool.query(
+      `INSERT INTO ai_interview_prompt_configs (id, system_prompt, user_prompt_template, enabled, updated_by)
+       VALUES (1, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         system_prompt = VALUES(system_prompt),
+         user_prompt_template = VALUES(user_prompt_template),
+         enabled = VALUES(enabled),
+         updated_by = VALUES(updated_by),
+         updated_at = CURRENT_TIMESTAMP`,
+      [systemPromptTemplate, userPromptTemplate, enabled, updatedBy]
+    )
+    const cfg = await loadInterviewQuestionPromptConfig()
+    res.json({ ok: true, data: cfg })
+  } catch (e) {
+    console.error('[PATCH /api/admin/interview-question-prompt]', e)
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.get('/api/admin/interview-question-prompt-templates', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const token = extractAdminRequestToken(req)
+  const actor = await loadAdminSessionActor(token)
+  const role = actorPromptRole(actor)
+  if (!actorCanUseAiInterviewerMenu(actor)) return res.status(403).json({ message: '当前角色没有 AI 面试官菜单权限' })
+  try {
+    await ensureInterviewPromptTemplateStorage()
+    const [rows] = await mysqlPool.query<RowDataPacket[]>(
+      `SELECT id, name, system_prompt, enabled, is_default, visible_roles, editable_roles, updated_by,
+              DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM ai_interview_prompt_templates
+       ORDER BY is_default DESC, enabled DESC, id ASC`
+    )
+    const data = rows
+      .map(mapPromptTemplateRow)
+      .map((t) => ({
+        ...t,
+        canEdit: true
+      }))
+    res.json({
+      data,
+      role,
+      defaults: {
+        systemPrompt: DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE
+      }
+    })
+  } catch (e) {
+    console.error('[GET /api/admin/interview-question-prompt-templates]', e)
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.post('/api/admin/interview-question-prompt-templates', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const token = extractAdminRequestToken(req)
+  const actor = await loadAdminSessionActor(token)
+  const role = actorPromptRole(actor)
+  if (!actorCanUseAiInterviewerMenu(actor)) return res.status(403).json({ message: '当前角色没有 AI 面试官菜单权限' })
+  const name = String(req.body?.name || '').trim()
+  const systemPrompt = String(req.body?.systemPrompt || '').trim()
+  const enabled = Number(req.body?.enabled ?? 1) === 0 ? 0 : 1
+  const visibleRoles = ALL_INTERVIEW_PROMPT_ROLES
+  const editableRoles = ALL_INTERVIEW_PROMPT_ROLES
+  if (!name || name.length > 128) return res.status(400).json({ message: '模板名称不能为空，且不能超过 128 字符' })
+  if (!systemPrompt || systemPrompt.length > 20000) return res.status(400).json({ message: 'System Prompt 不能为空，且不能超过 20000 字符' })
+  try {
+    await ensureInterviewPromptTemplateStorage()
+    const [hdr] = await mysqlPool.query<ResultSetHeader>(
+      `INSERT INTO ai_interview_prompt_templates
+         (name, system_prompt, enabled, is_default, visible_roles, editable_roles, updated_by)
+       VALUES (?, ?, ?, 0, ?, ?, ?)`,
+      [
+        name,
+        systemPrompt,
+        enabled,
+        JSON.stringify(visibleRoles),
+        JSON.stringify(editableRoles),
+        actor?.username || actor?.displayName || 'admin'
+      ]
+    )
+    res.json({ ok: true, id: jsonSafeMysqlCell(hdr.insertId) })
+  } catch (e: unknown) {
+    const err = e as { code?: string; errno?: number }
+    if (err.code === 'ER_DUP_ENTRY' || err.errno === 1062) return res.status(400).json({ message: '模板名称已存在' })
+    console.error('[POST /api/admin/interview-question-prompt-templates]', e)
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.patch('/api/admin/interview-question-prompt-templates/:id', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const token = extractAdminRequestToken(req)
+  const actor = await loadAdminSessionActor(token)
+  const role = actorPromptRole(actor)
+  if (!actorCanUseAiInterviewerMenu(actor)) return res.status(403).json({ message: '当前角色没有 AI 面试官菜单权限' })
+  const id = Number(String(req.params.id || '').trim())
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ message: 'invalid id' })
+  try {
+    await ensureInterviewPromptTemplateStorage()
+    const current = await loadInterviewPromptTemplateById(Math.floor(id))
+    if (!current || String(current.id) !== String(Math.floor(id))) return res.status(404).json({ message: '模板不存在' })
+    const name = req.body?.name !== undefined ? String(req.body.name || '').trim() : current.name
+    const systemPrompt =
+      req.body?.systemPrompt !== undefined ? String(req.body.systemPrompt || '').trim() : current.systemPrompt
+    const enabled = req.body?.enabled !== undefined ? (Number(req.body.enabled) === 0 ? 0 : 1) : current.enabled ? 1 : 0
+    const visibleRoles = current.visibleRoles?.length ? current.visibleRoles : ALL_INTERVIEW_PROMPT_ROLES
+    const editableRoles = current.editableRoles?.length ? current.editableRoles : ALL_INTERVIEW_PROMPT_ROLES
+    const isDefault = req.body?.isDefault !== undefined ? (Number(req.body.isDefault) === 1 ? 1 : 0) : current.isDefault ? 1 : 0
+    if (!name || name.length > 128) return res.status(400).json({ message: '模板名称不能为空，且不能超过 128 字符' })
+    if (!systemPrompt || systemPrompt.length > 20000) return res.status(400).json({ message: 'System Prompt 不能为空，且不能超过 20000 字符' })
+    if (isDefault === 1) {
+      await mysqlPool.query('UPDATE ai_interview_prompt_templates SET is_default = 0 WHERE id <> ?', [Math.floor(id)])
+    }
+    await mysqlPool.query(
+      `UPDATE ai_interview_prompt_templates
+       SET name=?, system_prompt=?, enabled=?, is_default=?, visible_roles=?, editable_roles=?, updated_by=?, updated_at=CURRENT_TIMESTAMP
+       WHERE id=?`,
+      [
+        name,
+        systemPrompt,
+        enabled,
+        isDefault,
+        JSON.stringify(visibleRoles),
+        JSON.stringify(editableRoles),
+        actor?.username || actor?.displayName || role,
+        Math.floor(id)
+      ]
+    )
+    res.json({ ok: true })
+  } catch (e: unknown) {
+    const err = e as { code?: string; errno?: number }
+    if (err.code === 'ER_DUP_ENTRY' || err.errno === 1062) return res.status(400).json({ message: '模板名称已存在' })
+    console.error('[PATCH /api/admin/interview-question-prompt-templates/:id]', e)
+    res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.delete('/api/admin/interview-question-prompt-templates/:id', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const token = extractAdminRequestToken(req)
+  const actor = await loadAdminSessionActor(token)
+  const role = actorPromptRole(actor)
+  if (!actorCanUseAiInterviewerMenu(actor)) return res.status(403).json({ message: '当前角色没有 AI 面试官菜单权限' })
+  const id = Number(String(req.params.id || '').trim())
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ message: 'invalid id' })
+  let conn: PoolConnection | null = null
+  try {
+    await ensureInterviewPromptTemplateStorage()
+    const current = await loadInterviewPromptTemplateById(Math.floor(id))
+    if (!current || String(current.id) !== String(Math.floor(id))) return res.status(404).json({ message: '模板不存在' })
+    if (current.isDefault) return res.status(400).json({ message: '默认模板不能删除，请先设置其它默认模板' })
+    conn = await mysqlPool.getConnection()
+    await conn.beginTransaction()
+    await conn.query('UPDATE interview_invitations SET prompt_template_id = NULL WHERE prompt_template_id = ?', [Math.floor(id)])
+    const [dh] = await conn.query<ResultSetHeader>('DELETE FROM ai_interview_prompt_templates WHERE id=?', [Math.floor(id)])
+    await conn.commit()
+    res.json({ ok: true, deleted: Number(dh.affectedRows) || 0 })
+  } catch (e) {
+    if (conn) {
+      try {
+        await conn.rollback()
+      } catch {
+        /* ignore */
+      }
+    }
+    console.error('[DELETE /api/admin/interview-question-prompt-templates/:id]', e)
+    res.status(500).json({ message: '删除失败，请稍后重试' })
+  } finally {
+    if (conn) conn.release()
+  }
+})
+
 app.post('/api/admin/job-role-bases', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const token = extractAdminRequestToken(req)
@@ -4982,8 +6550,25 @@ app.post('/api/admin/resume-screenings/delete', async (req, res) => {
       `SELECT storage_path FROM resume_screening_files WHERE screening_id IN (${ph})`,
       uniqueDelete
     )
+    let shenpuRows: RowDataPacket[] = []
+    try {
+      const [rows] = await conn.query<RowDataPacket[]>(
+        `SELECT storage_path FROM resume_screening_shenpu_resumes WHERE screening_id IN (${ph})`,
+        uniqueDelete
+      )
+      shenpuRows = rows
+    } catch (e: unknown) {
+      if ((e as { code?: string })?.code !== 'ER_NO_SUCH_TABLE') throw e
+    }
     const deleteCountByPath = new Map<string, number>()
     for (const row of fileRows || []) {
+      const sp = String((row as { storage_path?: unknown }).storage_path ?? '')
+        .trim()
+        .replace(/\0/g, '')
+      if (!sp) continue
+      deleteCountByPath.set(sp, (deleteCountByPath.get(sp) || 0) + 1)
+    }
+    for (const row of shenpuRows || []) {
       const sp = String((row as { storage_path?: unknown }).storage_path ?? '')
         .trim()
         .replace(/\0/g, '')
@@ -5006,6 +6591,13 @@ app.post('/api/admin/resume-screenings/delete', async (req, res) => {
         }
       }
     }
+    for (const row of shenpuRows || []) {
+      const abs = resolveResumeStorageAbsPath((row as { storage_path?: unknown }).storage_path)
+      if (abs && !absSeen.has(abs)) {
+        absSeen.add(abs)
+        absToUnlink.push(abs)
+      }
+    }
     try {
       await conn.query(`DELETE FROM resume_screening_profiles WHERE screening_id IN (${ph})`, uniqueDelete)
     } catch (e: unknown) {
@@ -5013,6 +6605,11 @@ app.post('/api/admin/resume-screenings/delete', async (req, res) => {
     }
     try {
       await conn.query(`DELETE FROM resume_screening_files WHERE screening_id IN (${ph})`, uniqueDelete)
+    } catch (e: unknown) {
+      if ((e as { code?: string })?.code !== 'ER_NO_SUCH_TABLE') throw e
+    }
+    try {
+      await conn.query(`DELETE FROM resume_screening_shenpu_resumes WHERE screening_id IN (${ph})`, uniqueDelete)
     } catch (e: unknown) {
       if ((e as { code?: string })?.code !== 'ER_NO_SUCH_TABLE') throw e
     }
@@ -5056,6 +6653,7 @@ app.get('/api/admin/resume-screenings/:id/profile', async (req, res) => {
   const idNum = Number(String(req.params.id || '').trim())
   if (!Number.isFinite(idNum) || idNum <= 0) return res.status(400).json({ message: 'ID 无效或格式不正确' })
   try {
+    await ensureShenpuResumeTable()
     const [rows] = await mysqlPool.query<any[]>(
       `SELECT screening_id, candidate_name, gender, age, work_experience_years, job_title, school, candidate_phone,
               email, current_address, current_company, major, education, current_position, graduation_date, arrival_time, id_number,
@@ -5240,6 +6838,39 @@ app.get('/api/admin/resume-screenings/:id/file', async (req, res) => {
       return res.status(503).json({ message: '缺少简历文件表，请执行 server/migration_resume_screening_files.sql' })
     }
     return res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
+  }
+})
+
+app.get('/api/admin/resume-screenings/:id/shenpu-resume', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const idNum = Number(String(req.params.id || '').trim())
+  if (!Number.isFinite(idNum) || idNum <= 0) return res.status(400).json({ message: 'invalid id' })
+  try {
+    const [rows] = await mysqlPool.query<any[]>(
+      `SELECT status, file_name, mime_type, storage_path, error_message
+       FROM resume_screening_shenpu_resumes
+       WHERE screening_id=? LIMIT 1`,
+      [Math.floor(idNum)]
+    )
+    if (!rows.length) return res.status(404).json({ message: '申朴简历尚未生成' })
+    const r = rows[0] as Record<string, unknown>
+    const status = String(r.status || '')
+    if (status === 'generating') return res.status(409).json({ message: '申朴简历生成中' })
+    if (status !== 'ready') {
+      return res.status(409).json({ message: String(r.error_message || '申朴简历生成失败') })
+    }
+    const abs = resolveResumeStorageAbsPath(r.storage_path)
+    if (!abs) return res.status(404).json({ message: '申朴简历文件不存在或已被移除' })
+    const name = normalizeMultipartFilename(String(r.file_name || '申朴简历.pdf')).slice(0, 255) || '申朴简历.pdf'
+    res.setHeader('Content-Type', String(r.mime_type || 'application/pdf'))
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`)
+    return res.sendFile(abs)
+  } catch (e: unknown) {
+    const ex = e as { code?: string }
+    if (ex.code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({ message: '缺少申朴简历表，请执行 server/migration_resume_screening_shenpu_resumes.sql' })
+    }
+    return res.status(500).json({ message: 'db error' })
   }
 })
 
@@ -5552,37 +7183,40 @@ app.get('/api/admin/interview-report', async (req, res) => {
   }
 })
 
-app.post(
-  '/api/admin/resume-screen',
-  uploadResumeMemory.single('file'),
-  async (req, res) => {
-    if (!(await assertAdminToken(req, res))) return
-    const jobCode = String(req.body?.jobCode || '').trim().toUpperCase()
-    if (!jobCode) return res.status(400).json({ message: '请填写岗位编码（jobCode）' })
-    if (!req.file?.buffer?.length) return res.status(400).json({ message: '请上传文件' })
-    try {
-      const uploadFileName = normalizeMultipartFilename(req.file.originalname).slice(0, 255)
-      const actorToken = extractAdminRequestToken(req)
-      const [uploaderUsername, jobQuery] = await Promise.all([
-        resolveAdminDbUsernameFromToken(actorToken).then((u) => String(u || '').trim()),
-        mysqlPool.query<any[]>('SELECT title, department, jd_text FROM jobs WHERE job_code=? LIMIT 1', [
-          jobCode
-        ])
-      ])
+async function processResumeScreenTask(params: {
+  taskId: string
+  jobCode: string
+  file: UploadedResumeMemoryFile
+  actorToken: string
+}): Promise<void> {
+  const { taskId, jobCode, file, actorToken } = params
+  try {
+    patchResumeScreenTask(taskId, {
+      status: 'running',
+      uploadProgress: 8,
+      uploadStage: '校验岗位与上传人'
+    })
+    const uploadFileName = normalizeMultipartFilename(file.originalname).slice(0, 255)
+    const uploaderUsername = String((await resolveAdminDbUsernameFromToken(actorToken)) || '').trim()
       if (!uploaderUsername) {
-        return res.status(403).json({ message: '当前登录方式缺少账号标识，无法上传简历用于后续手机号权限校验' })
+        throw new ResumeScreenTaskError('当前登录方式缺少账号标识，无法上传简历用于后续手机号权限校验', 403)
       }
-      const jobRows = jobQuery[0]
-      if (!jobRows.length) return res.status(404).json({ message: '未找到对应岗位' })
+      const [jobRows] = await mysqlPool.query<any[]>(
+        'SELECT title, department, jd_text FROM jobs WHERE job_code=? LIMIT 1',
+        [jobCode]
+      )
+      if (!jobRows.length) throw new ResumeScreenTaskError('job not found', 404)
       const job = jobRows[0] as { title: string; department: string | null; jd_text: string | null }
       let plain: string
       try {
-        plain = await extractResumePlainText(req.file.buffer, uploadFileName, req.file.mimetype || '')
+        patchResumeScreenTask(taskId, { uploadProgress: 18, uploadStage: '提取原始简历文本' })
+        plain = await extractResumePlainText(file.buffer, uploadFileName, file.mimetype || '')
       } catch (ex) {
-        flowLog('resume-screen 解析文件', false, ex instanceof Error ? ex.message : 'parse failed')
-        return res.status(415).json({ message: '无法解析该简历文件格式，请尝试 PDF 或 Word 后重试。' })
+        const msg = ex instanceof Error ? ex.message : 'parse failed'
+        throw new ResumeScreenTaskError(msg, 415)
       }
-      if (!plain.trim()) return res.status(422).json({ message: '未能从文件中提取可读文本' })
+      if (!plain.trim()) throw new ResumeScreenTaskError('未能从文件中提取可读文本', 422)
+      patchResumeScreenTask(taskId, { uploadProgress: 30, uploadStage: '完成文本提取，开始去重' })
 
       const plainStore = plain.slice(0, RESUME_PLAINTEXT_MAX_SAVE)
       const resumePlainHash = crypto
@@ -5600,13 +7234,14 @@ app.post(
           [jobCode, resumePlainHash]
         )
         if (Array.isArray(dupByContent) && dupByContent.length) {
-          return res.status(409).json({
-            message: '该岗位下已存在正文完全相同的简历筛查记录，请勿重复上传。',
+          throw new ResumeScreenTaskError('该岗位下已存在正文完全相同的简历筛查记录，请勿重复上传。', 409, {
             existingId: Number((dupByContent[0] as { id?: unknown }).id)
           })
         }
       } catch (dupErr) {
-        console.warn('[resume-screen] duplicate body check skipped:', dupErr)
+        if (dupErr instanceof ResumeScreenTaskError) throw dupErr
+        console.error('[resume-screen] duplicate body check failed:', dupErr)
+        throw new ResumeScreenTaskError('简历去重校验失败，请稍后重试', 500)
       }
 
       const nameGuessFromFilename = guessCandidateNameFromFilename(uploadFileName)
@@ -5617,6 +7252,7 @@ app.post(
       let result: ResumeScreeningAiResult
       let preResolveCandidateId: number | null = null
       try {
+        patchResumeScreenTask(taskId, { uploadProgress: 45, uploadStage: 'AI 解析与简历打分' })
         const aiPromise = runResumeScreeningWithAi({
           resumeText: plain,
           jobTitle: String(job.title || ''),
@@ -5661,13 +7297,14 @@ app.post(
             [jobCode, preResolveCandidateId]
           )
           if (Array.isArray(dupByCandidate) && dupByCandidate.length) {
-            return res.status(409).json({
-              message: '该手机号对应候选人已在该岗位下存在投递记录，请勿重复上传。',
+            throw new ResumeScreenTaskError('该手机号对应候选人已在该岗位下存在投递记录，请勿重复上传。', 409, {
               existingId: Number((dupByCandidate[0] as { id?: unknown }).id)
             })
           }
         } catch (dupCandErr) {
-          console.warn('[resume-screen] duplicate job+candidate check skipped:', dupCandErr)
+          if (dupCandErr instanceof ResumeScreenTaskError) throw dupCandErr
+          console.error('[resume-screen] duplicate job+candidate check failed:', dupCandErr)
+          throw new ResumeScreenTaskError('候选人去重校验失败，请稍后重试', 500)
         }
       }
 
@@ -5854,21 +7491,25 @@ app.post(
           const ie = insErr as { errno?: number; code?: string }
           if (ie.errno === 1054 || ie.code === 'ER_BAD_FIELD_ERROR') continue
           if (ie.errno === 1062 || ie.code === 'ER_DUP_ENTRY') {
-            return res.status(409).json({
-              message: '该手机号对应候选人已在该岗位下存在投递记录，请勿重复上传。'
-            })
+            throw new ResumeScreenTaskError('该手机号对应候选人已在该岗位下存在投递记录，请勿重复上传。', 409)
           }
           throw insErr
         }
       }
       if (!ins) throw insertLastErr
       const screeningId = Number(ins.insertId)
+      patchResumeScreenTask(taskId, {
+        uploadProgress: 72,
+        uploadStage: '写入筛查记录',
+        screeningId,
+        candidateName
+      })
       const screeningCandidateId = await linkResumeScreeningToCandidateByPhone(
         screeningId,
         candidatePhone,
         candidateName
       )
-      const fileShaHex = crypto.createHash('sha256').update(req.file.buffer).digest('hex').toLowerCase()
+      const fileShaHex = crypto.createHash('sha256').update(file.buffer).digest('hex').toLowerCase()
       const saveScreeningFileTask = (async () => {
         try {
         let saved: { storageKey: string; originalName: string; mimeType: string; sizeBytes: number }
@@ -5885,15 +7526,15 @@ app.post(
             if (lastHash === fileShaHex && lastKey) {
               saved = {
                 storageKey: lastKey,
-                originalName: normalizeMultipartFilename(req.file.originalname || 'resume').slice(0, 255) || 'resume',
-                mimeType: String(req.file.mimetype || 'application/octet-stream').trim() || 'application/octet-stream',
-                sizeBytes: Number(req.file.buffer?.length || 0)
+                originalName: normalizeMultipartFilename(file.originalname || 'resume').slice(0, 255) || 'resume',
+                mimeType: String(file.mimetype || 'application/octet-stream').trim() || 'application/octet-stream',
+                sizeBytes: Number(file.buffer?.length || 0)
               }
             } else {
               const wr = saveResumeOriginalFile({
-                buffer: req.file.buffer,
+                buffer: file.buffer,
                 originalname: uploadFileName,
-                mimetype: req.file.mimetype || ''
+                mimetype: file.mimetype || ''
               })
               await mysqlPool.query(
                 'UPDATE resume_candidates SET last_file_sha256 = ?, last_storage_key = ? WHERE id = ?',
@@ -5909,9 +7550,9 @@ app.post(
           } catch (dedupErr) {
             console.warn('[resume-screen] candidate file dedup skipped:', dedupErr)
             const wr = saveResumeOriginalFile({
-              buffer: req.file.buffer,
+              buffer: file.buffer,
               originalname: uploadFileName,
-              mimetype: req.file.mimetype || ''
+              mimetype: file.mimetype || ''
             })
             saved = {
               storageKey: wr.storageKey,
@@ -5930,9 +7571,9 @@ app.post(
           }
         } else {
           const wr = saveResumeOriginalFile({
-            buffer: req.file.buffer,
+            buffer: file.buffer,
             originalname: uploadFileName,
-            mimetype: req.file.mimetype || ''
+            mimetype: file.mimetype || ''
           })
           saved = {
             storageKey: wr.storageKey,
@@ -6026,38 +7667,125 @@ app.post(
             profile.resumeUploaded
           ]
         )
-        } catch (profileErr) {
-          console.warn('[resume-screen] save structured profile skipped:', profileErr)
-        }
+      } catch (profileErr) {
+        console.warn('[resume-screen] save structured profile skipped:', profileErr)
+      }
       })()
       await Promise.all([saveScreeningFileTask, saveScreeningProfileTask])
+      patchResumeScreenTask(taskId, {
+        uploadProgress: 92,
+        uploadStage: '原始简历提取完成，开始生成申朴标准简历',
+        shenpuStatus: 'generating',
+        shenpuProgress: 10,
+        shenpuStage: '准备画像数据'
+      })
+      void generateShenpuResumeForScreening({
+        screeningId,
+        candidateName,
+        candidatePhone,
+        jobTitle: String(job.title || ''),
+        department: job.department,
+        jdText: String(job.jd_text || ''),
+        resumeText: plainStore,
+        result
+      })
       flowLog('resume-screen', true, `job=${jobCode} score=${result.matchScore}`)
-      res.json({
-        data: {
-          id: screeningId,
-          candidateId: screeningCandidateId,
-          jobCode,
-          candidateName,
-          candidatePhone: candidatePhone ?? '',
-          matchedJobTitle: String(job.title || ''),
-          matchScore: result.matchScore,
-          skillScore: result.skillScore,
-          experienceScore: result.experienceScore,
-          educationScore: result.educationScore,
-          stabilityScore: result.stabilityScore,
-          status: result.status,
-          summary: result.summary,
-          screeningIncomplete: result.screeningIncomplete === true
-        }
+      patchResumeScreenTask(taskId, {
+        status: 'done',
+        uploadProgress: 100,
+        uploadStage: '原始简历提取与筛查已完成',
+        screeningId,
+        candidateName,
+        message: '原始简历提取完成，申朴标准简历正在后台生成'
       })
     } catch (e: unknown) {
       const code = (e as { code?: string })?.code
-      if (code === 'ER_NO_SUCH_TABLE') {
-        return res.status(503).json({ message: 'resume_screenings 表未创建，请执行 server/migration_resume_screenings.sql' })
-      }
+      const message =
+        e instanceof ResumeScreenTaskError
+          ? e.message
+          : code === 'ER_NO_SUCH_TABLE'
+            ? 'resume_screenings 表未创建，请执行 server/migration_resume_screenings.sql'
+            : 'screening failed'
       flowLog('resume-screen', false, e instanceof Error ? e.message : 'failed')
-      res.status(500).json({ message: 'AI 筛查失败，请稍后重试' })
+      patchResumeScreenTask(taskId, {
+        status: 'failed',
+        uploadStage: '原始简历提取失败',
+        error: message,
+        message,
+        ...(e instanceof ResumeScreenTaskError && e.extra ? e.extra : {})
+      })
     }
+}
+
+app.get('/api/admin/resume-screen/tasks/:taskId', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  pruneResumeScreenTasks()
+  const taskId = String(req.params.taskId || '').trim()
+  const task = taskId ? resumeScreenTasks.get(taskId) : null
+  if (!task) return res.status(404).json({ message: '任务不存在或已过期' })
+  if (task.screeningId && task.shenpuStatus === 'generating') {
+    try {
+      await ensureShenpuResumeTable()
+      const [rows] = await mysqlPool.query<RowDataPacket[]>(
+        `SELECT status, progress_percent, progress_stage, error_message
+         FROM resume_screening_shenpu_resumes WHERE screening_id = ? LIMIT 1`,
+        [task.screeningId]
+      )
+      const row = rows?.[0] as
+        | { status?: unknown; progress_percent?: unknown; progress_stage?: unknown; error_message?: unknown }
+        | undefined
+      if (row) {
+        patchResumeScreenTask(taskId, {
+          shenpuStatus:
+            row.status === 'ready' || row.status === 'failed' || row.status === 'generating'
+              ? row.status
+              : 'missing',
+          shenpuProgress: Math.max(0, Math.min(100, Math.round(Number(row.progress_percent) || 0))),
+          shenpuStage: String(row.progress_stage || '').trim() || '',
+          ...(row.status === 'failed' ? { message: String(row.error_message || '申朴标准简历生成失败') } : {})
+        })
+      }
+    } catch {
+      /* 列表轮询仍会兜底展示申朴简历进度 */
+    }
+  }
+  res.json({ data: snapshotResumeScreenTask(resumeScreenTasks.get(taskId) || task) })
+})
+
+app.post(
+  '/api/admin/resume-screen',
+  uploadResumeMemory.single('file'),
+  async (req, res) => {
+    if (!(await assertAdminToken(req, res))) return
+    const jobCode = String(req.body?.jobCode || '').trim().toUpperCase()
+    if (!jobCode) return res.status(400).json({ message: 'jobCode required' })
+    if (!req.file?.buffer?.length) return res.status(400).json({ message: 'file required' })
+    pruneResumeScreenTasks()
+    const taskId = crypto.randomUUID()
+    const now = Date.now()
+    const task: ResumeScreenTask = {
+      taskId,
+      status: 'queued',
+      jobCode,
+      fileName: normalizeMultipartFilename(req.file.originalname || 'resume').slice(0, 255) || 'resume',
+      uploadProgress: 3,
+      uploadStage: '已接收文件，等待后台解析',
+      shenpuProgress: 0,
+      shenpuStage: '等待原始简历提取完成',
+      shenpuStatus: 'missing',
+      createdAt: now,
+      updatedAt: now
+    }
+    resumeScreenTasks.set(taskId, task)
+    const file: UploadedResumeMemoryFile = {
+      buffer: Buffer.from(req.file.buffer),
+      originalname: req.file.originalname || 'resume',
+      mimetype: req.file.mimetype || '',
+      size: Number(req.file.size || req.file.buffer.length || 0)
+    }
+    const actorToken = extractAdminRequestToken(req)
+    void processResumeScreenTask({ taskId, jobCode, file, actorToken })
+    res.status(202).json({ data: snapshotResumeScreenTask(task) })
   }
 )
 
@@ -6133,7 +7861,20 @@ app.post('/api/admin/invitations', async (req, res) => {
   const screeningIdRaw = Number(req.body?.screeningId)
   const screeningIdForPipeline = Number.isFinite(screeningIdRaw) && screeningIdRaw > 0 ? screeningIdRaw : 0
   const followUpConfigRaw = req.body?.followUpConfig
+  const promptTemplateIdRaw = Number(req.body?.promptTemplateId)
+  const promptTemplateId =
+    Number.isFinite(promptTemplateIdRaw) && promptTemplateIdRaw > 0 ? Math.floor(promptTemplateIdRaw) : null
   try {
+    await ensureInterviewPromptTemplateStorage()
+    if (promptTemplateId) {
+      const token = extractAdminRequestToken(req)
+      const actor = await loadAdminSessionActor(token)
+      const role = actorPromptRole(actor)
+      const tpl = await loadInterviewPromptTemplateById(promptTemplateId)
+      if (!tpl || String(tpl.id) !== String(promptTemplateId) || !tpl.enabled || !canViewPromptTemplate(role, tpl)) {
+        return res.status(400).json({ message: '请选择当前角色可用的面试提示词模板' })
+      }
+    }
     const [jobs] = await mysqlPool.query<any[]>('SELECT id FROM jobs WHERE job_code=? LIMIT 1', [jobCode])
     if (!jobs.length) return res.status(404).json({ message: '未找到对应岗位' })
     const jobId = mysqlRowIdForParam(jobs[0].id)
@@ -6165,9 +7906,9 @@ app.post('/api/admin/invitations', async (req, res) => {
       const screeningDbVal = screeningIdForPipeline > 0 ? screeningIdForPipeline : null
       const tryInsert = async (interviewer: string | number | null) => {
         const [hdr] = await mysqlPool.query<ResultSetHeader>(
-          `INSERT INTO interview_invitations (invite_code, job_id, interviewer_user_id, resume_screening_id, status, expires_at)
-           VALUES (?, ?, ?, ?, 'pending', DATE_ADD(NOW(), INTERVAL ? DAY))`,
-          [inviteCode, jobId, interviewer, screeningDbVal, days]
+          `INSERT INTO interview_invitations (invite_code, job_id, interviewer_user_id, resume_screening_id, prompt_template_id, status, expires_at)
+           VALUES (?, ?, ?, ?, ?, 'pending', DATE_ADD(NOW(), INTERVAL ? DAY))`,
+          [inviteCode, jobId, interviewer, screeningDbVal, promptTemplateId, days]
         )
         await saveFollowUpConfigForInvitation(hdr.insertId, followUpConfigRaw)
       }
@@ -6179,6 +7920,7 @@ app.post('/api/admin/invitations', async (req, res) => {
             inviteCode,
             jobCode,
             recruiterCode: recruiterCode || '',
+            promptTemplateId,
             expiresInDays: days
           }
         })
@@ -6197,6 +7939,7 @@ app.post('/api/admin/invitations', async (req, res) => {
                 inviteCode,
                 jobCode,
                 recruiterCode: recruiterCode || '',
+                promptTemplateId,
                 expiresInDays: days
               }
             })
@@ -6477,7 +8220,7 @@ app.post('/api/candidate/login-invite', async (req, res) => {
   }
   try {
     flowLog('login-invite 开始', true, `invite=${inviteCodeRaw} name=${name}`)
-    const { openid, sessionKey, appid } = await exchangeWechatJsCode(code)
+    const { openid, sessionKey, appid } = await resolveLoginCode(code)
     flowLog('login-invite code2Session', true, maskOpenidLite(openid))
     await ensureUserAndWechatAccount({ appid, openid, sessionKey })
     if (phone) {
@@ -6610,6 +8353,8 @@ async function loadInterviewQuestionContext(params: {
   jobId: string
   candidateName: string
   resumeScreeningIdRaw: string
+  inviteCodeRaw?: string
+  sessionIdRaw?: string
 }): Promise<{
   title: string
   department: string
@@ -6617,6 +8362,7 @@ async function loadInterviewQuestionContext(params: {
   resumeText: string
   effectiveCandidateName: string
   resumeBoundByScreeningId: boolean
+  promptTemplateId: number | null
 }> {
   const jobId = params.jobId
   const candidateName = params.candidateName
@@ -6650,13 +8396,20 @@ async function loadInterviewQuestionContext(params: {
   if (!resumeText && candidateName) {
     resumeText = await fetchResumeTextForCandidate(jobId, candidateName)
   }
+  const promptTemplateId = await resolveInterviewPromptTemplateIdForQuestion({
+    jobCode: jobId,
+    resumeScreeningIdRaw,
+    inviteCodeRaw: params.inviteCodeRaw,
+    sessionIdRaw: params.sessionIdRaw
+  })
   return {
     title,
     department,
     jdText,
     resumeText,
     effectiveCandidateName: effectiveCandidateName || '候选人',
-    resumeBoundByScreeningId
+    resumeBoundByScreeningId,
+    promptTemplateId
   }
 }
 
@@ -6664,6 +8417,8 @@ app.get('/api/candidate/interview-questions', async (req, res) => {
   const jobId = String(req.query.jobId || '').trim().toUpperCase()
   const candidateName = String(req.query.candidateName || req.query.name || '').trim()
   const resumeScreeningIdRaw = String(req.query.resumeScreeningId || req.query.screeningId || '').trim()
+  const inviteCodeRaw = String(req.query.inviteCode || '').trim()
+  const sessionIdRaw = String(req.query.sessionId || '').trim()
   const phase = String(req.query.phase || '').trim().toLowerCase()
   if (!jobId) return res.status(400).json({ message: '请提供岗位 ID（jobId）' })
   try {
@@ -6675,14 +8430,20 @@ app.get('/api/candidate/interview-questions', async (req, res) => {
     const ctx = await loadInterviewQuestionContext({
       jobId,
       candidateName,
-      resumeScreeningIdRaw
+      resumeScreeningIdRaw,
+      inviteCodeRaw,
+      sessionIdRaw
     })
     const genParams = {
       title: ctx.title,
       department: ctx.department,
       jdText: ctx.jdText,
       resumeText: ctx.resumeText,
-      candidateName: ctx.effectiveCandidateName || '候选人'
+      candidateName: ctx.effectiveCandidateName || '候选人',
+      promptTemplateId: ctx.promptTemplateId
+    }
+    if (flowLogEnabled) {
+      flowLog('interview-questions 模板', true, `promptTemplateId=${ctx.promptTemplateId ?? 'default'} session=${sessionIdRaw || '—'} invite=${inviteCodeRaw || '—'}`)
     }
 
     if (phase === 'first') {
@@ -6731,11 +8492,53 @@ app.get('/api/candidate/interview-followup-config', async (req, res) => {
   }
 })
 
+app.post('/api/candidate/interview-test-answer', async (req, res) => {
+  if (process.env.ENABLE_INTERVIEW_TEST_HELPER !== '1') {
+    return res.status(404).json({ message: 'interview test helper disabled' })
+  }
+
+  const jobId = String(req.body?.jobId || '').trim().toUpperCase()
+  const candidateName = String(req.body?.candidateName || '').trim()
+  const resumeScreeningIdRaw = String(req.body?.resumeScreeningId || req.body?.screeningId || '').trim()
+  const questionId = String(req.body?.questionId || '').trim()
+  const question = String(req.body?.question || '').trim()
+  const quality = normalizeInterviewTestAnswerQuality(req.body?.quality)
+  if (!jobId) return res.status(400).json({ message: 'jobId required' })
+  if (!question) return res.status(400).json({ message: 'question required' })
+  if (!quality) return res.status(400).json({ message: 'quality must be low, medium, or high' })
+
+  try {
+    const ctx = await loadInterviewQuestionContext({
+      jobId,
+      candidateName,
+      resumeScreeningIdRaw
+    })
+    const answer = await generateInterviewTestAnswer({
+      title: ctx.title,
+      department: ctx.department,
+      jdText: ctx.jdText,
+      resumeText: ctx.resumeText,
+      candidateName: ctx.effectiveCandidateName,
+      questionId,
+      question,
+      quality
+    })
+    flowLog('interview-test-answer', true, `jobId=${jobId} q=${questionId || '—'} quality=${quality}`)
+    return res.json({ data: { answer } })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    flowLog('interview-test-answer', false, msg)
+    return res.status(502).json({ message: `生成测试回答失败：${msg.slice(0, 200)}` })
+  }
+})
+
 /** 首题已展示后拉取 Q2～Q6（POST 避免首题题干过长超出 GET URL 限制） */
 app.post('/api/candidate/interview-questions-rest', async (req, res) => {
   const jobId = String(req.body?.jobId || '').trim().toUpperCase()
   const candidateName = String(req.body?.candidateName || req.body?.name || '').trim()
   const resumeScreeningIdRaw = String(req.body?.resumeScreeningId || req.body?.screeningId || '').trim()
+  const inviteCodeRaw = String(req.body?.inviteCode || '').trim()
+  const sessionIdRaw = String(req.body?.sessionId || '').trim()
   const firstQuestionText = String(req.body?.firstQuestionText || '').trim()
   if (!jobId) return res.status(400).json({ message: '请提供岗位 ID（jobId）' })
   if (!firstQuestionText) return res.status(400).json({ message: '请填写首题题干（firstQuestionText）' })
@@ -6748,15 +8551,21 @@ app.post('/api/candidate/interview-questions-rest', async (req, res) => {
     const ctx = await loadInterviewQuestionContext({
       jobId,
       candidateName,
-      resumeScreeningIdRaw
+      resumeScreeningIdRaw,
+      inviteCodeRaw,
+      sessionIdRaw
     })
+    if (flowLogEnabled) {
+      flowLog('interview-questions-rest 模板', true, `promptTemplateId=${ctx.promptTemplateId ?? 'default'} session=${sessionIdRaw || '—'} invite=${inviteCodeRaw || '—'}`)
+    }
     const rest = await generatePersonalizedInterviewRest({
       title: ctx.title,
       department: ctx.department,
       jdText: ctx.jdText,
       resumeText: ctx.resumeText,
       candidateName: ctx.effectiveCandidateName || '候选人',
-      firstQuestionText
+      firstQuestionText,
+      promptTemplateId: ctx.promptTemplateId
     })
     flowLog(
       'interview-questions-rest 成功',
@@ -7317,7 +9126,9 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
   const sessionId = String(req.body?.sessionId || '').trim()
   const answers = Array.isArray(req.body?.answers) ? (req.body.answers as Array<{ questionId?: string; question?: string; answer?: string }>) : []
 
-  const fallback = fallbackInterviewScore(profile, answers)
+  const promptTemplate = await loadInterviewPromptTemplateForSession(sessionId)
+  const builtinTemplate = isBuiltinInterviewPromptTemplate(promptTemplate)
+  const fallback = fallbackInterviewScoreForTemplate(profile, answers, promptTemplate)
   const reportSessionId = ensureInterviewReportSessionId(jobId, sessionId)
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
   if (!apiKey) {
@@ -7407,10 +9218,15 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
         mergedQa.length > 0 ? Number((mergedQa.filter((x) => x.answer.trim().length < 12).length / mergedQa.length).toFixed(3)) : 1
     }
 
-    const promptPayload = {
-      candidateProfile: {
-        name: String(profile.name || ''),
-        openid: String(profile.openid || ''),
+	    const promptPayload = {
+	      aiInterviewer: {
+	        name: promptTemplate?.name || BUILTIN_INTERVIEW_PROMPT_TEMPLATE_NAME,
+	        systemPrompt: promptTemplate?.systemPrompt || DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE,
+	        builtin: builtinTemplate
+	      },
+	      candidateProfile: {
+	        name: String(profile.name || ''),
+	        openid: String(profile.openid || ''),
         phone: String(profile.phone || '')
       },
       jobId,
@@ -7421,14 +9237,32 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
     }
 
     const model = process.env.QWEN_QUESTION_MODEL || 'qwen3.5-plus'
-    const data = await dashScopeChatCompletions({
-      model,
-      messages: [
-        {
-          role: 'system',
-          content:
-            '你是结构化面试评估助手。请从多个方面给出可执行评价：沟通表达(communication)、技术深度(technicalDepth)、逻辑结构(logic)、岗位匹配(jobFit)、稳定性与抗压(stability)，每项 0-100。你必须只输出一个 JSON 对象，不得输出 markdown 或解释。JSON Schema: {"score":0-100数字,"passed":布尔,"overallFeedback":"字符串","dimensionScores":{"communication":0-100,"technicalDepth":0-100,"logic":0-100,"jobFit":0-100,"stability":0-100},"suggestions":["字符串"],"riskPoints":["字符串"]}。'
-        },
+	    const data = await dashScopeChatCompletions({
+	      model,
+	      messages: [
+		        {
+		          role: 'system',
+		          content: builtinTemplate
+		            ? [
+		                '你是结构化面试评估助手。评分必须基于本场 AI 面试官实际提出的 questionsAndAnswers：逐题判断 answer 是否正面回答了对应 question，再综合评分。',
+		                '本场使用内置“申朴面试官AI”，可结合岗位 JD 和简历背景评价技术深度与岗位匹配，但不能脱离实际题目与回答凭空给分。',
+		                '请从多个方面给出可执行评价：沟通表达(communication)、技术深度(technicalDepth)、逻辑结构(logic)、岗位匹配(jobFit)、稳定性与抗压(stability)，每项 0-100。',
+		                '你必须只输出一个 JSON 对象，不得输出 markdown 或解释。JSON Schema: {"score":0-100数字,"passed":布尔,"overallFeedback":"字符串","dimensionScores":{"communication":0-100,"technicalDepth":0-100,"logic":0-100,"jobFit":0-100,"stability":0-100},"suggestions":["字符串"],"riskPoints":["字符串"]}。'
+		              ].join('\n')
+		            : [
+		                '你是结构化面试评估助手。评分必须基于本场 AI 面试官实际提出的 questionsAndAnswers：逐题判断 answer 是否正面回答了对应 question，再综合评分。',
+		                '请严格按照本场 AI 面试官模板理解这些题目的考察意图，不要按岗位 JD 或候选人主动转移的话题评价。',
+		                '【AI 面试官模板，最高优先级】',
+		                promptTemplate?.systemPrompt || '',
+		                '【评分要求】',
+		                '1) 先看每一道 question 的要求，再看对应 answer 是否回答了这道题。',
+		                '2) AI 面试官模板定义的身份、领域、能力要求用于解释题目意图，是评分主标准。',
+		                '3) 如果候选人的回答主动偏离题目与模板领域，转而展示其它岗位能力，即使表达清晰，也不能因此给高分或通过。',
+		                '4) passed 只有在候选人对本场题目和模板领域表现达到可录用/可进入下一轮时才为 true。',
+		                '5) 维度评分使用：communication(沟通表达)、domainFit(模板领域匹配)、answerCompleteness(回答完整度)、logic(逻辑结构)、riskControl(风险与稳定性)，每项 0-100。',
+		                '你必须只输出一个 JSON 对象，不得输出 markdown 或解释。JSON Schema: {"score":0-100数字,"passed":布尔,"overallFeedback":"字符串","dimensionScores":{"communication":0-100,"domainFit":0-100,"answerCompleteness":0-100,"logic":0-100,"riskControl":0-100},"suggestions":["字符串"],"riskPoints":["字符串"]}。'
+		              ].join('\n')
+	        },
         {
           role: 'user',
           content: `请基于以下面试数据评分并返回严格 JSON：\n${JSON.stringify(promptPayload)}`

@@ -411,6 +411,7 @@ function mysqlDupKey(err: unknown): boolean {
 }
 
 const CN_MOBILE_LOGIN_USERNAME_RE = /^1[3-9]\d{9}$/;
+const AI_INTERVIEWER_MANAGER_ROLE_NAME = 'AI面试官管理员';
 
 /** 与「平台管理员」等：登录名允许字母账号；其余角色建议使用手机号 */
 function roleAllowsNonMobileLoginUsername(role: string): boolean {
@@ -425,6 +426,70 @@ function assertLoginUsernameMatchesRole(username: string, role: string): string 
     return '非管理员角色的登录账号须为 11 位中国大陆手机号（1 开头第二位 3–9）';
   }
   return null;
+}
+
+async function ensureAdminUserRolesTable(pool: mysql.Pool): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_roles (
+      user_id VARCHAR(64) NOT NULL,
+      role_id VARCHAR(64) NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, role_id),
+      KEY idx_user_roles_role (role_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  await pool.query(`
+    INSERT IGNORE INTO user_roles (user_id, role_id)
+    SELECT u.id, r.id
+    FROM users u
+    JOIN roles r ON r.name = u.role
+    WHERE TRIM(COALESCE(u.role, '')) <> ''
+  `);
+}
+
+async function ensureAdminAiInterviewerManagerRole(pool: mysql.Pool): Promise<void> {
+  await pool.query(
+    `INSERT IGNORE INTO roles (id, name, \`desc\`, users, menu_keys)
+     VALUES ('R_AI_INTERVIEWER_MANAGER', ?, '可维护 AI 面试官提示词模板', 0, ?)`,
+    [AI_INTERVIEWER_MANAGER_ROLE_NAME, JSON.stringify(['sys-interview-prompt'])]
+  );
+  await pool.query(
+    `UPDATE roles
+     SET menu_keys = COALESCE(NULLIF(menu_keys, ''), ?)
+     WHERE id = 'R_AI_INTERVIEWER_MANAGER'`,
+    [JSON.stringify(['sys-interview-prompt'])]
+  );
+}
+
+async function roleNamesByIds(pool: mysql.Pool, roleIds: string[]): Promise<string[]> {
+  const ids = roleIds.map((x) => String(x || '').trim()).filter(Boolean);
+  if (!ids.length) return [];
+  const ph = ids.map(() => '?').join(',');
+  const [rows] = await pool.query<RowDataPacket[]>(`SELECT id, name FROM roles WHERE id IN (${ph})`, ids);
+  const order = new Map(ids.map((id, idx) => [id, idx]));
+  return rows
+    .map((r) => ({ id: String(r.id || ''), name: String(r.name || '').trim() }))
+    .filter((r) => r.id && r.name)
+    .sort((a, b) => (order.get(a.id) ?? 9999) - (order.get(b.id) ?? 9999))
+    .map((r) => r.name);
+}
+
+function normalizeUserRoleIds(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return Array.from(new Set(raw.map((x) => String(x || '').trim()).filter(Boolean)));
+}
+
+async function replaceUserRoleLinks(pool: mysql.Pool, userId: string, roleIds: string[]): Promise<string> {
+  await ensureAdminUserRolesTable(pool);
+  const ids = normalizeUserRoleIds(roleIds);
+  if (!ids.length) throw new Error('请至少选择一个角色');
+  const names = await roleNamesByIds(pool, ids);
+  if (!names.length) throw new Error('所选角色不存在');
+  await pool.query('DELETE FROM user_roles WHERE user_id = ?', [userId]);
+  for (const rid of ids) {
+    await pool.query('INSERT IGNORE INTO user_roles (user_id, role_id) VALUES (?, ?)', [userId, rid]);
+  }
+  return names[0] || '招聘人员';
 }
 
 /** 老库若未执行 migration_depts_dept_type.sql，会导致列表类型一直为「—」且无法写入 */
@@ -447,6 +512,55 @@ async function ensureAdminDeptsDeptTypeColumn(pool: mysql.Pool, database: string
   }
 }
 
+async function ensureAdminDeptsSortOrderColumn(pool: mysql.Pool, database: string): Promise<void> {
+  try {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT 1 AS ok FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'depts' AND COLUMN_NAME = 'sort_order' LIMIT 1`,
+      [database]
+    );
+    if (Array.isArray(rows) && rows.length > 0) return;
+    await pool.query(`ALTER TABLE depts ADD COLUMN sort_order INT NOT NULL DEFAULT 0 AFTER level`);
+    console.log('[server.ts] 已为管理库 depts 表自动补充 sort_order 列');
+  } catch (e) {
+    const err = e as { code?: string };
+    if (err.code === 'ER_DUP_FIELDNAME') return;
+    console.warn('[server.ts] 检查/补充 depts.sort_order 列未成功（若拖拽排序不可用，请手动执行 server/migration_depts_sort_order.sql）', e);
+  }
+}
+
+function naturalDeptSortKey(name: string): string {
+  const cn: Record<string, string> = { 一: '01', 二: '02', 三: '03', 四: '04', 五: '05', 六: '06', 七: '07', 八: '08', 九: '09', 十: '10' };
+  return String(name || '')
+    .replace(/十([一二三四五六七八九])?/g, (_, tail) => String(10 + (tail ? Number(cn[tail]) : 0)).padStart(2, '0'))
+    .replace(/[一二三四五六七八九]/g, (m) => cn[m] || m)
+    .replace(/(\d+)/g, (m) => m.padStart(6, '0'));
+}
+
+async function initializeAdminDeptSortOrders(pool: mysql.Pool): Promise<void> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    'SELECT id, parent_id, name, sort_order FROM depts ORDER BY parent_id ASC, level ASC, name ASC'
+  );
+  const byParent = new Map<string, Array<{ id: string; name: string; sortOrder: number }>>();
+  for (const r of rows) {
+    const key = String(r.parent_id || '');
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key)!.push({
+      id: String(r.id),
+      name: String(r.name || ''),
+      sortOrder: Number(r.sort_order) || 0
+    });
+  }
+  for (const siblings of byParent.values()) {
+    const needsInit = siblings.every((x) => !x.sortOrder);
+    if (!needsInit) continue;
+    siblings.sort((a, b) => naturalDeptSortKey(a.name).localeCompare(naturalDeptSortKey(b.name), 'zh-CN'));
+    for (let i = 0; i < siblings.length; i++) {
+      await pool.query('UPDATE depts SET sort_order=? WHERE id=?', [(i + 1) * 10, siblings[i].id]);
+    }
+  }
+}
+
 async function startServer() {
   try {
     await adminPool.query('SELECT 1');
@@ -458,6 +572,9 @@ async function startServer() {
   }
 
   await ensureAdminDeptsDeptTypeColumn(adminPool, adminDb);
+  await ensureAdminDeptsSortOrderColumn(adminPool, adminDb);
+  await initializeAdminDeptSortOrders(adminPool);
+  await ensureAdminAiInterviewerManagerRole(adminPool);
 
   const app = express();
   /** 与 server/index.ts 的 PORT（默认 3001）分离，避免同时跑两套服务时端口冲突 */
@@ -1204,7 +1321,7 @@ async function startServer() {
   app.get('/api/depts', async (_req, res) => {
     try {
       const [rows] = await adminPool.query(
-        'SELECT * FROM depts ORDER BY level ASC, name ASC'
+        'SELECT * FROM depts ORDER BY level ASC, sort_order ASC, name ASC'
       );
       res.json(rows);
     } catch {
@@ -1246,8 +1363,8 @@ async function startServer() {
         customId ||
         `dept_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
       await adminPool.query(
-        'INSERT INTO depts (id, parent_id, name, dept_type, level, manager, count) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [id, parentId, name, deptType, lv, manager, ct]
+        'INSERT INTO depts (id, parent_id, name, dept_type, level, sort_order, manager, count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [id, parentId, name, deptType, lv, 0, manager, ct]
       );
       res.status(201).json({ id });
     } catch (e) {
@@ -1376,12 +1493,61 @@ async function startServer() {
     }
   });
 
+  app.post('/api/depts/reorder', async (req, res) => {
+    const parentId = String(req.body?.parentId || '').trim();
+    const orderedIds = Array.isArray(req.body?.orderedIds)
+      ? req.body.orderedIds.map((x: unknown) => String(x || '').trim()).filter(Boolean)
+      : [];
+    if (!orderedIds.length) return res.status(400).json({ message: 'orderedIds required' });
+    const conn = await adminPool.getConnection();
+    try {
+      await conn.beginTransaction();
+      for (let i = 0; i < orderedIds.length; i++) {
+        await conn.query(
+          parentId
+            ? 'UPDATE depts SET sort_order=? WHERE id=? AND parent_id=?'
+            : 'UPDATE depts SET sort_order=? WHERE id=? AND parent_id IS NULL',
+          parentId ? [(i + 1) * 10, orderedIds[i], parentId] : [(i + 1) * 10, orderedIds[i]]
+        );
+      }
+      await conn.commit();
+      res.json({ ok: true });
+    } catch (e) {
+      await conn.rollback();
+      res.status(500).json({ message: 'db error' });
+    } finally {
+      conn.release();
+    }
+  });
+
   app.get('/api/users', async (_req, res) => {
     try {
+      await ensureAdminUserRolesTable(adminPool);
       const [rows] = await adminPool.query(
-        'SELECT id, name, username, dept, role, status FROM users ORDER BY username ASC'
+        `SELECT u.id, u.name, u.username, u.dept, u.role, u.status,
+                CONCAT('[', COALESCE(GROUP_CONCAT(JSON_OBJECT('id', r.id, 'name', r.name) ORDER BY r.id SEPARATOR ','), ''), ']') AS roles_json
+         FROM users u
+         LEFT JOIN user_roles ur ON ur.user_id = u.id
+         LEFT JOIN roles r ON r.id = ur.role_id
+         GROUP BY u.id, u.name, u.username, u.dept, u.role, u.status
+         ORDER BY u.username ASC`
       );
-      res.json(rows);
+      res.json(
+        (rows as RowDataPacket[]).map((r) => {
+          let roles: Array<{ id: string; name: string }> = []
+          try {
+            const parsed = JSON.parse(String(r.roles_json || '[]')) as Array<{ id?: unknown; name?: unknown }>
+            roles = Array.isArray(parsed)
+              ? parsed
+                  .map((x) => ({ id: String(x.id || '').trim(), name: String(x.name || '').trim() }))
+                  .filter((x) => x.id && x.name)
+              : []
+          } catch {
+            roles = []
+          }
+          return { ...r, roles, roleIds: roles.map((x) => x.id) }
+        })
+      );
     } catch {
       res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }
@@ -1393,7 +1559,9 @@ async function startServer() {
     const username = String(b.username || '').trim();
     const password = String(b.password || '');
     const dept = String(b.dept || '').trim() || '-';
-    const role = String(b.role || '').trim() || '招聘人员';
+    const roleIds = normalizeUserRoleIds(b.roleIds);
+    const roleNamesFromIds = roleIds.length ? await roleNamesByIds(adminPool, roleIds).catch(() => []) : [];
+    const role = roleNamesFromIds[0] || String(b.role || '').trim() || '招聘人员';
     const status = String(b.status || '正常').trim();
     if (!name || !username) {
       res.status(400).json({ message: '请填写姓名与登录账号' });
@@ -1419,6 +1587,16 @@ async function startServer() {
         'INSERT INTO users (id, name, username, dept, role, status, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?)',
         [id, name, username, dept, role, status, hash]
       );
+      if (roleIds.length) {
+        const primary = await replaceUserRoleLinks(adminPool, id, roleIds);
+        await adminPool.query('UPDATE users SET role = ? WHERE id = ?', [primary, id]);
+      } else {
+        await ensureAdminUserRolesTable(adminPool);
+        await adminPool.query(
+          'INSERT IGNORE INTO user_roles (user_id, role_id) SELECT ?, id FROM roles WHERE name = ? LIMIT 1',
+          [id, role]
+        );
+      }
       res.status(201).json({ id });
     } catch (e) {
       if (mysqlDupKey(e)) {
@@ -1437,7 +1615,7 @@ async function startServer() {
       res.status(400).json({ message: '缺少用户 id' });
       return;
     }
-    if (b.username !== undefined || b.role !== undefined) {
+    if (b.username !== undefined || b.role !== undefined || b.roleIds !== undefined) {
       try {
         const [curRows] = await adminPool.query<RowDataPacket[]>(
           'SELECT username, role FROM users WHERE id = ? LIMIT 1',
@@ -1450,10 +1628,13 @@ async function startServer() {
         }
         const nextUsername =
           b.username !== undefined ? String(b.username || '').trim() : String(cur.username || '').trim();
+        const nextRoleIds = normalizeUserRoleIds(b.roleIds);
+        const nextRoleNames = nextRoleIds.length ? await roleNamesByIds(adminPool, nextRoleIds).catch(() => []) : [];
         const nextRole =
-          b.role !== undefined
+          nextRoleNames[0] ||
+          (b.role !== undefined
             ? String(b.role || '').trim() || '招聘人员'
-            : String(cur.role || '').trim() || '招聘人员';
+            : String(cur.role || '').trim() || '招聘人员');
         const unameRule = assertLoginUsernameMatchesRole(nextUsername, nextRole);
         if (unameRule) {
           res.status(400).json({ message: unameRule });
@@ -1488,9 +1669,11 @@ async function startServer() {
       patches.push('dept = ?');
       vals.push(String(b.dept || '').trim() || '-');
     }
-    if (b.role !== undefined) {
+    if (b.role !== undefined || b.roleIds !== undefined) {
+      const nextRoleIds = normalizeUserRoleIds(b.roleIds);
+      const nextRoleNames = nextRoleIds.length ? await roleNamesByIds(adminPool, nextRoleIds).catch(() => []) : [];
       patches.push('role = ?');
-      vals.push(String(b.role || '').trim() || '招聘人员');
+      vals.push(nextRoleNames[0] || String(b.role || '').trim() || '招聘人员');
     }
     if (b.status !== undefined) {
       const status = String(b.status).trim();
@@ -1519,6 +1702,10 @@ async function startServer() {
         res.status(404).json({ message: '用户不存在' });
         return;
       }
+      if (b.roleIds !== undefined) {
+        const primary = await replaceUserRoleLinks(adminPool, id, normalizeUserRoleIds(b.roleIds));
+        await adminPool.query('UPDATE users SET role = ? WHERE id = ?', [primary, id]);
+      }
       res.json({ ok: true });
     } catch (e) {
       if (mysqlDupKey(e)) {
@@ -1538,6 +1725,7 @@ async function startServer() {
     }
     try {
       const [hdr] = await adminPool.query<ResultSetHeader>('DELETE FROM users WHERE id = ?', [id]);
+      await adminPool.query('DELETE FROM user_roles WHERE user_id = ?', [id]);
       if (!hdr.affectedRows) {
         res.status(404).json({ message: '用户不存在' });
         return;
@@ -1865,7 +2053,10 @@ async function startServer() {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: { port: Number(process.env.ADMIN_UI_HMR_PORT || 24679) }
+        hmr: { port: Number(process.env.ADMIN_UI_HMR_PORT || 24679) },
+        watch: {
+          ignored: ['**/storage/**', '**/.logs/**', '**/.pids/**', '**/miniapp-candidate/dist/**']
+        }
       },
       appType: 'spa',
     });
