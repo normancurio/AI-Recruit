@@ -5,7 +5,14 @@ node_modules
 .cursor
 dist
 **/dist
+.env
+.env.*
+!.env.example
 .env.local
+backups
+storage/resumes
+*.sql
+*.sql.gz
 **/.DS_Store
 *.md
 miniapp-candidate/.swc
