@@ -25,7 +25,7 @@ x-app-build: &app-build
   dockerfile: Dockerfile
   args:
     NODE_IMAGE: ${NODE_IMAGE:-node:22-bookworm-slim}
-    VITE_API_BASE: ${PUBLIC_API_BASE:-http://47.102.85.156:3011}
+    VITE_API_BASE: ${PUBLIC_API_BASE:-}
     VITE_ADMIN_API_TOKEN: ${VITE_ADMIN_API_TOKEN_BUILD:-}
 
 services:

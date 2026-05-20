@@ -2089,7 +2089,7 @@ async function startServer() {
         '[server.ts] 未设置 MINIAPP_API_PUBLIC_URL：管理端将使用构建期 VITE_API_BASE；若仍为 localhost，线上登录会 ERR_CONNECTION_REFUSED'
       );
     }
-    app.use(express.static(distPath));
+    app.use(express.static(distPath, { index: false }));
     app.get('*', (_req, res) => {
       res.type('html').send(loadSpaIndexHtml());
     });

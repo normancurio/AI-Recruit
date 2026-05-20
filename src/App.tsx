@@ -56,22 +56,32 @@ function resolveMiniappApiBase(): string {
   if (typeof window !== 'undefined') {
     const injected = String((window as unknown as { __ADMIN_MINIAPP_API_BASE__?: string }).__ADMIN_MINIAPP_API_BASE__ || '').trim()
     if (injected) return injected.replace(/\/$/, '')
-  }
-  const v = (import.meta.env.VITE_API_BASE || '').trim()
-  if (v) return v
-  if (typeof window !== 'undefined') {
-    const { protocol, hostname, port } = window.location
+    const { protocol, hostname, host, port } = window.location
     const local =
       hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1'
-    if (local && (import.meta.env.DEV || import.meta.env.MODE === 'development')) {
+    const currentOrigin = `${protocol}//${host}`.replace(/\/$/, '')
+    const v = (import.meta.env.VITE_API_BASE || '').trim().replace(/\/$/, '')
+    if (v) {
+      let rawHttpIp = false
+      try {
+        const u = new URL(v)
+        rawHttpIp = u.protocol === 'http:' && /^\d{1,3}(\.\d{1,3}){3}$/.test(u.hostname)
+      } catch {
+        rawHttpIp = false
+      }
+      if (local || !rawHttpIp) return v
+      return currentOrigin
+    }
+    if (!local) return currentOrigin
+    if (import.meta.env.DEV || import.meta.env.MODE === 'development') {
       const p = port ? `:${port}` : ''
       return `${protocol}//${hostname}${p}`.replace(/\/$/, '')
     }
-    if (local) {
-      const h = hostname === '[::1]' || hostname === '::1' ? '[::1]' : hostname
-      return `${protocol}//${h}:3001`
-    }
+    const h = hostname === '[::1]' || hostname === '::1' ? '[::1]' : hostname
+    return `${protocol}//${h}:3001`
   }
+  const v = (import.meta.env.VITE_API_BASE || '').trim()
+  if (v) return v
   if (import.meta.env.DEV || import.meta.env.MODE === 'development') {
     return 'http://127.0.0.1:3001'
   }
