@@ -9,7 +9,13 @@ FROM ${NODE_IMAGE}
 WORKDIR /app
 
 # 申朴简历：用 Chromium 将服务端 HTML/SVG 模板稳定转成 PDF；Noto CJK 保证中文字形。
-RUN apt-get update \
+RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+      sed -i \
+        -e 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g' \
+        -e 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' \
+        /etc/apt/sources.list.d/debian.sources; \
+    fi \
+  && apt-get update \
   && apt-get install -y --no-install-recommends chromium fonts-noto-cjk \
   && rm -rf /var/lib/apt/lists/*
 
