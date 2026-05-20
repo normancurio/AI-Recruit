@@ -6,6 +6,8 @@ export interface CandidateProfile {
   openid?: string
   /** HR 邀请绑定的 resume_screenings.id；有则服务端按该条取简历出题 */
   resumeScreeningId?: number
+  /** 当前登录使用的服务端会话 id；用于锁定本次邀请绑定的 AI 面试官模板 */
+  sessionId?: string
 }
 
 export interface JobInfo {

@@ -93,7 +93,9 @@ export async function validateInviteCode(code: string): Promise<JobInfo> {
 export async function fetchInterviewQuestions(
   jobId: string,
   candidateName?: string,
-  resumeScreeningId?: number
+  resumeScreeningId?: number,
+  inviteCode?: string,
+  sessionId?: string
 ): Promise<InterviewQuestion[]> {
   if (useMock()) {
     throw new Error(
@@ -107,7 +109,9 @@ export async function fetchInterviewQuestions(
     data: {
       jobId,
       candidateName: candidateName?.trim() || '',
-      ...(typeof resumeScreeningId === 'number' && resumeScreeningId > 0 ? { resumeScreeningId } : {})
+      ...(typeof resumeScreeningId === 'number' && resumeScreeningId > 0 ? { resumeScreeningId } : {}),
+      ...(inviteCode?.trim() ? { inviteCode: inviteCode.trim().toUpperCase() } : {}),
+      ...(sessionId?.trim() ? { sessionId: sessionId.trim() } : {})
     }
   })
 
@@ -117,16 +121,35 @@ export async function fetchInterviewQuestions(
   return res.data.data
 }
 
-const QUESTIONS_PREFETCH_STORAGE_KEY = 'interview_questions_prefetch_v1'
+const LEGACY_QUESTIONS_PREFETCH_STORAGE_KEYS = ['interview_questions_prefetch_v1', 'interview_questions_prefetch_v2']
+const QUESTIONS_PREFETCH_STORAGE_KEY = 'interview_questions_prefetch_v3'
 
-function cacheKeyForInterviewQuestions(jobId: string, candidateName: string, resumeScreeningId?: number) {
+function clearLegacyInterviewQuestionPrefetch(): void {
+  for (const key of LEGACY_QUESTIONS_PREFETCH_STORAGE_KEYS) {
+    try {
+      Taro.removeStorageSync(key)
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function cacheKeyForInterviewQuestions(
+  jobId: string,
+  candidateName: string,
+  resumeScreeningId?: number,
+  inviteCode?: string,
+  sessionId?: string
+) {
   const jid = String(jobId || '').trim().toUpperCase()
   const name = String(candidateName || '').trim()
   const rs =
     typeof resumeScreeningId === 'number' && Number.isFinite(resumeScreeningId) && resumeScreeningId > 0
       ? String(resumeScreeningId)
       : ''
-  return `${jid}\t${name}\t${rs}`
+  const invite = String(inviteCode || '').trim().toUpperCase()
+  const sid = String(sessionId || '').trim()
+  return `${jid}\t${name}\t${rs}\t${invite}\t${sid}`
 }
 
 const inflightQuestionsByKey = new Map<string, Promise<InterviewQuestion[]>>()
@@ -140,13 +163,16 @@ const resolvedQuestionsMemory = new Map<string, InterviewQuestion[]>()
 export function prefetchInterviewQuestions(
   jobId: string,
   candidateName?: string,
-  resumeScreeningId?: number
+  resumeScreeningId?: number,
+  inviteCode?: string,
+  sessionId?: string
 ): void {
   if (useMock()) return
-  const key = cacheKeyForInterviewQuestions(jobId, String(candidateName || ''), resumeScreeningId)
+  clearLegacyInterviewQuestionPrefetch()
+  const key = cacheKeyForInterviewQuestions(jobId, String(candidateName || ''), resumeScreeningId, inviteCode, sessionId)
   if (inflightQuestionsByKey.has(key)) return
 
-  const p = fetchInterviewQuestions(jobId, candidateName, resumeScreeningId).then((questions) => {
+  const p = fetchInterviewQuestions(jobId, candidateName, resumeScreeningId, inviteCode, sessionId).then((questions) => {
     resolvedQuestionsMemory.set(key, questions)
     try {
       Taro.setStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY, {
@@ -172,12 +198,15 @@ export function prefetchInterviewQuestions(
 export async function fetchInterviewQuestionsOrPrefetched(
   jobId: string,
   candidateName?: string,
-  resumeScreeningId?: number
+  resumeScreeningId?: number,
+  inviteCode?: string,
+  sessionId?: string
 ): Promise<InterviewQuestion[]> {
   if (useMock()) {
-    return fetchInterviewQuestions(jobId, candidateName, resumeScreeningId)
+    return fetchInterviewQuestions(jobId, candidateName, resumeScreeningId, inviteCode, sessionId)
   }
-  const key = cacheKeyForInterviewQuestions(jobId, String(candidateName || ''), resumeScreeningId)
+  clearLegacyInterviewQuestionPrefetch()
+  const key = cacheKeyForInterviewQuestions(jobId, String(candidateName || ''), resumeScreeningId, inviteCode, sessionId)
 
   try {
     const raw = Taro.getStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY) as
@@ -213,7 +242,7 @@ export async function fetchInterviewQuestionsOrPrefetched(
     }
   }
 
-  return fetchInterviewQuestions(jobId, candidateName, resumeScreeningId)
+  return fetchInterviewQuestions(jobId, candidateName, resumeScreeningId, inviteCode, sessionId)
 }
 
 export async function submitInterview(
@@ -247,6 +276,42 @@ export async function submitInterview(
     throw new Error('提交面试失败')
   }
   return res.data.data
+}
+
+export type InterviewTestAnswerQuality = 'low' | 'medium' | 'high'
+
+export async function generateInterviewTestAnswer(params: {
+  jobId: string
+  candidateName?: string
+  resumeScreeningId?: number
+  questionId: string
+  question: string
+  quality: InterviewTestAnswerQuality
+}): Promise<string> {
+  if (useMock()) {
+    throw new Error('测试回答依赖服务端模型：请先配置 TARO_APP_API_BASE')
+  }
+
+  const res = await Taro.request<{ data?: { answer?: string }; message?: string }>({
+    url: `${getApiBase()}/api/candidate/interview-test-answer`,
+    method: 'POST',
+    data: {
+      jobId: params.jobId,
+      candidateName: params.candidateName?.trim() || '',
+      ...(typeof params.resumeScreeningId === 'number' && params.resumeScreeningId > 0
+        ? { resumeScreeningId: params.resumeScreeningId }
+        : {}),
+      questionId: params.questionId,
+      question: params.question,
+      quality: params.quality
+    }
+  })
+
+  const answer = String(res.data?.data?.answer || '').trim()
+  if (res.statusCode >= 400 || !answer) {
+    throw new Error(res.data?.message || `生成测试回答失败（HTTP ${res.statusCode}）`)
+  }
+  return answer
 }
 
 export async function startLiveSession(params: {

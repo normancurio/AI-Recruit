@@ -1,0 +1,7 @@
+---
+alwaysApply: true
+---
+
+当我说客户端只指是这个目录 miniapp-candidate
+当我说 api，服务器，server 指的是 server
+当我说后台指的是 src

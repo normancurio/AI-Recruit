@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import Taro, { useDidShow, useShareAppMessage } from '@tarojs/taro'
 import { Button, Input, Text, View } from '@tarojs/components'
 import { loginWithInviteCode } from '../../services/interviewApi'
-import { loginAndGetOpenId } from '../../services/authApi'
+import { getWechatLoginCode, loginAndGetOpenId } from '../../services/authApi'
 import type { CandidateProfile } from '../../types/interview'
 import { flowLog, flowLogInfo } from '../../utils/flowLog'
 
@@ -61,13 +61,9 @@ export default function LoginPage() {
     }
     try {
       setLoading(true)
-      const loginRes = await Taro.login()
-      if (!loginRes.code) {
-        Taro.showToast({ title: '微信登录失败', icon: 'none' })
-        return
-      }
+      const loginCode = await getWechatLoginCode('candidate')
       const data = await loginWithInviteCode({
-        code: loginRes.code,
+        code: loginCode,
         inviteCode: code,
         name: trimmedName,
         phone: phoneTrimmed
@@ -87,7 +83,8 @@ export default function LoginPage() {
         name: data.name,
         phone: phoneTrimmed,
         inviteCode: code,
-        openid: data.openid
+        openid: data.openid,
+        sessionId: data.sessionId
       }
       if (typeof data.resumeScreeningId === 'number' && data.resumeScreeningId > 0) {
         profile.resumeScreeningId = data.resumeScreeningId

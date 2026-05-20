@@ -25,6 +25,8 @@ import {
   jobRoleBaseValidationMessage
 } from '../shared/jobTaxonomy';
 import { deptNamesMatch } from '../shared/deptMatch';
+import { MultiSelectPanel, SearchableSelect, TreeSelect, type PickerOption, type TreePickerOption } from './components/pickers';
+import { ResizableTh, useColumnWidths, type ColumnSpec } from './components/resizableColumns';
 import { 
   Building2, Briefcase, Users, FileText, UserCheck, 
   Settings, Network, UserCog, Shield, Tags, Menu as MenuIcon,
@@ -34,6 +36,15 @@ import {
   Clock, Calendar, Pencil, Trash2, Loader2, KeyRound, Sparkles, UserRound, Lock, X, RotateCcw,
   FileBarChart, UserPen, CalendarCheck, Eye, Download, History
 } from 'lucide-react';
+
+/**
+ * 弹框关闭脏检查统一文案：未修改时直接关，已修改弹 confirm。
+ * 用法：if (!confirmDiscardDialogChanges(dirty)) return; setOpen(false);
+ */
+function confirmDiscardDialogChanges(dirty: boolean): boolean {
+  if (!dirty) return true;
+  return window.confirm('已有未保存的修改，确定要退出吗？');
+}
 
 /**
  * 小程序 / 管理端会话 API 根地址（/api/admin/* 等）。
@@ -69,6 +80,37 @@ function resolveMiniappApiBase(): string {
 
 /** 401 后写入，登录层展示后清除 */
 const MINIAPP_RELOGIN_HINT_KEY = 'hr_admin_login_hint'
+
+function fallbackCopyText(text: string): boolean {
+  if (typeof document === 'undefined') return false;
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  textarea.style.top = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    return document.execCommand('copy');
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch {
+      return fallbackCopyText(value);
+    }
+  }
+  return fallbackCopyText(value);
+}
 
 // --- Types ---
 type Role = 'admin' | 'delivery_manager' | 'recruiter' | 'recruiting_manager';
@@ -123,7 +165,8 @@ const ADMIN_ROLE_MENU_OPTIONS: { group: string; items: { id: string; label: stri
       { id: 'sys-role', label: '角色管理' },
       { id: 'sys-menu', label: '菜单管理' },
       { id: 'sys-ai-interview-settings', label: 'AI面试设置' },
-      { id: 'sys-job-role-bases', label: '标准岗位' }
+      { id: 'sys-job-role-bases', label: '标准岗位' },
+      { id: 'sys-interview-prompt', label: 'AI面试官' }
     ]
   }
 ];
@@ -166,6 +209,25 @@ function collectNavIds(nav: NavItem[]): string[] {
     }
   }
   return out
+}
+
+function readMenuFromHash(): string | null {
+  if (typeof window === 'undefined') return null
+  const raw = window.location.hash.replace(/^#/, '').trim()
+  if (!raw) return null
+  const params = new URLSearchParams(raw)
+  const menu = (params.get('menu') || raw).trim()
+  return /^[a-z0-9-]+$/.test(menu) ? menu : null
+}
+
+function replaceMenuHash(menuId: string): void {
+  if (typeof window === 'undefined' || !/^[a-z0-9-]+$/.test(menuId)) return
+  const url = new URL(window.location.href)
+  const params = new URLSearchParams(url.hash.replace(/^#/, ''))
+  params.set('menu', menuId)
+  const next = `#${params.toString()}`
+  if (url.hash === next) return
+  window.history.replaceState(null, '', `${url.pathname}${url.search}${next}`)
 }
 
 /** 标准岗位序列（与库表同步；Provider 在登录后主布局） */
@@ -274,7 +336,8 @@ const NAV_TEMPLATE: NavItem[] = [
       { id: 'sys-role', title: '角色管理', icon: <Shield className="w-4 h-4" /> },
       { id: 'sys-menu', title: '菜单管理', icon: <MenuIcon className="w-4 h-4" /> },
       { id: 'sys-ai-interview-settings', title: 'AI面试设置', icon: <Sparkles className="w-4 h-4" /> },
-      { id: 'sys-job-role-bases', title: '标准岗位', icon: <Tags className="w-4 h-4" /> }
+      { id: 'sys-job-role-bases', title: '标准岗位', icon: <Tags className="w-4 h-4" /> },
+      { id: 'sys-interview-prompt', title: 'AI面试官', icon: <Bot className="w-4 h-4" /> }
     ]
   }
 ]
@@ -403,6 +466,10 @@ export interface Resume {
   fileName?: string
   /** 后端是否已保存原始简历文件，可用于预览/下载 */
   hasOriginalFile?: boolean
+  /** 申朴统一标准简历生成状态 */
+  shenpuResumeStatus?: 'missing' | 'generating' | 'ready' | 'failed'
+  shenpuResumeProgress?: number
+  shenpuResumeStage?: string
   /** 简历正文截取（接口返回库中正文前段；列表中不展开，在「查看简历」弹框中阅读） */
   resumePlainPreview?: string
   evaluationJson?: {
@@ -414,6 +481,10 @@ export interface Resume {
   }
   /** 简历结构化维度分，优先取 evaluation_json.dimension_scores（六维） */
   resumeDimensionScores?: Record<string, number>
+  uploadTaskStatus?: ResumeUploadTask['status']
+  uploadTaskProgress?: number
+  uploadTaskStage?: string
+  uploadTaskFileName?: string
   /** 列表筛选用：evaluation_json.candidate_profile 中常见字段 */
   candidateFilterFields?: {
     gender: string
@@ -425,6 +496,23 @@ export interface Resume {
     expectedSalary: string
   }
 }
+
+type ResumeUploadTask = {
+  taskId: string
+  status: 'queued' | 'running' | 'done' | 'failed'
+  jobCode: string
+  fileName?: string
+  uploadProgress: number
+  uploadStage: string
+  shenpuProgress: number
+  shenpuStage: string
+  shenpuStatus: 'missing' | 'generating' | 'ready' | 'failed'
+  screeningId?: number
+  candidateName?: string
+  message?: string
+  error?: string
+}
+
 export interface Application { id: string; name: string; job: string; resumeScore: number; interviewScore: number; aiEval: string; status: string; }
 export interface Dept {
   id: string;
@@ -432,12 +520,22 @@ export interface Dept {
   /** 业务类型：交付 / 招聘 / 其他；「招聘」可出现在项目招聘负责人选部门中 */
   deptType?: string;
   level: number;
+  sortOrder?: number;
   manager: string;
   count: number;
   /** 上级部门 id，空为顶级 */
   parentId?: string | null;
 }
-export interface User { id: string; name: string; username: string; dept: string; role: string; status: string; }
+export interface User {
+  id: string;
+  name: string;
+  username: string;
+  dept: string;
+  role: string;
+  status: string;
+  roles?: { id: string; name: string }[];
+  roleIds?: string[];
+}
 
 /** 从若干根部门 id 向下收集自身及所有子部门 id（依据 parentId） */
 function collectDescendantDeptIds(depts: Dept[], rootIds: string[]): Set<string> {
@@ -502,6 +600,15 @@ function usersFromApiPayload(data: unknown): User[] {
         name: String(r.name ?? '').trim(),
         username: String(r.username ?? '').trim(),
         dept: String(r.dept ?? '').trim(),
+        roles: Array.isArray(r.roles)
+          ? r.roles
+              .map((x) => ({
+                id: String((x as { id?: unknown }).id || '').trim(),
+                name: String((x as { name?: unknown }).name || '').trim()
+              }))
+              .filter((x) => x.id && x.name)
+          : undefined,
+        roleIds: Array.isArray(r.roleIds) ? r.roleIds.map((x) => String(x || '').trim()).filter(Boolean) : undefined,
         role: String(r.role ?? '').trim(),
         status: String(r.status ?? '正常').trim() || '正常'
       };
@@ -811,6 +918,13 @@ export default function App() {
     setChangePwdOpen(true);
   };
 
+  const closeChangePwdDialog = () => {
+    if (changePwdLoading) return;
+    const dirty = Boolean(changePwdCurrent || changePwdNew || changePwdConfirm);
+    if (!confirmDiscardDialogChanges(dirty)) return;
+    setChangePwdOpen(false);
+  };
+
   const submitChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setChangePwdErr('');
@@ -925,7 +1039,7 @@ export default function App() {
 
   /** 与登录账号职级一致，不再提供视角切换 */
   const currentRole: Role = authProfile?.uiRole ?? 'delivery_manager';
-  const [activeMenu, setActiveMenu] = useState('project-list');
+  const [activeMenu, setActiveMenuState] = useState(() => readMenuFromHash() || 'project-list');
   const [expandedMenus, setExpandedMenus] = useState<string[]>(['projects', 'recruitment', 'system']);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   /** 仅 ≥md：收起为左侧图标栏（持久化，便于大屏多留主内容区） */
@@ -961,6 +1075,26 @@ export default function App() {
     mq.addEventListener('change', onChange)
     return () => mq.removeEventListener('change', onChange)
   }, [])
+
+  const setActiveMenu = useCallback((id: string) => {
+    setActiveMenuState(id);
+    replaceMenuHash(id);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (typeof window === 'undefined') return;
+    const mql = window.matchMedia('(min-width: 768px)');
+    setMobileNavOpen(mql.matches);
+    const onChange = (e: MediaQueryListEvent) => {
+      setMobileNavOpen(e.matches);
+    };
+    if (typeof mql.addEventListener === 'function') {
+      mql.addEventListener('change', onChange);
+      return () => mql.removeEventListener('change', onChange);
+    }
+    mql.addListener(onChange);
+    return () => mql.removeListener(onChange);
+  }, []);
 
   const navigateMenu = useCallback((id: string) => {
     setActiveMenu(id);
@@ -1054,6 +1188,9 @@ export default function App() {
         if (Array.isArray(u.allowedMenuKeys)) {
           profile.allowedMenuKeys = u.allowedMenuKeys.map((x) => String(x || '').trim()).filter(Boolean);
         }
+        if (Array.isArray((u as { roles?: unknown }).roles)) {
+          profile.roles = (u as { roles: unknown[] }).roles.map((x) => String(x || '').trim()).filter(Boolean);
+        }
         setAdminLoginProfile(profile);
         const firstMenu = collectNavIds(
           filterNavByAcl(NAV_TEMPLATE, profile.uiRole, profile.allowedMenuKeys)
@@ -1083,12 +1220,25 @@ export default function App() {
   );
 
   useEffect(() => {
+    const onHashChange = () => {
+      const menu = readMenuFromHash()
+      if (!menu) return
+      const ids = collectNavIds(navConfig)
+      if (ids.includes(menu)) setActiveMenuState(menu)
+    }
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [navConfig])
+
+  useEffect(() => {
     const ids = collectNavIds(navConfig)
     if (ids.length === 0) return
     if (!ids.includes(activeMenu)) {
       setActiveMenu(ids[0])
+    } else {
+      replaceMenuHash(activeMenu)
     }
-  }, [navConfig, activeMenu])
+  }, [navConfig, activeMenu, setActiveMenu])
 
   const renderContent = () => {
     if (collectNavIds(navConfig).length === 0) {
@@ -1116,6 +1266,7 @@ export default function App() {
       case 'sys-menu': return <SystemMenuView />;
       case 'sys-ai-interview-settings': return <SystemAiInterviewSettingsView />;
       case 'sys-job-role-bases': return <SystemJobRoleBasesView />;
+      case 'sys-interview-prompt': return <SystemInterviewPromptTemplatesView />;
       default: return <div className="p-8 text-slate-500">模块开发中...</div>;
     }
   };
@@ -1129,7 +1280,7 @@ export default function App() {
               role="dialog"
               aria-modal="true"
               aria-labelledby="change-pwd-title"
-              onClick={() => !changePwdLoading && setChangePwdOpen(false)}
+              onClick={closeChangePwdDialog}
             >
               <form
                 onSubmit={submitChangePassword}
@@ -1143,7 +1294,7 @@ export default function App() {
                   <button
                     type="button"
                     disabled={changePwdLoading}
-                    onClick={() => setChangePwdOpen(false)}
+                    onClick={closeChangePwdDialog}
                     className="text-slate-400 hover:text-slate-700 text-xl leading-none px-1"
                     aria-label="关闭"
                   >
@@ -1195,7 +1346,7 @@ export default function App() {
                   <button
                     type="button"
                     disabled={changePwdLoading}
-                    onClick={() => setChangePwdOpen(false)}
+                    onClick={closeChangePwdDialog}
                     className={btnSecondarySm}
                   >
                     关闭
@@ -1358,10 +1509,10 @@ export default function App() {
         </div>
       ) : (
       <JobRoleBasesContext.Provider value={jobRoleBasesCtxValue}>
-      <div className="min-h-screen min-h-[100dvh] bg-slate-50 flex">
+      <div className="flex h-screen h-[100dvh] overflow-hidden bg-slate-50">
       {mobileNavOpen ? (
         <div
-          className="fixed inset-0 z-20 bg-slate-900/50 md:bg-transparent md:pointer-events-none"
+          className="fixed inset-0 z-20 bg-slate-900/50 md:hidden"
           role="presentation"
           onClick={() => setMobileNavOpen(false)}
         />
@@ -1530,8 +1681,8 @@ export default function App() {
           })()}
       </aside>
 
-      <main className="flex min-h-0 min-w-0 min-h-[100dvh] flex-1 flex-col overflow-hidden md:min-h-screen">
-        <header className="z-10 flex shrink-0 flex-col gap-2 border-b border-slate-200 bg-white px-3 py-2.5 shadow-sm sm:px-5 sm:py-3 md:h-16 md:flex-row md:items-center md:justify-between md:gap-4 md:px-8 md:py-0">
+      <main className="flex h-[100dvh] min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="sticky top-0 z-40 flex shrink-0 flex-col gap-2 border-b border-slate-200 bg-white/95 px-3 py-2.5 shadow-sm backdrop-blur sm:px-5 sm:py-3 md:h-16 md:flex-row md:items-center md:justify-between md:gap-4 md:px-8 md:py-0">
           <div className="flex min-w-0 items-center gap-2">
             <button
               type="button"
@@ -1599,13 +1750,13 @@ export default function App() {
           </div>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-auto bg-slate-50/50 p-4 sm:p-6 lg:p-8">
+        <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-slate-50/50 p-2 sm:p-6 lg:p-8">
           <motion.div
             key={activeMenu}
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.2 }}
-            className="mx-auto max-w-7xl"
+            className="w-full"
           >
             {renderContent()}
           </motion.div>
@@ -1620,7 +1771,17 @@ export default function App() {
 
 // --- View Components ---
 
+const CLIENT_MGMT_COLUMNS: ColumnSpec[] = [
+  { id: 'name', defaultWidth: 280, minWidth: 180, maxWidth: 560 },
+  { id: 'creditCode', defaultWidth: 300, minWidth: 200, maxWidth: 560 },
+  { id: 'industry', defaultWidth: 180, minWidth: 130, maxWidth: 360 },
+  { id: 'contact', defaultWidth: 160, minWidth: 120, maxWidth: 280 },
+  { id: 'phone', defaultWidth: 180, minWidth: 140, maxWidth: 280 },
+  { id: 'actions', defaultWidth: 160, minWidth: 120, maxWidth: 240 }
+];
+
 function ClientManagementView() {
+  const cols = useColumnWidths('clients', CLIENT_MGMT_COLUMNS);
   const [clients, setClients] = useState<Client[]>([]);
 
   useEffect(() => {
@@ -1642,15 +1803,20 @@ function ClientManagementView() {
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        <table className="w-full text-left text-sm">
+        <div className="overflow-x-auto">
+        <table
+          className="table-fixed text-left text-sm"
+          ref={cols.tableRef} style={cols.tableStyle}
+        >
+          <colgroup>{cols.colNodes}</colgroup>
           <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
             <tr>
-              <th className="px-6 py-4 font-medium">企业名称</th>
-              <th className="px-6 py-4 font-medium">统一社会信用代码 (主键)</th>
-              <th className="px-6 py-4 font-medium">所属行业</th>
-              <th className="px-6 py-4 font-medium">联系人</th>
-              <th className="px-6 py-4 font-medium">联系电话</th>
-              <th className="px-6 py-4 font-medium text-right">操作</th>
+              <ResizableTh col={cols.byId.name} className="px-6 py-4 font-medium">企业名称</ResizableTh>
+              <ResizableTh col={cols.byId.creditCode} className="px-6 py-4 font-medium">统一社会信用代码 (主键)</ResizableTh>
+              <ResizableTh col={cols.byId.industry} className="px-6 py-4 font-medium">所属行业</ResizableTh>
+              <ResizableTh col={cols.byId.contact} className="px-6 py-4 font-medium">联系人</ResizableTh>
+              <ResizableTh col={cols.byId.phone} className="px-6 py-4 font-medium">联系电话</ResizableTh>
+              <ResizableTh col={cols.byId.actions} className="px-6 py-4 font-medium text-right">操作</ResizableTh>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
@@ -1668,6 +1834,7 @@ function ClientManagementView() {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );
@@ -1885,6 +2052,7 @@ function ProjectManagementView({
     null | { kind: 'project'; project: Project } | { kind: 'job'; job: Job }
   >(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [projectDialogSnapshot, setProjectDialogSnapshot] = useState('');
 
   const loadProjects = useCallback(() => {
     void fetch('/api/projects')
@@ -1913,11 +2081,31 @@ function ProjectManagementView({
       .catch(() => setHrUsers([]));
   }, []);
 
+  const projectFormSnapshot = useMemo(
+    () =>
+      JSON.stringify({
+        id: formId,
+        name: formName,
+        dept: formDept,
+        start: formStart,
+        end: formEnd,
+        desc: formDesc,
+        status: formStatus,
+        memberCount: formMemberCount,
+        projectCode: formProjectCode,
+        recruitmentLeads: formProjectRecruitmentLeads
+      }),
+    [formId, formName, formDept, formStart, formEnd, formDesc, formStatus, formMemberCount, formProjectCode, formProjectRecruitmentLeads]
+  );
+  const projectDialogDirty = Boolean(createOpen && projectDialogSnapshot && projectFormSnapshot !== projectDialogSnapshot);
+
   const closeProjectModal = () => {
     if (createSubmitting) return;
+    if (!confirmDiscardDialogChanges(projectDialogDirty)) return;
     setCreateOpen(false);
     setEditingProjectId(null);
     setFormProjectRecruitmentLeads('');
+    setProjectDialogSnapshot('');
   };
 
   useAdminOverlayLockAndEscape(createOpen, closeProjectModal);
@@ -1938,22 +2126,58 @@ function ProjectManagementView({
     setFormProjectRecruitmentLeads('');
     setCreateError('');
     setCreateOpen(true);
+    setProjectDialogSnapshot(
+      JSON.stringify({
+        id: code,
+        name: '',
+        dept: '',
+        start: '',
+        end: '',
+        desc: '',
+        status: '进行中',
+        memberCount: '0',
+        projectCode: '',
+        recruitmentLeads: ''
+      })
+    );
   };
 
   const openEditProject = (p: Project) => {
+    const nextDept = p.dept && p.dept !== '-' ? p.dept : '';
+    const nextStart = (p.startDate || '').trim();
+    const nextEnd = (p.endDate || '').trim();
+    const nextDesc = (p.description || '').trim();
+    const nextStatus = (p.status || '进行中').trim() || '进行中';
+    const nextMember = String(p.memberCount ?? 0);
+    const nextProjCode = (p.projectCode || p.id || '').trim();
+    const nextLeads = (p.recruitmentLeads && p.recruitmentLeads.length ? p.recruitmentLeads : []).join('、');
     setEditingProjectId(p.id);
     setFormId(p.id);
     setFormName(p.name);
-    setFormDept(p.dept && p.dept !== '-' ? p.dept : '');
-    setFormStart((p.startDate || '').trim());
-    setFormEnd((p.endDate || '').trim());
-    setFormDesc((p.description || '').trim());
-    setFormStatus((p.status || '进行中').trim() || '进行中');
-    setFormMemberCount(String(p.memberCount ?? 0));
-    setFormProjectCode((p.projectCode || p.id || '').trim());
-    setFormProjectRecruitmentLeads((p.recruitmentLeads && p.recruitmentLeads.length ? p.recruitmentLeads : []).join('、'));
+    setFormDept(nextDept);
+    setFormStart(nextStart);
+    setFormEnd(nextEnd);
+    setFormDesc(nextDesc);
+    setFormStatus(nextStatus);
+    setFormMemberCount(nextMember);
+    setFormProjectCode(nextProjCode);
+    setFormProjectRecruitmentLeads(nextLeads);
     setCreateError('');
     setCreateOpen(true);
+    setProjectDialogSnapshot(
+      JSON.stringify({
+        id: p.id,
+        name: p.name,
+        dept: nextDept,
+        start: nextStart,
+        end: nextEnd,
+        desc: nextDesc,
+        status: nextStatus,
+        memberCount: nextMember,
+        projectCode: nextProjCode,
+        recruitmentLeads: nextLeads
+      })
+    );
   };
 
   const handleDeleteProject = (p: Project) => {
@@ -2063,6 +2287,7 @@ function ProjectManagementView({
       }
       setCreateOpen(false);
       setEditingProjectId(null);
+      setProjectDialogSnapshot('');
       loadProjects();
     } catch (err) {
       setCreateError(userFacingApiError(err, isEdit ? '保存失败' : '创建失败'));
@@ -2109,7 +2334,7 @@ function ProjectManagementView({
     return projectRecruitmentLeadDeptOptions
       .map((d) => {
         const managers = activeUsersInDept(hrUsers, d.name)
-          .filter((u) => isRecruitingManagerUserRole(u.role))
+          .filter((u) => userHasRoleName(u, isRecruitingManagerUserRole))
           .filter((u) => String(u.name || '').trim())
           .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN'));
         return { dept: d, managers };
@@ -3462,6 +3687,11 @@ function isRecruitingManagerUserRole(role: string): boolean {
   return /招聘经理|招募经理/i.test(r) || r.toLowerCase() === 'recruiting_manager';
 }
 
+function userHasRoleName(user: Pick<User, 'role' | 'roles'>, matcher: (roleName: string) => boolean): boolean {
+  if (matcher(String(user.role || ''))) return true;
+  return Array.isArray(user.roles) && user.roles.some((r) => matcher(r.name));
+}
+
 /** 一线「招聘人员」（岗位执行人），非经理/交付/管理员 */
 function isFrontlineRecruiterStaffRole(role: string): boolean {
   const r = String(role || '').trim();
@@ -3489,7 +3719,7 @@ function recruitingSpecialistsInDept(users: User[], deptName: string): User[] {
       u.dept &&
       u.dept !== '-' &&
       deptNamesMatch(u.dept, d) &&
-      isRecruitingSpecialistStaffRole(u.role)
+      userHasRoleName(u, isRecruitingSpecialistStaffRole)
   );
 }
 
@@ -3765,9 +3995,49 @@ function JobEditorModal({
   useAdminOverlayLockAndEscape(Boolean(jobForm), () => {
     if (!jobForm?.submitting && !jdGeneratingRef.current) onClose();
   });
+  const jobFormSnapshotRef = useRef<string>('');
+  const jobFormOpenedKeyRef = useRef<string>('');
+
+  const computeJobFormSnapshot = (jf: JobFormState | null): string => {
+    if (!jf) return '';
+    return JSON.stringify({
+      mode: jf.mode,
+      jobCode: jf.jobCode || '',
+      projectId: jf.projectId || '',
+      level: jf.level || '',
+      roleBase: jf.roleBase || '',
+      department: jf.department || '',
+      demand: jf.demand || '',
+      location: jf.location || '',
+      skills: jf.skills || '',
+      salary: jf.salary || '',
+      recruiters: jf.recruiters || '',
+      jdText: jf.jdText || ''
+    });
+  };
+
   useEffect(() => {
-    if (!jobForm) setJdGenerating(false);
+    if (!jobForm) {
+      setJdGenerating(false);
+      jobFormSnapshotRef.current = '';
+      jobFormOpenedKeyRef.current = '';
+      return;
+    }
+    const key = `${jobForm.mode}::${jobForm.jobCode || ''}`;
+    if (jobFormOpenedKeyRef.current !== key) {
+      jobFormOpenedKeyRef.current = key;
+      jobFormSnapshotRef.current = computeJobFormSnapshot(jobForm);
+    }
   }, [jobForm]);
+
+  const handleJobFormClose = () => {
+    if (jobForm?.submitting) return;
+    const dirty = jobFormSnapshotRef.current
+      ? computeJobFormSnapshot(jobForm) !== jobFormSnapshotRef.current
+      : false;
+    if (!confirmDiscardDialogChanges(dirty)) return;
+    onClose();
+  };
 
   const handleAiGenerateJd = async () => {
     if (!jobForm) return;
@@ -3898,7 +4168,7 @@ function JobEditorModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="job-form-title"
-        onClick={() => !jobForm.submitting && !jdGenerating && onClose()}
+        onClick={handleJobFormClose}
       >
         <motion.div
           key="job-form-modal"
@@ -3918,7 +4188,7 @@ function JobEditorModal({
             <button
               type="button"
               disabled={jobForm.submitting || jdGenerating}
-              onClick={onClose}
+              onClick={handleJobFormClose}
               className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
               aria-label="关闭"
             >
@@ -3937,23 +4207,14 @@ function JobEditorModal({
                       '—'}
                   </p>
                 ) : (
-                  <select
+                  <SearchableSelect
                     value={jobForm.projectId}
-                    onChange={(e) => setJobForm((f) => (f ? { ...f, projectId: e.target.value } : f))}
+                    onChange={(projectId) => setJobForm((f) => (f ? { ...f, projectId } : f))}
                     disabled={jobForm.submitting || selectableProjects.length === 0}
-                    required={selectableProjects.length > 0}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm bg-white disabled:bg-slate-50 disabled:text-slate-500"
-                  >
-                    {selectableProjects.length === 0 ? (
-                      <option value="">暂无可用项目，请先在「项目管理」中创建</option>
-                    ) : (
-                      selectableProjects.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))
-                    )}
-                  </select>
+                    placeholder={selectableProjects.length === 0 ? '暂无项目' : '请选择所属项目'}
+                    searchPlaceholder="搜索项目…"
+                    options={selectableProjects.map((p) => ({ value: p.id, label: p.name }))}
+                  />
                 )}
               </div>
               <div>
@@ -3963,21 +4224,14 @@ function JobEditorModal({
                 <p className="text-[11px] text-slate-400 mb-1 leading-snug">
                   展示名将保存为「所选级别 + 所选岗位」；列表与招聘系统岗位下拉对齐。
                 </p>
-                <select
+                <SearchableSelect
                   value={jobForm.roleBase}
-                  onChange={(e) => setJobForm((f) => (f ? { ...f, roleBase: e.target.value } : f))}
-                  required
-                  className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm bg-white"
-                >
-                  <option value="" disabled>
-                    请选择岗位
-                  </option>
-                  {jobRoleBaseOptions.map((b) => (
-                    <option key={b} value={b}>
-                      {b}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(roleBase) => setJobForm((f) => (f ? { ...f, roleBase } : f))}
+                  placeholder="请选择岗位"
+                  searchPlaceholder="搜索岗位…"
+                  pageSize={10}
+                  options={jobRoleBaseOptions.map((b) => ({ value: b, label: b }))}
+                />
                 {jobForm.mode === 'edit' && !jobForm.roleBase ? (
                   <p className="text-[11px] text-amber-700 mt-1 leading-snug">
                     当前记录的岗位名称未能匹配标准列表，请重新选择岗位后保存（将按级别与岗位生成新的展示名称）。
@@ -4422,7 +4676,7 @@ function JobEditorModal({
               <button
                 type="button"
                 disabled={jobForm.submitting}
-                onClick={onClose}
+                onClick={handleJobFormClose}
                 className={btnSecondarySm}
               >
                 取消
@@ -4456,6 +4710,23 @@ function JobEditorModal({
   );
 }
 
+const JOB_QUERY_BASE_COLUMNS: ColumnSpec[] = [
+  { id: 'project', defaultWidth: 240, minWidth: 180, maxWidth: 520 },
+  { id: 'deliveryOwner', defaultWidth: 190, minWidth: 140, maxWidth: 360 },
+  { id: 'recruitDept', defaultWidth: 200, minWidth: 150, maxWidth: 360 },
+  { id: 'title', defaultWidth: 240, minWidth: 180, maxWidth: 460 },
+  { id: 'demand', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
+  { id: 'salary', defaultWidth: 160, minWidth: 120, maxWidth: 280 },
+  { id: 'location', defaultWidth: 170, minWidth: 120, maxWidth: 320 },
+  { id: 'jobDate', defaultWidth: 170, minWidth: 130, maxWidth: 260 },
+  { id: 'status', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
+  { id: 'actions', defaultWidth: 240, minWidth: 180, maxWidth: 420 }
+];
+const JOB_QUERY_COLUMNS_WITH_CHECK: ColumnSpec[] = [
+  { id: 'check', defaultWidth: 56, minWidth: 48, maxWidth: 72 },
+  ...JOB_QUERY_BASE_COLUMNS
+];
+
 function JobQueryView({
   onNavigate,
   currentRole,
@@ -4465,6 +4736,11 @@ function JobQueryView({
   currentRole: Role;
   authProfile: AdminLoginProfile | null;
 }) {
+  const jobQueryColumnSpec = currentRole === 'recruiting_manager' ? JOB_QUERY_COLUMNS_WITH_CHECK : JOB_QUERY_BASE_COLUMNS;
+  const cols = useColumnWidths(
+    currentRole === 'recruiting_manager' ? 'job-query-rm' : 'job-query',
+    jobQueryColumnSpec
+  );
   const [rows, setRows] = useState<JobAssignmentRow[]>([]);
   const [projectOptions, setProjectOptions] = useState<Project[]>([]);
   const [jobForm, setJobForm] = useState<JobFormState | null>(null);
@@ -4482,6 +4758,7 @@ function JobQueryView({
   const [rmBatchRecruiters, setRmBatchRecruiters] = useState('');
   const [rmBatchApplying, setRmBatchApplying] = useState(false);
   const [rmBatchError, setRmBatchError] = useState('');
+  const [copiedJobCode, setCopiedJobCode] = useState('');
   const rmBatchSelectAllRef = useRef<HTMLInputElement>(null);
   const [adminMsg, setAdminMsg] = useState<null | { title: string; message: string }>(null);
   const [deleteJobConfirm, setDeleteJobConfirm] = useState<Job | null>(null);
@@ -4492,6 +4769,22 @@ function JobQueryView({
   useAdminOverlayLockAndEscape(rmBatchAssignOpen, () => {
     if (!rmBatchApplyingRef.current) setRmBatchAssignOpen(false);
   });
+  const copiedJobCodeTimerRef = useRef<number | null>(null);
+
+  const handleCopyJobCode = useCallback((jobCode: string) => {
+    void copyTextToClipboard(jobCode).then((ok) => {
+      if (!ok) return;
+      setCopiedJobCode(jobCode);
+      if (copiedJobCodeTimerRef.current != null) window.clearTimeout(copiedJobCodeTimerRef.current);
+      copiedJobCodeTimerRef.current = window.setTimeout(() => setCopiedJobCode(''), 1400);
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (copiedJobCodeTimerRef.current != null) window.clearTimeout(copiedJobCodeTimerRef.current);
+    };
+  }, []);
 
   const loadData = useCallback(() => {
     void fetch('/api/projects')
@@ -4579,7 +4872,7 @@ function JobQueryView({
   }, []);
 
   const recruiterStaffOptions = useMemo(
-    () => jobFormUsers.filter((u) => isFrontlineRecruiterStaffRole(u.role)),
+    () => jobFormUsers.filter((u) => userHasRoleName(u, isFrontlineRecruiterStaffRole)),
     [jobFormUsers]
   );
   const recruiterSelectableDepts = useMemo(() => {
@@ -4826,7 +5119,7 @@ function JobQueryView({
       return;
     }
     if (selectableProjects.length === 0) {
-      setJobForm((f) => (f ? { ...f, error: '暂无可用项目，请先在「项目管理」中创建' } : f));
+      setJobForm((f) => (f ? { ...f, error: '暂无项目，请先创建' } : f));
       return;
     }
     const pidTrim = jobForm.projectId.trim();
@@ -5073,18 +5366,21 @@ function JobQueryView({
             ) : null}
             <label className="flex items-center gap-2 text-sm text-slate-600 min-w-0">
               <span className="shrink-0">项目</span>
-              <select
-                value={jobQueryProjectFilter}
-                onChange={(e) => setJobQueryProjectFilter(e.target.value)}
-                className="min-w-[10rem] max-w-[20rem] border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-200"
-              >
-                <option value="">全部</option>
-                {jobQueryProjectFilterOptions.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.id === 'UNASSIGNED' ? '未分配项目岗位' : p.name || p.id}
-                  </option>
-                ))}
-              </select>
+              <div className="min-w-[10rem] max-w-[20rem] flex-1">
+                <SearchableSelect
+                  value={jobQueryProjectFilter}
+                  onChange={setJobQueryProjectFilter}
+                  placeholder="全部"
+                  searchPlaceholder="搜索项目…"
+                  options={[
+                    { value: '', label: '全部' },
+                    ...jobQueryProjectFilterOptions.map((p) => ({
+                      value: p.id,
+                      label: p.id === 'UNASSIGNED' ? '未分配项目岗位' : p.name || p.id
+                    }))
+                  ]}
+                />
+              </div>
             </label>
           </div>
           {currentRole !== 'recruiter' ? (
@@ -5144,11 +5440,15 @@ function JobQueryView({
         ) : null}
 
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm min-w-[1040px]">
+          <table
+            className="table-fixed text-left text-sm"
+            ref={cols.tableRef} style={cols.tableStyle}
+          >
+            <colgroup>{cols.colNodes}</colgroup>
             <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
               <tr>
                 {currentRole === 'recruiting_manager' ? (
-                  <th className="pl-4 pr-1 py-3 w-10 text-center">
+                  <ResizableTh col={cols.byId.check} className="pl-4 pr-1 py-3 text-center" resizable={false}>
                     <input
                       ref={rmBatchSelectAllRef}
                       type="checkbox"
@@ -5162,25 +5462,26 @@ function JobQueryView({
                       title="全选或取消本页表格中您可编辑的岗位"
                       aria-label="全选本页可编辑岗位"
                     />
-                  </th>
+                  </ResizableTh>
                 ) : null}
-                <th className="px-5 py-3 font-medium whitespace-nowrap">项目</th>
-                <th className="px-5 py-3 font-medium whitespace-nowrap">交付负责人</th>
-                <th
+                <ResizableTh col={cols.byId.project} className="px-5 py-3 font-medium whitespace-nowrap">项目</ResizableTh>
+                <ResizableTh col={cols.byId.deliveryOwner} className="px-5 py-3 font-medium whitespace-nowrap">交付负责人</ResizableTh>
+                <ResizableTh
+                  col={cols.byId.recruitDept}
                   className="px-5 py-3 font-medium whitespace-nowrap"
                   title="按岗位「招聘人员」在用户表中的所属部门聚合，可对应多个招聘部门；多位项目招聘负责人可为同一岗位各自添加本部门专员，列表会合并展示。"
                 >
                   招聘部门
-                </th>
-                <th className="px-5 py-3 font-medium whitespace-nowrap">岗位名称</th>
-                <th className="px-5 py-3 font-medium whitespace-nowrap" title="需求人数（Headcount）">
+                </ResizableTh>
+                <ResizableTh col={cols.byId.title} className="px-5 py-3 font-medium whitespace-nowrap">岗位名称</ResizableTh>
+                <ResizableTh col={cols.byId.demand} className="px-5 py-3 font-medium whitespace-nowrap" title="需求人数（Headcount）">
                   招聘人数（HC）
-                </th>
-                <th className="px-5 py-3 font-medium whitespace-nowrap">薪资范围</th>
-                <th className="px-5 py-3 font-medium whitespace-nowrap">地点</th>
-                <th className="px-5 py-3 font-medium whitespace-nowrap">岗位日期</th>
-                <th className="px-5 py-3 font-medium whitespace-nowrap">项目状态</th>
-                <th className="px-5 py-3 font-medium text-right whitespace-nowrap">操作</th>
+                </ResizableTh>
+                <ResizableTh col={cols.byId.salary} className="px-5 py-3 font-medium whitespace-nowrap">薪资范围</ResizableTh>
+                <ResizableTh col={cols.byId.location} className="px-5 py-3 font-medium whitespace-nowrap">地点</ResizableTh>
+                <ResizableTh col={cols.byId.jobDate} className="px-5 py-3 font-medium whitespace-nowrap">岗位日期</ResizableTh>
+                <ResizableTh col={cols.byId.status} className="px-5 py-3 font-medium whitespace-nowrap">项目状态</ResizableTh>
+                <ResizableTh col={cols.byId.actions} className="px-5 py-3 font-medium text-right whitespace-nowrap">操作</ResizableTh>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -5265,20 +5566,31 @@ function JobQueryView({
                         </span>
                       </td>
                       <td className="px-5 py-4 text-slate-700 align-top max-w-[160px]">
-                        <span className="line-clamp-2" title={deliveryOwner}>
+                        <span className="line-clamp-2" title={`交付负责人：${deliveryOwner}`}>
                           {deliveryOwner}
                         </span>
                       </td>
                       <td className="px-5 py-4 text-slate-700 align-top max-w-[140px]">
-                        <span className="line-clamp-2" title={recruitDeptTitle}>
+                        <span className="line-clamp-2" title={`招聘部门：${recruitDept || '未分配'}`}>
                           {recruitDept}
                         </span>
                       </td>
                       <td className="px-5 py-4 align-top min-w-[140px]">
-                        <p className="font-semibold text-slate-900">{job.title}</p>
-                        <p className="text-xs font-mono text-slate-500 mt-0.5" title="岗位码，用于筛查/邀请/报告关联">
-                          {job.id}
-                        </p>
+                        <p className="font-semibold text-slate-900" title={job.title}>{job.title}</p>
+                        <div className="mt-0.5 flex items-center gap-2">
+                          <p
+                            className="text-xs font-mono text-slate-500"
+                            title={`岗位码：${job.id}。双击复制`}
+                            onDoubleClick={() => handleCopyJobCode(job.id)}
+                          >
+                            {job.id}
+                          </p>
+                          {copiedJobCode === job.id ? (
+                            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
+                              复制成功
+                            </span>
+                          ) : null}
+                        </div>
                       </td>
                       <td
                         className="px-5 py-4 text-slate-800 font-medium tabular-nums align-top whitespace-nowrap"
@@ -5300,7 +5612,7 @@ function JobQueryView({
                       </td>
                       <td className="px-5 py-4 align-top">
                         <span
-                          className={`inline-flex px-2.5 py-1 rounded-md text-xs font-medium border ${
+                          className={`inline-flex whitespace-nowrap px-2.5 py-1 rounded-md text-xs font-medium border ${
                             statusMuted
                               ? 'bg-slate-100 text-slate-600 border-slate-200'
                               : 'bg-emerald-50 text-emerald-800 border-emerald-100'
@@ -5381,7 +5693,11 @@ function JobQueryView({
               role="dialog"
               aria-modal="true"
               aria-labelledby="rm-batch-assign-title"
-              onClick={() => !rmBatchApplying && setRmBatchAssignOpen(false)}
+              onClick={() => {
+                if (rmBatchApplying) return;
+                if (!confirmDiscardDialogChanges(Boolean(rmBatchRecruiters.trim()))) return;
+                setRmBatchAssignOpen(false);
+              }}
             >
               <div
                 className="bg-white rounded-xl shadow-xl border border-slate-200 w-full max-w-lg max-h-[min(90vh,640px)] flex flex-col"
@@ -5394,7 +5710,11 @@ function JobQueryView({
                   <button
                     type="button"
                     disabled={rmBatchApplying}
-                    onClick={() => setRmBatchAssignOpen(false)}
+                    onClick={() => {
+                      if (rmBatchApplying) return;
+                      if (!confirmDiscardDialogChanges(Boolean(rmBatchRecruiters.trim()))) return;
+                      setRmBatchAssignOpen(false);
+                    }}
                     className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
                     aria-label="关闭"
                   >
@@ -5476,7 +5796,11 @@ function JobQueryView({
                     type="button"
                     className={btnSecondarySm}
                     disabled={rmBatchApplying}
-                    onClick={() => setRmBatchAssignOpen(false)}
+                    onClick={() => {
+                      if (rmBatchApplying) return;
+                      if (!confirmDiscardDialogChanges(Boolean(rmBatchRecruiters.trim()))) return;
+                      setRmBatchAssignOpen(false);
+                    }}
                   >
                     取消
                   </button>
@@ -5839,6 +6163,9 @@ function mapScreeningRow(r: {
   evaluation_json?: unknown
   file_name?: string | null
   has_original_file?: unknown
+  shenpu_resume_status?: unknown
+  shenpu_resume_progress?: unknown
+  shenpu_resume_stage?: unknown
   resume_plaintext?: string | null
   uploader_username?: string | null
   job_project_name?: string | null
@@ -5916,6 +6243,14 @@ function mapScreeningRow(r: {
     fileName:
       r.file_name != null && String(r.file_name).trim() ? String(r.file_name).trim().slice(0, 255) : undefined,
     hasOriginalFile: Number(r.has_original_file) === 1,
+    shenpuResumeStatus:
+      r.shenpu_resume_status === 'generating' ||
+      r.shenpu_resume_status === 'ready' ||
+      r.shenpu_resume_status === 'failed'
+        ? r.shenpu_resume_status
+        : 'missing',
+    shenpuResumeProgress: Math.max(0, Math.min(100, Math.round(Number(r.shenpu_resume_progress) || 0))),
+    shenpuResumeStage: String(r.shenpu_resume_stage || '').trim() || undefined,
     resumePlainPreview:
       r.resume_plaintext != null && String(r.resume_plaintext).trim()
         ? String(r.resume_plaintext).trim()
@@ -6316,12 +6651,14 @@ function ResumeProfileEditDialog({
   useAdminOverlayLockAndEscape(Boolean(resume), () => {
     if (!profileSavingRef.current) onClose()
   })
+  const profileInitialSnapshotRef = useRef<string>('')
 
   useEffect(() => {
     if (!resume || !apiBase || !hasToken) {
       setProfileDraft({})
       setProfileLoading(false)
       setProfileError('')
+      profileInitialSnapshotRef.current = ''
       return
     }
     let cancelled = false
@@ -6333,7 +6670,7 @@ function ResumeProfileEditDialog({
         if (!r.ok) throw adminJsonFailError(r, j, '加载失败')
         const d = (j.data || {}) as Record<string, unknown>
         if (cancelled) return
-        setProfileDraft({
+        const next: Record<string, string> = {
           candidate_name: String(d.candidate_name || resume.name || ''),
           gender: String(d.gender || ''),
           age: d.age == null ? '' : String(d.age),
@@ -6355,7 +6692,9 @@ function ResumeProfileEditDialog({
           has_degree: d.has_degree == null ? '' : String(d.has_degree),
           is_unified_enrollment: d.is_unified_enrollment == null ? '' : String(d.is_unified_enrollment),
           verifiable: d.verifiable == null ? '' : String(d.verifiable)
-        })
+        }
+        setProfileDraft(next)
+        profileInitialSnapshotRef.current = JSON.stringify(next)
       })
       .catch((e) => {
         if (!cancelled) setProfileError(userFacingApiError(e, '加载详情失败'))
@@ -6367,6 +6706,16 @@ function ResumeProfileEditDialog({
       cancelled = true
     }
   }, [resume, apiBase, hasToken])
+
+  const handleProfileClose = useCallback(() => {
+    if (profileSaving) return
+    const dirty = profileInitialSnapshotRef.current
+      ? JSON.stringify(profileDraft) !== profileInitialSnapshotRef.current
+      : false
+    if (!confirmDiscardDialogChanges(dirty)) return
+    profileInitialSnapshotRef.current = ''
+    onClose()
+  }, [profileSaving, profileDraft, onClose])
 
   const saveResumeProfile = useCallback(async () => {
     if (!resume || !apiBase || !hasToken) return
@@ -6459,7 +6808,7 @@ function ResumeProfileEditDialog({
       role="dialog"
       aria-modal="true"
       aria-labelledby="resume-profile-title"
-      onClick={() => !profileSaving && onClose()}
+      onClick={handleProfileClose}
     >
       <motion.div
         initial={{ opacity: 0, scale: 0.96, y: 8 }}
@@ -6475,7 +6824,7 @@ function ResumeProfileEditDialog({
           </h3>
           <button
             type="button"
-            onClick={() => !profileSaving && onClose()}
+            onClick={handleProfileClose}
             className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
           >
             <XCircle className="w-5 h-5" />
@@ -6567,23 +6916,23 @@ function ResumeProfileEditDialog({
                 <label className="text-xs text-slate-600">
                   <span className="text-red-500 mr-0.5" aria-hidden>*</span>
                   岗位
-                  <select
-                    value={String(profileDraft.job_title || '').trim()}
-                    onChange={(e) => setProfileDraft((d) => ({ ...d, job_title: e.target.value }))}
-                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm"
-                  >
-                    <option value="">请选择</option>
-                    {(() => {
-                      const rawJt = String(profileDraft.job_title || '').trim()
-                      if (!rawJt || isStandardProfileJobTitleIn(rawJt, jobRoleOptions)) return null
-                      return <option value={rawJt}>{rawJt}（请改为标准项）</option>
-                    })()}
-                    {jobRoleOptions.map((base) => (
-                      <option key={base} value={base}>
-                        {base}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="mt-1">
+                    <SearchableSelect
+                      value={String(profileDraft.job_title || '').trim()}
+                      onChange={(job_title) => setProfileDraft((d) => ({ ...d, job_title }))}
+                      placeholder="请选择"
+                      searchPlaceholder="搜索岗位…"
+                      invalidValueLabel={
+                        (() => {
+                          const rawJt = String(profileDraft.job_title || '').trim()
+                          return rawJt && !isStandardProfileJobTitleIn(rawJt, jobRoleOptions)
+                            ? `${rawJt}（请改为标准项）`
+                            : undefined
+                        })()
+                      }
+                      options={jobRoleOptions.map((base) => ({ value: base, label: base }))}
+                    />
+                  </div>
                 </label>
                 <label className="text-xs text-slate-600">
                   <span className="text-red-500 mr-0.5" aria-hidden>*</span>
@@ -6752,7 +7101,7 @@ function ResumeProfileEditDialog({
           {profileError ? <p className="text-xs text-red-600">{profileError}</p> : null}
         </div>
         <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 flex justify-end gap-2 rounded-b-xl">
-          <button type="button" className={btnSecondarySm} onClick={() => onClose()} disabled={profileSaving}>
+          <button type="button" className={btnSecondarySm} onClick={handleProfileClose} disabled={profileSaving}>
             取消
           </button>
           <button
@@ -6787,6 +7136,25 @@ function LibraryTriCell({ v }: { v: boolean | null }) {
   return <span className="text-slate-300">—</span>;
 }
 
+const RESUME_LIBRARY_COLUMNS: ColumnSpec[] = [
+  { id: 'name', defaultWidth: 160, minWidth: 120, maxWidth: 300 },
+  { id: 'gender', defaultWidth: 82, minWidth: 70, maxWidth: 130 },
+  { id: 'age', defaultWidth: 82, minWidth: 70, maxWidth: 130 },
+  { id: 'workYears', defaultWidth: 110, minWidth: 90, maxWidth: 180 },
+  { id: 'phone', defaultWidth: 150, minWidth: 120, maxWidth: 220 },
+  { id: 'major', defaultWidth: 130, minWidth: 100, maxWidth: 260 },
+  { id: 'education', defaultWidth: 110, minWidth: 90, maxWidth: 180 },
+  { id: 'position', defaultWidth: 170, minWidth: 130, maxWidth: 320 },
+  { id: 'hasDegree', defaultWidth: 120, minWidth: 100, maxWidth: 180 },
+  { id: 'unifiedEnroll', defaultWidth: 120, minWidth: 100, maxWidth: 180 },
+  { id: 'expectedSalary', defaultWidth: 140, minWidth: 110, maxWidth: 220 },
+  { id: 'checkable', defaultWidth: 120, minWidth: 100, maxWidth: 180 },
+  { id: 'channel', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
+  { id: 'uploaded', defaultWidth: 120, minWidth: 100, maxWidth: 180 },
+  { id: 'uploadTime', defaultWidth: 150, minWidth: 120, maxWidth: 220 },
+  { id: 'actions', defaultWidth: 150, minWidth: 120, maxWidth: 260 }
+];
+
 function ResumeLibraryView({
   currentRole,
   authProfile
@@ -6794,6 +7162,7 @@ function ResumeLibraryView({
   currentRole: Role;
   authProfile: AdminLoginProfile | null;
 }) {
+  const cols = useColumnWidths('resume-library', RESUME_LIBRARY_COLUMNS);
   const [sessRev, setSessRev] = useState(0);
   useEffect(() => subscribeAdminSession(() => setSessRev((n) => n + 1)), []);
   const apiBase = resolveMiniappApiBase();
@@ -7250,18 +7619,13 @@ function ResumeLibraryView({
           </div>
           <div className="min-w-0">
             <label className={libFilterLabel}>职位</label>
-            <select
+            <SearchableSelect
               value={libFilterDraft.jobTitle}
-              onChange={(e) => setLibFilterDraft((d) => ({ ...d, jobTitle: e.target.value }))}
-              className={libFilterCtrl}
-            >
-              <option value="">所有</option>
-              {libJobRoleOptions.map((opt) => (
-                <option key={opt} value={opt}>
-                  {opt}
-                </option>
-              ))}
-            </select>
+              onChange={(jobTitle) => setLibFilterDraft((d) => ({ ...d, jobTitle }))}
+              placeholder="所有"
+              searchPlaceholder="搜索职位…"
+              options={[{ value: '', label: '所有' }, ...libJobRoleOptions.map((opt) => ({ value: opt, label: opt }))]}
+            />
           </div>
           <div className="min-w-0 sm:col-span-3 lg:col-span-1">
             <label className={libFilterLabel}>关键词</label>
@@ -7407,25 +7771,29 @@ function ResumeLibraryView({
           ) : null}
           {pagedRows.length > 0 ? (
             <div className="max-w-full overflow-x-auto rounded-lg border border-slate-200">
-              <table className="w-full min-w-[52rem] border-collapse text-center text-[11px] text-slate-800 [&_th]:px-0.5 [&_th]:py-2 [&_td]:px-0.5 [&_td]:py-1.5">
+              <table
+                className="table-fixed border-collapse text-center text-[11px] text-slate-800 [&_th]:px-0.5 [&_th]:py-2 [&_td]:px-0.5 [&_td]:py-1.5"
+                ref={cols.tableRef} style={cols.tableStyle}
+              >
+                <colgroup>{cols.colNodes}</colgroup>
                 <thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50/95 text-[10px] font-medium text-slate-600">
                   <tr>
-                    <th>姓名</th>
-                    <th>性别</th>
-                    <th>年龄</th>
-                    <th className="whitespace-nowrap">工作经验</th>
-                    <th>手机号</th>
-                    <th>专业</th>
-                    <th>学历</th>
-                    <th>职位</th>
-                    <th className="whitespace-nowrap">是否有学位</th>
-                    <th className="whitespace-nowrap">是否统招</th>
-                    <th className="whitespace-nowrap">期望薪资</th>
-                    <th className="whitespace-nowrap">是否可查</th>
-                    <th className="whitespace-nowrap">招聘渠道</th>
-                    <th className="whitespace-nowrap">上传简历</th>
-                    <th className="whitespace-nowrap">上传时间</th>
-                    <th className="w-[6.5rem] whitespace-nowrap text-right">操作</th>
+                    <ResizableTh col={cols.byId.name}>姓名</ResizableTh>
+                    <ResizableTh col={cols.byId.gender}>性别</ResizableTh>
+                    <ResizableTh col={cols.byId.age}>年龄</ResizableTh>
+                    <ResizableTh col={cols.byId.workYears} className="whitespace-nowrap">工作经验</ResizableTh>
+                    <ResizableTh col={cols.byId.phone}>手机号</ResizableTh>
+                    <ResizableTh col={cols.byId.major}>专业</ResizableTh>
+                    <ResizableTh col={cols.byId.education}>学历</ResizableTh>
+                    <ResizableTh col={cols.byId.position}>职位</ResizableTh>
+                    <ResizableTh col={cols.byId.hasDegree} className="whitespace-nowrap">是否有学位</ResizableTh>
+                    <ResizableTh col={cols.byId.unifiedEnroll} className="whitespace-nowrap">是否统招</ResizableTh>
+                    <ResizableTh col={cols.byId.expectedSalary} className="whitespace-nowrap">期望薪资</ResizableTh>
+                    <ResizableTh col={cols.byId.checkable} className="whitespace-nowrap">是否可查</ResizableTh>
+                    <ResizableTh col={cols.byId.channel} className="whitespace-nowrap">招聘渠道</ResizableTh>
+                    <ResizableTh col={cols.byId.uploaded} className="whitespace-nowrap">上传简历</ResizableTh>
+                    <ResizableTh col={cols.byId.uploadTime} className="whitespace-nowrap">上传时间</ResizableTh>
+                    <ResizableTh col={cols.byId.actions} className="whitespace-nowrap text-right">操作</ResizableTh>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -7692,6 +8060,21 @@ function ResumeLibraryView({
   );
 }
 
+const RESUME_SCREENING_COLUMNS: ColumnSpec[] = [
+  { id: 'check', defaultWidth: 56, minWidth: 48, maxWidth: 72 },
+  { id: 'name', defaultWidth: 170, minWidth: 130, maxWidth: 340 },
+  { id: 'project', defaultWidth: 180, minWidth: 140, maxWidth: 360 },
+  { id: 'phone', defaultWidth: 150, minWidth: 120, maxWidth: 220 },
+  { id: 'job', defaultWidth: 220, minWidth: 170, maxWidth: 420 },
+  { id: 'score', defaultWidth: 100, minWidth: 82, maxWidth: 140 },
+  { id: 'conclusion', defaultWidth: 130, minWidth: 100, maxWidth: 240 },
+  { id: 'stage', defaultWidth: 180, minWidth: 140, maxWidth: 300 },
+  { id: 'uploader', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
+  { id: 'uploadTime', defaultWidth: 150, minWidth: 120, maxWidth: 220 },
+  { id: 'shenpuResume', defaultWidth: 180, minWidth: 140, maxWidth: 280 },
+  { id: 'actions', defaultWidth: 260, minWidth: 220, maxWidth: 420 }
+];
+
 function ResumeScreeningView({
   currentRole,
   authProfile
@@ -7699,6 +8082,7 @@ function ResumeScreeningView({
   currentRole: Role;
   authProfile: AdminLoginProfile | null;
 }) {
+  const cols = useColumnWidths('resume-screening', RESUME_SCREENING_COLUMNS);
   const [resumes, setResumes] = useState<Resume[]>([]);
   const [sessRev, setSessRev] = useState(0);
   useEffect(() => subscribeAdminSession(() => setSessRev((n) => n + 1)), []);
@@ -7719,9 +8103,18 @@ function ResumeScreeningView({
   const [inviteModal, setInviteModal] = useState<
     null | { kind: 'success'; inviteCode: string; jobCode: string } | { kind: 'error'; message: string }
   >(null);
+  const [inviteCopyHint, setInviteCopyHint] = useState('');
+  const inviteCopyHintTimerRef = useRef<number | null>(null);
+  const [invitePromptTemplates, setInvitePromptTemplates] = useState<InterviewPromptTemplateRow[]>([]);
+  const [invitePromptLoading, setInvitePromptLoading] = useState(false);
+  const [invitePromptPicker, setInvitePromptPicker] = useState<null | { jobCode: string; screeningId: string; candidateName: string }>(null);
+  const [selectedInvitePromptTemplateId, setSelectedInvitePromptTemplateId] = useState('');
   const [selectedJobCode, setSelectedJobCode] = useState('');
   const [uploading, setUploading] = useState(false);
   const [uploadHint, setUploadHint] = useState('');
+  const [uploadTask, setUploadTask] = useState<ResumeUploadTask | null>(null);
+  const [uploadTaskJobLabel, setUploadTaskJobLabel] = useState('');
+  const [uploadTaskProjectLabel, setUploadTaskProjectLabel] = useState('');
   const [screenListError, setScreenListError] = useState('');
   const [screenListPage, setScreenListPage] = useState(1);
   const [screenPageSize, setScreenPageSize] = useState(10);
@@ -7881,6 +8274,9 @@ function ResumeScreeningView({
           evaluation_json?: unknown
           file_name?: string | null
           has_original_file?: unknown
+          shenpu_resume_status?: unknown
+          shenpu_resume_progress?: unknown
+          shenpu_resume_stage?: unknown
           resume_plaintext?: string | null
           uploader_username?: string | null
           job_project_name?: string | null
@@ -7920,6 +8316,47 @@ function ResumeScreeningView({
   useEffect(() => {
     loadScreenings();
   }, [loadScreenings]);
+
+  useEffect(() => {
+    if (!resumes.some((x) => x.shenpuResumeStatus === 'generating')) return;
+    const timer = window.setInterval(() => loadScreenings(), 4000);
+    return () => window.clearInterval(timer);
+  }, [loadScreenings, resumes]);
+
+  useEffect(() => {
+    if (!apiBase || !hasToken || !uploadTask?.taskId) return;
+    if (uploadTask.status === 'failed') return;
+    const shouldPoll =
+      uploadTask.status !== 'done' ||
+      uploadTask.shenpuStatus === 'generating' ||
+      uploadTask.shenpuStatus === 'missing';
+    if (!shouldPoll) return;
+    let stopped = false;
+    const poll = () => {
+      void miniappApiFetch(`/api/admin/resume-screen/tasks/${encodeURIComponent(uploadTask.taskId)}`)
+        .then(async (r) => {
+          const j = (await r.json().catch(() => ({}))) as { data?: ResumeUploadTask; message?: string };
+          if (!r.ok || !j.data) throw new Error(j.message || '任务进度加载失败');
+          if (stopped) return;
+          setUploadTask(j.data);
+          if (j.data.status === 'done') loadScreenings();
+        })
+        .catch((e: unknown) => {
+          if (stopped) return;
+          setUploadTask((prev) =>
+            prev && prev.taskId === uploadTask.taskId
+              ? { ...prev, status: 'failed', error: e instanceof Error ? e.message : '任务进度加载失败' }
+              : prev
+          );
+        });
+    };
+    poll();
+    const timer = window.setInterval(poll, 1800);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [apiBase, hasToken, loadScreenings, uploadTask?.taskId, uploadTask?.status, uploadTask?.shenpuStatus]);
 
   useEffect(() => {
     if (!apiBase || !hasToken) {
@@ -8066,6 +8503,34 @@ function ResumeScreeningView({
           title: '无法打开文件',
           message: userFacingApiError(e, '获取简历文件失败')
         });
+      } finally {
+        setFileBusyId(null);
+      }
+    },
+    [apiBase, hasToken]
+  );
+
+  const downloadShenpuResume = useCallback(
+    async (resume: Resume) => {
+      if (!apiBase || !hasToken || resume.shenpuResumeStatus !== 'ready') return;
+      setFileBusyId(resume.id);
+      try {
+        const r = await miniappApiFetch(
+          `/api/admin/resume-screenings/${encodeURIComponent(resume.id)}/shenpu-resume`
+        );
+        if (!r.ok) {
+          const j = (await r.json().catch(() => ({}))) as { message?: string };
+          throw new Error(j.message || `获取申朴简历失败 ${r.status}`);
+        }
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${resume.name || '候选人'}-申朴简历.pdf`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+      } catch (e) {
+        window.alert(e instanceof Error ? e.message : '获取申朴简历失败');
       } finally {
         setFileBusyId(null);
       }
@@ -8230,6 +8695,29 @@ function ResumeScreeningView({
   ]);
 
   useEffect(() => {
+    if (!apiBase || !hasToken) {
+      setInvitePromptTemplates([]);
+      return;
+    }
+    setInvitePromptLoading(true);
+    miniappApiFetch('/api/admin/interview-question-prompt-templates')
+      .then(async (r) => {
+        const j = (await r.json().catch(() => ({}))) as InterviewPromptTemplatesPayload;
+        if (!r.ok || !Array.isArray(j.data)) throw new Error(j.message || '加载提示词模板失败');
+        const enabledRows = j.data.filter((x) => x.enabled);
+        setInvitePromptTemplates(enabledRows);
+        setSelectedInvitePromptTemplateId((prev) => {
+          if (prev && enabledRows.some((x) => x.id === prev)) return prev;
+          return enabledRows.find((x) => x.isDefault)?.id || enabledRows[0]?.id || '';
+        });
+      })
+      .catch(() => {
+        setInvitePromptTemplates([]);
+      })
+      .finally(() => setInvitePromptLoading(false));
+  }, [apiBase, hasToken, sessRev]);
+
+  useEffect(() => {
     if (jobsForUploadSelect.length === 0) {
       setSelectedJobCode('');
       return;
@@ -8242,7 +8730,7 @@ function ResumeScreeningView({
     });
   }, [jobsForUploadSelect]);
 
-  const handleMiniappInvite = async (jobCode: string, screeningId?: string) => {
+  const handleMiniappInvite = async (jobCode: string, screeningId?: string, promptTemplateId?: string) => {
     setInviteModal(null);
     setCreatingInvite(jobCode);
     try {
@@ -8252,6 +8740,8 @@ function ResumeScreeningView({
         const sid = Number(screeningId);
         if (Number.isFinite(sid) && sid > 0) body.screeningId = sid;
       }
+      const tpl = Number(promptTemplateId || selectedInvitePromptTemplateId);
+      if (Number.isFinite(tpl) && tpl > 0) body.promptTemplateId = tpl;
       const r = await miniappApiFetch('/api/admin/invitations', {
         method: 'POST',
         body: JSON.stringify(body)
@@ -8274,17 +8764,45 @@ function ResumeScreeningView({
     }
   };
 
-  const copyInviteCode = (code: string) => {
-    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-      void navigator.clipboard.writeText(code);
+  const showInviteCopyHint = useCallback((message: string) => {
+    setInviteCopyHint(message);
+    if (inviteCopyHintTimerRef.current) {
+      window.clearTimeout(inviteCopyHintTimerRef.current);
     }
+    inviteCopyHintTimerRef.current = window.setTimeout(() => {
+      setInviteCopyHint('');
+      inviteCopyHintTimerRef.current = null;
+    }, 1800);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (inviteCopyHintTimerRef.current) window.clearTimeout(inviteCopyHintTimerRef.current);
+    };
+  }, []);
+
+  const copyInviteCode = async (code: string) => {
+    const ok = await copyTextToClipboard(code);
+    showInviteCopyHint(ok ? '已成功复制到剪切板～' : '复制失败，请手动复制');
+  };
+
+  const openInvitePromptPicker = (jobCode: string, resume: Resume) => {
+    const fallback = invitePromptTemplates.find((x) => x.isDefault)?.id || invitePromptTemplates[0]?.id || '';
+    setSelectedInvitePromptTemplateId((prev) =>
+      prev && invitePromptTemplates.some((x) => x.id === prev) ? prev : fallback
+    );
+    setInvitePromptPicker({
+      jobCode,
+      screeningId: resume.id,
+      candidateName: pickCandidateDisplayName(resume.name, resume.evaluationJson)
+    });
   };
 
   const handleInviteFromResume = (resume: Resume) => {
     if (resume.jobCode) {
       const byCode = inviteJobs.find((j) => j.job_code === resume.jobCode);
       if (byCode) {
-        void handleMiniappInvite(byCode.job_code, resume.id);
+        openInvitePromptPicker(byCode.job_code, resume);
         return;
       }
     }
@@ -8307,7 +8825,7 @@ function ResumeScreeningView({
       });
       return;
     }
-    void handleMiniappInvite(matched.job_code, resume.id);
+    openInvitePromptPicker(matched.job_code, resume);
   };
 
   const runUpload = (file: File | null) => {
@@ -8320,30 +8838,23 @@ function ResumeScreeningView({
       );
       return;
     }
+    const selectedJob = jobsForUploadSelect.find((j) => j.job_code === selectedJobCode);
+    const selectedProject = projectFilterOptions.find((p) => p.id === resumeProjectFilter.trim());
     setUploadHint('');
+    setUploadTask(null);
+    setUploadTaskJobLabel(selectedJob ? `${selectedJob.title} (${selectedJob.job_code})` : selectedJobCode);
+    setUploadTaskProjectLabel(selectedProject?.name || '');
     setUploading(true);
     const fd = new FormData();
     fd.append('file', file);
     fd.append('jobCode', selectedJobCode);
     void miniappApiFetch('/api/admin/resume-screen', { method: 'POST', body: fd })
       .then(async (r) => {
-        const j = (await r.json()) as {
-          message?: string
-          data?: {
-            screeningIncomplete?: boolean
-            status?: string
-            summary?: string
-          }
-        }
-        if (!r.ok) throw adminJsonFailError(r, j, '上传或筛查失败');
-        loadScreenings();
-        if (j.data?.screeningIncomplete === true) {
-          setUploadHint(
-            '未完成 AI 识别，记录已暂存。请尽量使用 Word 或可复制的 PDF（避免纯扫描件）重新上传；若已配置大模型仍如此，请联系管理员。也可删除本条后重传。'
-          );
-        } else {
-          setUploadHint('解析与打分已完成，已加入下方列表。');
-        }
+        const j = (await r.json()) as { data?: ResumeUploadTask; message?: string }
+        if (!r.ok) throw new Error(j.message || 'upload failed');
+        if (!j.data?.taskId) throw new Error('上传任务创建失败');
+        setUploadTask(j.data);
+        setUploadHint('');
         setUploadModalOpen(false);
       })
       .catch((e: unknown) => {
@@ -8351,6 +8862,65 @@ function ResumeScreeningView({
       })
       .finally(() => setUploading(false));
   };
+
+  const uploadTaskActive =
+    Boolean(uploadTask) &&
+    uploadTask?.status !== 'failed' &&
+    (uploadTask?.status !== 'done' || uploadTask?.shenpuStatus === 'generating' || uploadTask?.shenpuStatus === 'missing');
+  const uploadTaskFailed = uploadTask?.status === 'failed';
+  const uploadTaskAllDone = uploadTask?.status === 'done' && uploadTask.shenpuStatus === 'ready';
+  const displayResumes = useMemo(() => {
+    if (!uploadTask) return resumes;
+    const decorated = resumes.map((r) =>
+      uploadTask.screeningId && String(r.id) === String(uploadTask.screeningId)
+        ? {
+            ...r,
+            uploadTaskStatus: uploadTask.status === 'done' ? undefined : uploadTask.status,
+            uploadTaskProgress: uploadTask.uploadProgress,
+            uploadTaskStage: uploadTask.error || uploadTask.uploadStage,
+            uploadTaskFileName: uploadTask.fileName,
+            shenpuResumeStatus:
+              uploadTask.shenpuStatus === 'ready' ||
+              uploadTask.shenpuStatus === 'failed' ||
+              uploadTask.shenpuStatus === 'generating'
+                ? uploadTask.shenpuStatus
+                : r.shenpuResumeStatus,
+            shenpuResumeProgress: Math.max(r.shenpuResumeProgress || 0, uploadTask.shenpuProgress || 0),
+            shenpuResumeStage: uploadTask.shenpuStage || r.shenpuResumeStage
+          } as Resume
+        : r
+    );
+    const hasRealRow = Boolean(uploadTask.screeningId && decorated.some((r) => String(r.id) === String(uploadTask.screeningId)));
+    const stillVisible =
+      (!uploadTask.screeningId || !hasRealRow) &&
+      (uploadTask.status !== 'done' || uploadTask.shenpuStatus === 'generating' || uploadTask.shenpuStatus === 'missing');
+    if (!stillVisible) return decorated;
+    const placeholder: Resume = {
+      id: `upload-task:${uploadTask.taskId}`,
+      name: '简历上传中',
+      phone: undefined,
+      uploaderUsername: authProfile?.username || undefined,
+      job: uploadTaskJobLabel || uploadTask.jobCode,
+      jobCode: uploadTask.jobCode,
+      projectName: uploadTaskProjectLabel || undefined,
+      matchScore: 0,
+      status: uploadTask.error || uploadTask.uploadStage || '原始简历上传提取中',
+      flowStage: '简历上传中',
+      uploadTime: '刚刚',
+      uploadTimeFull: uploadTask.fileName || '简历上传中',
+      fileName: uploadTask.fileName,
+      hasOriginalFile: false,
+      shenpuResumeStatus: uploadTask.shenpuStatus === 'generating' ? 'generating' : 'missing',
+      shenpuResumeProgress: uploadTask.shenpuProgress || 0,
+      shenpuResumeStage: uploadTask.shenpuStage || '等待原始简历提取完成',
+      uploadTaskStatus: uploadTask.status,
+      uploadTaskProgress: uploadTask.uploadProgress,
+      uploadTaskStage: uploadTask.error || uploadTask.uploadStage,
+      uploadTaskFileName: uploadTask.fileName
+    };
+    return [placeholder, ...decorated];
+  }, [authProfile?.username, resumes, uploadTask, uploadTaskJobLabel, uploadTaskProjectLabel]);
+  const hasDisplayResumes = displayResumes.length > 0;
 
   const screeningFilterCtrl =
     'w-full min-h-[2.25rem] rounded-md border border-slate-200 bg-white py-1.5 pl-2 pr-1.5 text-xs leading-normal text-slate-900 outline-none focus:ring-2 focus:ring-indigo-400/40 disabled:bg-slate-100';
@@ -8417,9 +8987,9 @@ function ResumeScreeningView({
             <div className="grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-3 lg:grid-cols-6">
               <div className="min-w-0">
                 <label className={screeningFilterLabel}>项目</label>
-                <select
+                <SearchableSelect
                   value={resumeProjectFilter}
-                  onChange={(e) => setResumeProjectFilter(e.target.value)}
+                  onChange={setResumeProjectFilter}
                   disabled={
                     !apiBase ||
                     !hasToken ||
@@ -8429,49 +8999,59 @@ function ResumeScreeningView({
                     (isDeliveryManager &&
                       (!String(authProfile?.dept || '').trim() || String(authProfile?.dept || '').trim() === '-'))
                   }
-                  className={screeningFilterCtrl}
-                >
-                  <option value="">
-                    {isDeliveryManager
+                  placeholder={
+                    isDeliveryManager
                       ? '本部门全部项目'
                       : isRecruitingManager
                         ? '我的负责项目（全部）'
                         : isRecruiter && recruiterJobCodes.length === 0
-                          ? '暂无分配岗位，无法按项目筛选'
-                          : '全部项目'}
-                  </option>
-                  {projectFilterOptions.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
+                          ? '暂无分配岗位'
+                          : '全部项目'
+                  }
+                  searchPlaceholder="搜索项目…"
+                  options={[
+                    {
+                      value: '',
+                      label: isDeliveryManager
+                        ? '本部门全部项目'
+                        : isRecruitingManager
+                          ? '我的负责项目（全部）'
+                          : isRecruiter && recruiterJobCodes.length === 0
+                            ? '暂无分配岗位'
+                            : '全部项目'
+                    },
+                    ...projectFilterOptions.map((p) => ({ value: p.id, label: p.name }))
+                  ]}
+                />
               </div>
               <div className="min-w-0">
                 <label className={screeningFilterLabel}>岗位</label>
-                <select
+                <SearchableSelect
                   value={selectedJobCode}
-                  onChange={(e) => setSelectedJobCode(e.target.value)}
+                  onChange={setSelectedJobCode}
                   disabled={
                     !jobsForUploadSelect.length || inviteJobsLoading || recruiterScopeLoading || !inviteJobs.length
                   }
-                  className={`${screeningFilterCtrl} disabled:bg-slate-100`}
-                >
-                  {!inviteJobs.length ? (
-                    <option value="">暂无可用岗位，请联系管理员在系统中维护岗位信息</option>
-                  ) : jobsForUploadSelect.length === 0 ? (
-                    <option value="">当前项目下暂无岗位，请更换项目或绑定岗位到项目</option>
-                  ) : (
-                    <>
-                      <option value="">全部</option>
-                      {jobsForUploadSelect.map((j) => (
-                        <option key={j.job_code} value={j.job_code}>
-                          {j.title} ({j.job_code})
-                        </option>
-                      ))}
-                    </>
-                  )}
-                </select>
+                  placeholder={
+                    !inviteJobs.length
+                      ? '暂无岗位'
+                      : jobsForUploadSelect.length === 0
+                        ? '当前项目无岗位'
+                        : '全部'
+                  }
+                  searchPlaceholder="搜索岗位…"
+                  options={
+                    jobsForUploadSelect.length
+                      ? [
+                          { value: '', label: '全部' },
+                          ...jobsForUploadSelect.map((j) => ({
+                            value: j.job_code,
+                            label: `${j.title} (${j.job_code})`
+                          }))
+                        ]
+                      : []
+                  }
+                />
               </div>
               <div className="min-w-0">
                 <label className={screeningFilterLabel}>候选人</label>
@@ -8628,6 +9208,7 @@ function ResumeScreeningView({
               onClick={() => {
                 setUploadModalOpen(true);
                 setUploadHint('');
+                setUploadTask(null);
               }}
               disabled={
                 !apiBase ||
@@ -8646,7 +9227,17 @@ function ResumeScreeningView({
           <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
             <div className="flex shrink-0 flex-row items-center justify-between gap-2 border-b border-slate-100 px-3 py-2 sm:px-4">
               <h3 className="text-sm font-bold text-slate-900">简历列表</h3>
-              <span className="shrink-0 text-xs text-slate-500">当前列表 {screenListTotal} 条</span>
+              <div className="flex shrink-0 items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => cols.resetAll()}
+                  className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-500 hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700"
+                  title="恢复所有列默认宽度"
+                >
+                  恢复列宽
+                </button>
+                <span className="text-xs text-slate-500">当前列表 {screenListTotal} 条</span>
+              </div>
             </div>
             {apiBase && hasToken && resumes.length > 0 ? (
               <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/60 px-3 py-2 sm:px-4">
@@ -8684,38 +9275,46 @@ function ResumeScreeningView({
                   请先完成管理端登录；登录成功后，此处将展示已上传简历的 AI 筛查记录。
                 </p>
               ) : null}
-              {apiBase && hasToken && screenListTotal === 0 ? (
+              {apiBase && hasToken && screenListTotal === 0 && !hasDisplayResumes ? (
                 <p className="text-sm text-slate-500">
                   {resumeProjectFilter.trim() || selectedJobCode.trim()
                     ? '当前项目/岗位筛选下暂无记录，可调整条件或点击「上传简历」补充数据。'
                     : '暂无记录。请点击「上传简历」；若长期无数据，请联系管理员确认系统是否正常。'}
                 </p>
               ) : null}
-              {resumes.length > 0 ? (
+              {hasDisplayResumes ? (
                 <div className="max-w-full overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-                  <table className="min-w-[66rem] w-full table-fixed text-left text-sm text-slate-800">
+                  <table
+                    className="table-fixed text-left text-sm text-slate-800"
+                    ref={cols.tableRef} style={cols.tableStyle}
+                  >
+                    <colgroup>{cols.colNodes}</colgroup>
                     <thead className="bg-slate-50/95 text-slate-600 border-b border-slate-200 text-xs sticky top-0 z-10">
                       <tr>
-                        <th className="w-9 px-1 py-3 text-center">
+                        <ResizableTh col={cols.byId.check} className="px-1 py-3 text-center" resizable={false}>
                           <input
                             type="checkbox"
                             title="全选本页"
                             aria-label="全选本页"
                             checked={
-                              resumes.length > 0 &&
-                              resumes.every((r) => screeningSelection[String(r.id)])
+                              displayResumes.filter((r) => !r.uploadTaskStatus).length > 0 &&
+                              displayResumes
+                                .filter((r) => !r.uploadTaskStatus)
+                                .every((r) => screeningSelection[String(r.id)])
                             }
                             ref={(el) => {
                               if (!el) return;
-                              const n = resumes.length;
-                              const c = resumes.filter((r) => screeningSelection[String(r.id)]).length;
+                              const selectable = displayResumes.filter((r) => !r.uploadTaskStatus);
+                              const n = selectable.length;
+                              const c = selectable.filter((r) => screeningSelection[String(r.id)]).length;
                               el.indeterminate = n > 0 && c > 0 && c < n;
                             }}
                             onChange={(e) => {
                               const on = e.target.checked;
                               setScreeningSelection((prev) => {
                                 const next = { ...prev };
-                                for (const r of resumes) {
+                                for (const r of displayResumes) {
+                                  if (r.uploadTaskStatus) continue;
                                   const k = String(r.id);
                                   if (on) next[k] = true;
                                   else delete next[k];
@@ -8725,32 +9324,37 @@ function ResumeScreeningView({
                             }}
                             className="h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                           />
-                        </th>
-                        <th className="w-[11%] py-3 pl-1.5 pr-0 font-medium">候选人</th>
-                        <th className="w-[10%] py-3 pl-0 pr-1 font-medium">项目</th>
-                        <th className="w-[9%] px-1 py-3 font-medium">手机</th>
-                        <th className="w-[12%] py-3 pl-1 pr-0 font-medium">匹配岗位</th>
-                        <th className="w-[6%] py-3 pl-0 pr-1 text-center font-medium">匹配分</th>
-                        <th className="w-[9%] px-2 py-3 font-medium">流程</th>
-                        <th className="w-[7%] px-2 py-3 font-medium">上传人</th>
-                        <th className="w-[6.25rem] min-w-[6.25rem] max-w-[6.25rem] shrink-0 px-1 py-3 font-medium whitespace-nowrap">
-                          上传时间
-                        </th>
-                        <th className="w-[12.5rem] min-w-[12.5rem] max-w-none shrink-0 border-l border-slate-200 bg-slate-50/95 pl-3 pr-2 py-3 font-medium text-right whitespace-nowrap">
-                          操作
-                        </th>
+                        </ResizableTh>
+                        <ResizableTh col={cols.byId.name} className="py-3 pl-1.5 pr-2 font-medium">候选人</ResizableTh>
+                        <ResizableTh col={cols.byId.project} className="py-3 pl-1 pr-2 font-medium">项目</ResizableTh>
+                        <ResizableTh col={cols.byId.phone} className="px-1 py-3 font-medium">手机</ResizableTh>
+                        <ResizableTh col={cols.byId.job} className="py-3 pl-1 pr-2 font-medium">匹配岗位</ResizableTh>
+                        <ResizableTh col={cols.byId.score} className="py-3 pl-0 pr-1 text-center font-medium">匹配分</ResizableTh>
+                        <ResizableTh col={cols.byId.conclusion} className="px-1 py-3 font-medium">AI 结论</ResizableTh>
+                        <ResizableTh col={cols.byId.stage} className="px-2 py-3 font-medium">流程</ResizableTh>
+                        <ResizableTh col={cols.byId.uploader} className="px-2 py-3 font-medium">上传人</ResizableTh>
+                        <ResizableTh col={cols.byId.uploadTime} className="px-1 py-3 font-medium whitespace-nowrap">上传时间</ResizableTh>
+                        <ResizableTh col={cols.byId.shenpuResume} className="px-2 py-3 font-medium whitespace-nowrap">申朴简历</ResizableTh>
+                        <ResizableTh col={cols.byId.actions} className="border-l border-slate-200 bg-slate-50/95 pl-3 pr-2 py-3 font-medium text-right whitespace-nowrap">操作</ResizableTh>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {resumes.map((resume, idx) => {
+                      {displayResumes.map((resume, idx) => {
                         const uploaderLabel = uploaderDisplayFromUsers(resume.uploaderUsername, screeningHrUsers);
                         const rid = String(resume.id);
+                        const isUploadPlaceholder = rid.startsWith('upload-task:');
+                        const uploadTaskRowFailed = resume.uploadTaskStatus === 'failed';
+                        const isResumeUploading =
+                          resume.uploadTaskStatus === 'queued' ||
+                          resume.uploadTaskStatus === 'running';
+                        const uploadPct = Math.max(0, Math.min(100, Math.round(resume.uploadTaskProgress || 0)));
                         return (
                           <React.Fragment key={resume.id}>
                             <tr className={`align-middle transition-colors hover:bg-indigo-50/40 ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}`}>
                               <td className="w-9 px-1 py-2.5 align-middle text-center">
                                 <input
                                   type="checkbox"
+                                  disabled={isUploadPlaceholder || isResumeUploading || uploadTaskRowFailed}
                                   checked={Boolean(screeningSelection[rid])}
                                   onChange={(e) =>
                                     setScreeningSelection((prev) => {
@@ -8765,12 +9369,17 @@ function ResumeScreeningView({
                                 />
                               </td>
                               <td className="max-w-0 py-2.5 pl-1.5 pr-0">
-                                <div className="flex items-start gap-1.5">
+                                <div className="flex items-start gap-1.5" title={resume.name || ''}>
                                   <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[11px] font-semibold text-indigo-700">
                                     {String(resume.name || '候').trim().slice(0, 1)}
                                   </span>
                                   <div className="min-w-0 flex-1">
                                     <div className="truncate font-semibold leading-tight text-slate-900">{resume.name}</div>
+                                    {isResumeUploading ? (
+                                      <div className="mt-1 truncate text-[11px] text-slate-500" title={resume.uploadTaskFileName || resume.uploadTaskStage || ''}>
+                                        {resume.uploadTaskFileName || resume.uploadTaskStage || '正在处理简历'}
+                                      </div>
+                                    ) : null}
                                   </div>
                                 </div>
                               </td>
@@ -8780,27 +9389,50 @@ function ResumeScreeningView({
                                 </div>
                               </td>
                               <td className="max-w-0 px-1 py-3 font-mono text-xs text-slate-700">
-                                <span className="truncate block">{resume.phone || <span className="text-slate-400">—</span>}</span>
+                                <span className="truncate block" title={resume.phone || ''}>
+                                  {resume.phone || <span className="text-slate-400">—</span>}
+                                </span>
                               </td>
                               <td className="max-w-0 py-3 pl-1 pr-0 text-xs leading-snug text-slate-700">
                                 <div className="line-clamp-3 break-words">{resume.job}</div>
                               </td>
                               <td className="py-3 pl-0 pr-1 text-center tabular-nums">
+                                {isResumeUploading || uploadTaskRowFailed || isUploadPlaceholder ? (
+                                  <div
+                                    className={`mx-auto min-w-12 rounded-md px-1.5 py-1 text-[10px] font-semibold ${
+                                      uploadTaskRowFailed ? 'bg-rose-50 text-rose-700' : 'bg-slate-100 text-slate-500'
+                                    }`}
+                                  >
+                                    {uploadTaskRowFailed ? '失败' : '处理中'}
+                                  </div>
+                                ) : (
+                                  <span
+                                    className={`inline-flex min-w-10 justify-center rounded-md px-2 py-1 text-xs font-semibold ${
+                                      resume.matchScore >= 80
+                                        ? 'bg-emerald-50 text-emerald-700'
+                                        : resume.matchScore >= 60
+                                          ? 'bg-amber-50 text-amber-700'
+                                          : 'bg-rose-50 text-rose-700'
+                                    }`}
+                                  >
+                                    {resume.matchScore}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="max-w-0 min-w-0 px-1 py-2.5 text-[10px] leading-tight text-slate-600">
                                 <span
-                                  className={`inline-flex min-w-10 justify-center rounded-md px-2 py-1 text-xs font-semibold ${
-                                    resume.matchScore >= 80
-                                      ? 'bg-emerald-50 text-emerald-700'
-                                      : resume.matchScore >= 60
-                                        ? 'bg-amber-50 text-amber-700'
-                                        : 'bg-rose-50 text-rose-700'
-                                  }`}
+                                  className="block w-full truncate rounded bg-slate-100 px-1 py-0.5 text-center font-medium text-slate-700"
+                                  title={resume.uploadTaskStage || resume.status}
                                 >
-                                  {resume.matchScore}
+                                  {resume.uploadTaskStage || (isUploadPlaceholder ? '简历处理中' : resume.status)}
                                 </span>
                               </td>
                               <td className="max-w-0 px-2 py-3 text-xs">
                                 {resume.flowStage ? (
-                                  <span className="inline-block max-w-full truncate rounded-md bg-indigo-50 px-1.5 py-0.5 font-medium text-indigo-700">
+                                  <span
+                                    className="inline-block max-w-full truncate rounded-md bg-indigo-50 px-1.5 py-0.5 font-medium text-indigo-700"
+                                    title={resume.flowStage}
+                                  >
                                     {resume.flowStage}
                                   </span>
                                 ) : (
@@ -8820,42 +9452,143 @@ function ResumeScreeningView({
                                   {resume.uploadTime}
                                 </span>
                               </td>
+                              <td className="px-2 py-3 text-xs">
+                                {uploadTaskRowFailed ? (
+                                  <span
+                                    className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 font-semibold text-rose-700"
+                                    title={resume.uploadTaskStage || '简历处理失败'}
+                                  >
+                                    处理失败
+                                  </span>
+                                ) : isResumeUploading && resume.uploadTaskStatus !== 'done' ? (
+                                  <div
+                                    className="min-w-[7.25rem] rounded-lg border border-indigo-200 bg-indigo-50 px-2 py-1.5 text-indigo-800"
+                                    title={resume.uploadTaskStage || '原始简历上传提取中'}
+                                  >
+                                    <div className="flex items-center justify-between gap-1.5 font-semibold">
+                                      <span className="inline-flex items-center gap-1">
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                                        提取中
+                                      </span>
+                                      <span className="tabular-nums">{uploadPct}%</span>
+                                    </div>
+                                    <div className="mt-1 h-1 overflow-hidden rounded-full bg-indigo-100">
+                                      <span
+                                        className="block h-full rounded-full bg-indigo-500 transition-all"
+                                        style={{ width: `${uploadPct}%` }}
+                                      />
+                                    </div>
+                                  </div>
+                                ) : resume.shenpuResumeStatus === 'ready' ? (
+                                  <button
+                                    type="button"
+                                    disabled={fileBusyId === resume.id}
+                                    onClick={() => void downloadShenpuResume(resume)}
+                                    className="inline-flex items-center gap-1.5 rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 font-semibold text-blue-700 shadow-sm transition hover:border-blue-300 hover:bg-blue-100 disabled:opacity-60"
+                                    title="下载申朴简历"
+                                  >
+                                    <Download className="h-3.5 w-3.5" aria-hidden />
+                                    可下载
+                                  </button>
+                                ) : resume.shenpuResumeStatus === 'generating' ? (
+                                  <div
+                                    className="min-w-[7.25rem] rounded-lg border border-amber-200 bg-amber-50 px-2 py-1.5 text-amber-800"
+                                    title={resume.shenpuResumeStage || '申朴简历生成中'}
+                                  >
+                                    <div className="flex items-center justify-between gap-1.5 font-semibold">
+                                      <span className="inline-flex items-center gap-1">
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                                        生成中
+                                      </span>
+                                      <span className="tabular-nums">{resume.shenpuResumeProgress || 0}%</span>
+                                    </div>
+                                    <div className="mt-1 h-1 overflow-hidden rounded-full bg-amber-100">
+                                      <span
+                                        className="block h-full rounded-full bg-amber-500 transition-all"
+                                        style={{ width: `${resume.shenpuResumeProgress || 0}%` }}
+                                      />
+                                    </div>
+                                  </div>
+                                ) : resume.shenpuResumeStatus === 'failed' ? (
+                                  <span
+                                    className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 font-semibold text-rose-700"
+                                    title="申朴简历生成失败"
+                                  >
+                                    生成失败
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 font-medium text-slate-500">
+                                    未生成
+                                  </span>
+                                )}
+                              </td>
                               <td
                                 className={`w-[12.5rem] min-w-[12.5rem] max-w-none shrink-0 border-l border-slate-200 py-2 pl-3 pr-2 text-right align-middle whitespace-nowrap ${
                                   idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/90'
                                 }`}
                               >
                                 <div className="inline-flex flex-nowrap items-center justify-end gap-1">
-                                  <button
-                                    type="button"
-                                    onClick={() => setReportResume(resume)}
-                                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-400/35"
-                                    title="查看报告"
-                                    aria-label="查看报告"
-                                  >
-                                    <FileBarChart className="h-4 w-4" aria-hidden />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setProfileEditResume(resume)}
-                                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-400/35"
-                                    title="简历详情"
-                                    aria-label="简历详情"
-                                  >
-                                    <UserPen className="h-4 w-4" aria-hidden />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleInviteFromResume(resume)}
-                                    disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
-                                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-40"
-                                    title="发起面试"
-                                    aria-label="发起面试"
-                                  >
-                                    <CalendarCheck className="h-4 w-4" aria-hidden />
-                                  </button>
-                                  {resume.hasOriginalFile ? (
+                                  {isResumeUploading || uploadTaskRowFailed || isUploadPlaceholder ? (
+                                    <div
+                                      className={`min-w-[10rem] rounded-lg border px-2 py-1.5 text-left ${
+                                        uploadTaskRowFailed
+                                          ? 'border-rose-200 bg-rose-50 text-rose-800'
+                                          : 'border-indigo-200 bg-indigo-50 text-indigo-800'
+                                      }`}
+                                      title={resume.uploadTaskStage || '简历内容准备中'}
+                                    >
+                                      <div className="flex items-center justify-between gap-2 text-[11px] font-semibold">
+                                        <span className="inline-flex min-w-0 items-center gap-1 truncate">
+                                          {uploadTaskRowFailed ? (
+                                            <XCircle className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                                          ) : (
+                                            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
+                                          )}
+                                          {uploadTaskRowFailed ? '处理失败' : '简历内容准备中'}
+                                        </span>
+                                        <span className="shrink-0 tabular-nums">{uploadPct}%</span>
+                                      </div>
+                                      <div className={`mt-1 h-1 overflow-hidden rounded-full ${uploadTaskRowFailed ? 'bg-rose-100' : 'bg-indigo-100'}`}>
+                                        <span
+                                          className={`block h-full rounded-full transition-all ${uploadTaskRowFailed ? 'bg-rose-500' : 'bg-indigo-500'}`}
+                                          style={{ width: `${uploadPct}%` }}
+                                        />
+                                      </div>
+                                    </div>
+                                  ) : (
                                     <>
+                                      <button
+                                        type="button"
+                                        onClick={() => setReportResume(resume)}
+                                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-400/35"
+                                        title="查看报告"
+                                        aria-label="查看报告"
+                                      >
+                                        <FileBarChart className="h-4 w-4" aria-hidden />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setProfileEditResume(resume)}
+                                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-400/35"
+                                        title="简历详情"
+                                        aria-label="简历详情"
+                                      >
+                                        <UserPen className="h-4 w-4" aria-hidden />
+                                      </button>
+                                      {resume.matchScore >= 60 ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleInviteFromResume(resume)}
+                                      disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
+                                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-40"
+                                      title="发起面试"
+                                      aria-label="发起面试"
+                                    >
+                                      <CalendarCheck className="h-4 w-4" aria-hidden />
+                                    </button>
+                                      ) : null}
+                                      {resume.hasOriginalFile ? (
+                                        <>
                                       <button
                                         type="button"
                                         disabled={fileBusyId === resume.id}
@@ -8876,8 +9609,10 @@ function ResumeScreeningView({
                                       >
                                         <Download className="h-4 w-4" aria-hidden />
                                       </button>
+                                        </>
+                                      ) : null}
                                     </>
-                                  ) : null}
+                                  )}
                                 </div>
                               </td>
                             </tr>
@@ -8927,7 +9662,7 @@ function ResumeScreeningView({
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.96, y: 8 }}
               transition={{ duration: 0.2 }}
-              className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl"
+              className="flex max-h-[90vh] min-h-[min(560px,85vh)] w-full max-w-xl flex-col overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-4">
@@ -8951,13 +9686,13 @@ function ResumeScreeningView({
                   <XCircle className="h-5 w-5" />
                 </button>
               </div>
-              <div className="space-y-3 px-6 py-4">
+              <div className="flex flex-1 flex-col space-y-3 px-6 py-5">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <label className="mb-0.5 block text-xs font-medium text-slate-600">项目</label>
-                    <select
+                    <SearchableSelect
                       value={resumeProjectFilter}
-                      onChange={(e) => setResumeProjectFilter(e.target.value)}
+                      onChange={setResumeProjectFilter}
                       disabled={
                         !apiBase ||
                         !hasToken ||
@@ -8967,49 +9702,56 @@ function ResumeScreeningView({
                         (isDeliveryManager &&
                           (!String(authProfile?.dept || '').trim() || String(authProfile?.dept || '').trim() === '-'))
                       }
-                      className="w-full rounded-lg border border-slate-200 py-2 px-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100"
-                    >
-                      <option value="">
-                        {isDeliveryManager
+                      placeholder={
+                        isDeliveryManager
                           ? '本部门全部项目'
                           : isRecruitingManager
                             ? '我的负责项目（全部）'
                             : isRecruiter && recruiterJobCodes.length === 0
-                              ? '暂无分配岗位，无法按项目筛选'
-                              : '全部项目'}
-                      </option>
-                      {projectFilterOptions.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))}
-                    </select>
+                              ? '暂无分配岗位'
+                              : '全部项目'
+                      }
+                      searchPlaceholder="搜索项目…"
+                      options={[
+                        {
+                          value: '',
+                          label: isDeliveryManager
+                            ? '本部门全部项目'
+                            : isRecruitingManager
+                              ? '我的负责项目（全部）'
+                              : isRecruiter && recruiterJobCodes.length === 0
+                                ? '暂无分配岗位'
+                                : '全部项目'
+                        },
+                        ...projectFilterOptions.map((p) => ({ value: p.id, label: p.name }))
+                      ]}
+                    />
                   </div>
                   <div>
                     <label className="mb-0.5 block text-xs font-medium text-slate-600">目标岗位</label>
-                    <select
+                    <SearchableSelect
                       value={selectedJobCode}
-                      onChange={(e) => setSelectedJobCode(e.target.value)}
+                      onChange={setSelectedJobCode}
                       disabled={
                         !jobsForUploadSelect.length || inviteJobsLoading || recruiterScopeLoading || !inviteJobs.length
                       }
-                      className="w-full rounded-lg border border-slate-200 py-2 px-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100"
-                    >
-                      {!inviteJobs.length ? (
-                        <option value="">暂无可用岗位，请联系管理员在系统中维护岗位信息</option>
-                      ) : jobsForUploadSelect.length === 0 ? (
-                        <option value="">当前项目下暂无岗位，请更换项目或绑定岗位到项目</option>
-                      ) : (
-                        <>
-                          <option value="">请选择具体岗位</option>
-                          {jobsForUploadSelect.map((j) => (
-                            <option key={j.job_code} value={j.job_code}>
-                              {j.title} ({j.job_code})
-                            </option>
-                          ))}
-                        </>
-                      )}
-                    </select>
+                      placeholder={
+                        !inviteJobs.length
+                          ? '暂无岗位'
+                          : jobsForUploadSelect.length === 0
+                            ? '当前项目无岗位'
+                            : '请选择具体岗位'
+                      }
+                      searchPlaceholder="搜索岗位…"
+                      options={
+                        jobsForUploadSelect.length
+                          ? jobsForUploadSelect.map((j) => ({
+                              value: j.job_code,
+                              label: `${j.title} (${j.job_code})`
+                            }))
+                          : []
+                      }
+                    />
                   </div>
                 </div>
                 {uploadHint ? (
@@ -9021,6 +9763,68 @@ function ResumeScreeningView({
                     {uploadHint}
                   </p>
                 ) : null}
+                {uploadTask ? (
+                  <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-slate-900">
+                          {uploadTaskFailed
+                            ? '处理失败'
+                            : uploadTaskAllDone
+                              ? '处理完成'
+                              : '后台处理中'}
+                        </div>
+                        <div className="mt-0.5 truncate text-xs text-slate-500" title={uploadTask.candidateName || uploadTask.jobCode}>
+                          {uploadTask.candidateName || uploadTask.jobCode}
+                        </div>
+                      </div>
+                      {uploadTaskActive ? <Loader2 className="h-4 w-4 shrink-0 animate-spin text-indigo-500" /> : null}
+                    </div>
+                    <div className="space-y-2">
+                      <div>
+                        <div className="mb-1 flex items-center justify-between gap-2 text-xs">
+                          <span className="truncate text-slate-600" title={uploadTask.uploadStage || uploadTask.error || ''}>
+                            原始简历上传提取：{uploadTask.error || uploadTask.uploadStage || '处理中'}
+                          </span>
+                          <span className="shrink-0 tabular-nums text-slate-500">
+                            {Math.max(0, Math.min(100, Math.round(uploadTask.uploadProgress || 0)))}%
+                          </span>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full bg-white">
+                          <div
+                            className={`h-full rounded-full transition-all ${
+                              uploadTaskFailed ? 'bg-amber-500' : 'bg-indigo-500'
+                            }`}
+                            style={{ width: `${Math.max(0, Math.min(100, Math.round(uploadTask.uploadProgress || 0)))}%` }}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <div className="mb-1 flex items-center justify-between gap-2 text-xs">
+                          <span className="truncate text-slate-600" title={uploadTask.shenpuStage || ''}>
+                            申朴标准简历：{uploadTask.shenpuStage || '等待原始简历提取完成'}
+                          </span>
+                          <span className="shrink-0 tabular-nums text-slate-500">
+                            {Math.max(0, Math.min(100, Math.round(uploadTask.shenpuProgress || 0)))}%
+                          </span>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full bg-white">
+                          <div
+                            className={`h-full rounded-full transition-all ${
+                              uploadTask.shenpuStatus === 'failed'
+                                ? 'bg-amber-500'
+                                : uploadTask.shenpuStatus === 'ready'
+                                  ? 'bg-emerald-500'
+                                  : 'bg-sky-500'
+                            }`}
+                            style={{ width: `${Math.max(0, Math.min(100, Math.round(uploadTask.shenpuProgress || 0)))}%` }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    {uploadTask.message ? <div className="text-xs text-slate-500">{uploadTask.message}</div> : null}
+                  </div>
+                ) : null}
                 <input
                   ref={fileInputModalRef}
                   type="file"
@@ -9029,16 +9833,18 @@ function ResumeScreeningView({
                   onChange={(e) => {
                     const f = e.target.files?.[0];
                     e.target.value = '';
-                    runUpload(f || null);
+                    if (!uploadTaskActive) runUpload(f || null);
                   }}
                 />
                 <div
                   role="button"
                   tabIndex={0}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') fileInputModalRef.current?.click();
+                    if (!uploading && !uploadTaskActive && (e.key === 'Enter' || e.key === ' ')) {
+                      fileInputModalRef.current?.click();
+                    }
                   }}
-                  onClick={() => !uploading && fileInputModalRef.current?.click()}
+                  onClick={() => !uploading && !uploadTaskActive && fileInputModalRef.current?.click()}
                   onDragOver={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
@@ -9046,12 +9852,12 @@ function ResumeScreeningView({
                   onDrop={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    if (uploading) return;
+                    if (uploading || uploadTaskActive) return;
                     const f = e.dataTransfer.files?.[0];
                     runUpload(f || null);
                   }}
-                  className={`flex min-h-[120px] flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 px-4 py-4 text-center transition-colors group ${
-                    uploading
+                  className={`flex min-h-[280px] flex-1 flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 px-4 py-8 text-center transition-colors group ${
+                    uploading || uploadTaskActive
                       ? 'cursor-wait opacity-60'
                       : 'cursor-pointer hover:border-indigo-400 hover:bg-slate-50'
                   }`}
@@ -9060,11 +9866,98 @@ function ResumeScreeningView({
                     <UploadCloud className="h-5 w-5 text-indigo-500" />
                   </div>
                   <p className="text-sm font-medium text-slate-700">
-                    {uploading ? '正在解析与打分…' : '点击或拖拽简历到此处'}
+                    {uploading
+                      ? '正在提交任务…'
+                      : uploadTaskActive
+                        ? '后台处理中，可关闭弹窗继续操作'
+                        : '点击或拖拽简历到此处'}
                   </p>
                   <p className="mt-0.5 text-[11px] leading-snug text-slate-500">
                     支持 PDF、DOCX、TXT；旧版 .doc 请另存为 DOCX 后再上传
                   </p>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {invitePromptPicker ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/50"
+            role="dialog"
+            aria-modal="true"
+            onClick={() => setInvitePromptPicker(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              transition={{ duration: 0.2 }}
+              className="bg-white rounded-xl shadow-xl border border-slate-200 w-full max-w-lg flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-4 px-6 py-4 border-b border-slate-100">
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900">选择 AI 面试题模板</h3>
+                  <p className="mt-1 text-xs text-slate-500">
+                    候选人：{invitePromptPicker.candidateName || '—'} · 岗位码 {invitePromptPicker.jobCode}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setInvitePromptPicker(null)}
+                  className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                  aria-label="关闭"
+                >
+                  <XCircle className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="space-y-4 px-6 py-4">
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-slate-700">本次面试使用的模板</label>
+                  <select
+                    value={selectedInvitePromptTemplateId}
+                    onChange={(e) => setSelectedInvitePromptTemplateId(e.target.value)}
+                    disabled={invitePromptLoading || !invitePromptTemplates.length}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100"
+                  >
+                    {invitePromptLoading ? (
+                      <option value="">正在加载模板…</option>
+                    ) : invitePromptTemplates.length ? (
+                      invitePromptTemplates.map((tpl) => (
+                        <option key={tpl.id} value={tpl.id}>
+                          {tpl.name}{tpl.isDefault ? '（默认）' : ''}
+                        </option>
+                      ))
+                    ) : (
+                      <option value="">当前角色没有可用模板，请联系管理员配置</option>
+                    )}
+                  </select>
+                  <p className="mt-2 text-xs leading-relaxed text-slate-500">
+                    这里选择的是 System Prompt 模板；候选人简历、岗位 JD 等数据仍由服务端自动拼接。
+                  </p>
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button type="button" onClick={() => setInvitePromptPicker(null)} className={btnSecondarySm}>
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!selectedInvitePromptTemplateId || Boolean(creatingInvite)}
+                    onClick={() => {
+                      const p = invitePromptPicker;
+                      setInvitePromptPicker(null);
+                      void handleMiniappInvite(p.jobCode, p.screeningId, selectedInvitePromptTemplateId);
+                    }}
+                    className={btnPrimarySmFlex}
+                  >
+                    确认并生成邀请
+                  </button>
                 </div>
               </div>
             </motion.div>
@@ -9121,12 +10014,28 @@ function ResumeScreeningView({
                       </code>
                       <button
                         type="button"
-                        onClick={() => copyInviteCode(inviteModal.inviteCode)}
+                        onClick={() => void copyInviteCode(inviteModal.inviteCode)}
                         className="text-sm font-medium text-indigo-600 hover:text-indigo-800"
                       >
                         复制邀请码
                       </button>
                     </div>
+                    <AnimatePresence>
+                      {inviteCopyHint ? (
+                        <motion.div
+                          initial={{ opacity: 0, y: -4 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -4 }}
+                          transition={{ duration: 0.16 }}
+                          className="mt-3 inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-800 shadow-sm"
+                          role="status"
+                          aria-live="polite"
+                        >
+                          <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden />
+                          {inviteCopyHint}
+                        </motion.div>
+                      ) : null}
+                    </AnimatePresence>
                   </>
                 ) : (
                   <p className="text-sm text-slate-700 leading-relaxed">{inviteModal.message}</p>
@@ -9308,6 +10217,21 @@ function ResumeScreeningView({
   );
 }
 
+const APPLICATION_MGMT_COLUMNS: ColumnSpec[] = [
+  { id: 'candidate', defaultWidth: 170, minWidth: 130, maxWidth: 300 },
+  { id: 'referrer', defaultWidth: 150, minWidth: 120, maxWidth: 260 },
+  { id: 'project', defaultWidth: 220, minWidth: 170, maxWidth: 400 },
+  { id: 'jobTitle', defaultWidth: 230, minWidth: 180, maxWidth: 420 },
+  { id: 'resumeScore', defaultWidth: 120, minWidth: 96, maxWidth: 180 },
+  { id: 'resumeDims', defaultWidth: 240, minWidth: 200, maxWidth: 360 },
+  { id: 'interviewScore', defaultWidth: 120, minWidth: 96, maxWidth: 180 },
+  { id: 'status', defaultWidth: 170, minWidth: 140, maxWidth: 260 },
+  { id: 'stage', defaultWidth: 180, minWidth: 140, maxWidth: 260 },
+  { id: 'aiInterviewer', defaultWidth: 200, minWidth: 160, maxWidth: 340 },
+  { id: 'recruiter', defaultWidth: 170, minWidth: 130, maxWidth: 260 },
+  { id: 'report', defaultWidth: 170, minWidth: 140, maxWidth: 300 }
+];
+
 function ApplicationManagementView({
   currentRole,
   authProfile
@@ -9315,6 +10239,7 @@ function ApplicationManagementView({
   currentRole: Role;
   authProfile: AdminLoginProfile | null;
 }) {
+  const cols = useColumnWidths('application-mgmt', APPLICATION_MGMT_COLUMNS);
   const [rows, setRows] = useState<Array<{
     id: string
     candidateName: string
@@ -9336,6 +10261,7 @@ function ApplicationManagementView({
     referrerLabel: string
     /** 岗位配置的招聘人员（姓名列表） */
     recruitersLabel: string
+    promptTemplateName: string
   }>>([])
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
@@ -9439,7 +10365,8 @@ function ApplicationManagementView({
             status: flowStage,
             interviewOutcome,
             referrerLabel: uploaderDisplayFromUsers(String(row.uploader_username ?? ''), hrUsers),
-            recruitersLabel: '—'
+            recruitersLabel: '—',
+            promptTemplateName: String(row.interview_prompt_template_name || '')
           }
         })
         const projectsPayload = projectsRes.ok
@@ -9661,32 +10588,37 @@ function ApplicationManagementView({
           <div className="border-b border-slate-100 px-4 py-3 text-sm text-red-600 sm:px-6">{err}</div>
         ) : null}
         <div className="overflow-x-auto overscroll-x-contain">
-          <table className="w-full min-w-[86rem] text-left text-sm">
+          <table
+            className="table-fixed text-left text-sm"
+            ref={cols.tableRef} style={cols.tableStyle}
+          >
+            <colgroup>{cols.colNodes}</colgroup>
             <thead className="border-b border-slate-200 bg-white text-slate-600">
               <tr>
-                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">候选人</th>
-                <th className="min-w-[5.5rem] px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">推荐人</th>
-                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">项目</th>
-                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">岗位名称</th>
-                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">简历分</th>
-                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">简历维度</th>
-                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">面试分</th>
-                <th className="min-w-[6.5rem] px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">状态</th>
-                <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">阶段</th>
-                <th className="min-w-[7rem] px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">招聘人员</th>
-                <th className="px-3 py-3 text-right text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">面试报告</th>
+                <ResizableTh col={cols.byId.candidate} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">候选人</ResizableTh>
+                <ResizableTh col={cols.byId.referrer} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">推荐人</ResizableTh>
+                <ResizableTh col={cols.byId.project} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">项目</ResizableTh>
+                <ResizableTh col={cols.byId.jobTitle} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">岗位名称</ResizableTh>
+                <ResizableTh col={cols.byId.resumeScore} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">简历分</ResizableTh>
+                <ResizableTh col={cols.byId.resumeDims} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">简历维度</ResizableTh>
+                <ResizableTh col={cols.byId.interviewScore} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">面试分</ResizableTh>
+                <ResizableTh col={cols.byId.status} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">状态</ResizableTh>
+                <ResizableTh col={cols.byId.stage} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">阶段</ResizableTh>
+                <ResizableTh col={cols.byId.aiInterviewer} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">AI面试官</ResizableTh>
+                <ResizableTh col={cols.byId.recruiter} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">招聘人员</ResizableTh>
+                <ResizableTh col={cols.byId.report} className="px-3 py-3 text-right text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">面试报告</ResizableTh>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
                 <tr>
-                  <td className="px-3 py-8 text-slate-500 sm:px-6" colSpan={11}>
+                  <td className="px-3 py-8 text-slate-500 sm:px-6" colSpan={12}>
                     加载中...
                   </td>
                 </tr>
               ) : appListTotal === 0 ? (
                 <tr>
-                  <td className="px-3 py-8 text-slate-500 sm:px-6" colSpan={11}>
+                  <td className="px-3 py-8 text-slate-500 sm:px-6" colSpan={12}>
                     暂无数据，请先在「简历管理」中上传简历
                   </td>
                 </tr>
@@ -9706,8 +10638,14 @@ function ApplicationManagementView({
                       <span className="line-clamp-2">{row.projectName}</span>
                     </td>
                     <td className="max-w-[12rem] px-3 py-3 text-slate-600 sm:max-w-none sm:px-6 sm:py-4">
-                      <span className="font-medium text-slate-800">{row.jobTitle}</span>
-                      <p className="mt-0.5 font-mono text-[11px] text-slate-400" title="岗位编码">
+                      <span className="font-medium text-slate-800" title={row.jobTitle}>{row.jobTitle}</span>
+                      <p
+                        className="mt-0.5 font-mono text-[11px] text-slate-400"
+                        title={`岗位编码：${row.jobCode}。双击复制`}
+                        onDoubleClick={() => {
+                          void copyTextToClipboard(row.jobCode);
+                        }}
+                      >
                         {row.jobCode}
                       </p>
                     </td>
@@ -9771,6 +10709,12 @@ function ApplicationManagementView({
                       >
                         {row.status}
                       </span>
+                    </td>
+                    <td
+                      className="max-w-[10rem] truncate px-3 py-3 text-slate-600 sm:max-w-[12rem] sm:px-6 sm:py-4"
+                      title={row.promptTemplateName || '未发起面试或历史数据未记录模板'}
+                    >
+                      {row.promptTemplateName || '—'}
                     </td>
                     <td
                       className="max-w-[10rem] truncate px-3 py-3 text-slate-600 sm:max-w-[12rem] sm:px-6 sm:py-4"
@@ -10661,6 +11605,7 @@ function mapDeptRow(r: Record<string, unknown>): Dept {
     name: String(r.name ?? ''),
     deptType: String(rawType ?? '').trim(),
     level: Number(r.level) || 0,
+    sortOrder: Number(r.sort_order ?? r.sortOrder) || 0,
     manager: String(r.manager ?? '-'),
     count: Number(r.count) || 0
   };
@@ -10690,6 +11635,9 @@ function flattenDeptTree(depts: Dept[]): { dept: Dept; depth: number }[] {
   }
   for (const arr of byParent.values()) {
     arr.sort((a, b) => {
+      const sa = Number(a.sortOrder) || 0;
+      const sb = Number(b.sortOrder) || 0;
+      if (sa !== sb) return sa - sb;
       const la = Number(a.level) || 0;
       const lb = Number(b.level) || 0;
       if (la !== lb) return la - lb;
@@ -11010,6 +11958,28 @@ function DeptTreePicker({
 
 const RECRUITMENT_DEPT_BUSINESS_TYPE = '招聘';
 
+function deptTreePickerOptions(depts: Dept[]): TreePickerOption[] {
+  const byId = new Map(depts.map((d) => [d.id, d]));
+  return flattenDeptTree(depts).map(({ dept, depth }) => {
+    const ancestorValues: string[] = [];
+    const seen = new Set<string>();
+    let cur = dept.parentId ? byId.get(dept.parentId) : undefined;
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      ancestorValues.unshift(cur.name);
+      cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+    }
+    return {
+      value: dept.name,
+      label: dept.name,
+      description: dept.deptType ? `${dept.deptType} · 层级 ${depth + 1}` : `层级 ${depth + 1}`,
+      depth,
+      ancestorValues,
+      keywords: [dept.id, dept.manager, dept.deptType]
+    };
+  });
+}
+
 function deptIsRecruitmentBusinessType(d: Dept): boolean {
   return String(d.deptType ?? '').trim() === RECRUITMENT_DEPT_BUSINESS_TYPE;
 }
@@ -11061,6 +12031,641 @@ function recruitmentDeptOptionsForProjectLeads(depts: Dept[], userDeptName: stri
 
   const allowed = collectDescendantDeptIds(depts, rootIds);
   return recruitmentOrdered.filter((d) => allowed.has(d.id));
+}
+
+type InterviewPromptConfigPayload = {
+  systemPromptTemplate: string;
+  userPromptTemplate: string;
+  enabled: boolean;
+  updatedBy?: string;
+  updatedAt?: string;
+  placeholders?: string[];
+  defaults?: {
+    systemPromptTemplate: string;
+    userPromptTemplate: string;
+  };
+};
+
+const FALLBACK_INTERVIEW_PROMPT_PLACEHOLDERS = [
+  'candidateName',
+  'title',
+  'department',
+  'jdText',
+  'resumeText',
+  'resumeBlock',
+  'total',
+  'questionCount',
+  'hasResume'
+];
+
+function SystemInterviewPromptView() {
+  const [data, setData] = useState<InterviewPromptConfigPayload | null>(null);
+  const [systemPrompt, setSystemPrompt] = useState('');
+  const [userPromptTemplate, setUserPromptTemplate] = useState('');
+  const [enabled, setEnabled] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const [okMsg, setOkMsg] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setErr('');
+    setOkMsg('');
+    try {
+      const r = await miniappApiFetch('/api/admin/interview-question-prompt');
+      const j = (await r.json().catch(() => ({}))) as { data?: InterviewPromptConfigPayload; message?: string };
+      if (!r.ok || !j.data) throw new Error(j.message || '加载失败');
+      setData(j.data);
+      setSystemPrompt(String(j.data.systemPromptTemplate || ''));
+      setUserPromptTemplate(String(j.data.userPromptTemplate || ''));
+      setEnabled(Boolean(j.data.enabled));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : '加载失败');
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = async () => {
+    const sys = systemPrompt.trim();
+    const user = userPromptTemplate.trim();
+    if (!sys || !user) {
+      setErr('system prompt 和 user prompt 模板都不能为空');
+      return;
+    }
+    setSaving(true);
+    setErr('');
+    setOkMsg('');
+    try {
+      const r = await miniappApiFetch('/api/admin/interview-question-prompt', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemPromptTemplate: sys,
+          userPromptTemplate: user,
+          enabled: enabled ? 1 : 0
+        })
+      });
+      const j = (await r.json().catch(() => ({}))) as { data?: InterviewPromptConfigPayload; message?: string };
+      if (!r.ok) throw new Error(j.message || '保存失败');
+      if (j.data) {
+        setData({ ...(data || {}), ...j.data });
+      }
+      setOkMsg('已保存，后续新生成的 AI 面试题会使用这份配置。');
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : '保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const restoreDefault = () => {
+    if (!data?.defaults) return;
+    if (!window.confirm('确定把编辑区恢复为系统默认模板？恢复后还需要点击保存才会生效。')) return;
+    setSystemPrompt(data.defaults.systemPromptTemplate);
+    setUserPromptTemplate(data.defaults.userPromptTemplate);
+    setEnabled(true);
+    setOkMsg('已恢复到默认模板预览，请点击保存后生效。');
+  };
+
+  const placeholders = data?.placeholders?.length ? data.placeholders : FALLBACK_INTERVIEW_PROMPT_PLACEHOLDERS;
+  const dirty =
+    data != null &&
+    (systemPrompt !== data.systemPromptTemplate ||
+      userPromptTemplate !== data.userPromptTemplate ||
+      enabled !== Boolean(data.enabled));
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">AI 面试提示词</h1>
+          <p className="mt-1 max-w-3xl text-sm text-slate-600 leading-relaxed">
+            配置小程序 AI 面试出题使用的提示词模板。保存后只影响后续新生成的题目，已生成并入库的面试题不会回改。
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={() => void load()} disabled={loading || saving} className={btnSecondarySm}>
+            重新加载
+          </button>
+          <button
+            type="button"
+            onClick={restoreDefault}
+            disabled={loading || saving || !data?.defaults}
+            className={btnSecondarySm}
+          >
+            恢复默认
+          </button>
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={loading || saving || !dirty}
+            className={btnPrimarySmFlex}
+          >
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+            {saving ? '保存中…' : '保存配置'}
+          </button>
+        </div>
+      </div>
+
+      {err ? (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{err}</div>
+      ) : null}
+      {okMsg ? (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+          {okMsg}
+        </div>
+      ) : null}
+
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <label className="text-sm font-semibold text-slate-900">System Prompt</label>
+              <span className="text-xs text-slate-400">{systemPrompt.length} 字符</span>
+            </div>
+            <textarea
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+              disabled={loading || saving}
+              rows={10}
+              className="min-h-[240px] w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-sm leading-relaxed outline-none focus:ring-2 focus:ring-indigo-200 disabled:bg-slate-50"
+              placeholder="填写系统提示词，例如要求模型输出 JSON、题目数量、题型分布等"
+            />
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <label className="text-sm font-semibold text-slate-900">User Prompt 模板</label>
+              <span className="text-xs text-slate-400">{userPromptTemplate.length} 字符</span>
+            </div>
+            <textarea
+              value={userPromptTemplate}
+              onChange={(e) => setUserPromptTemplate(e.target.value)}
+              disabled={loading || saving}
+              rows={12}
+              className="min-h-[280px] w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-sm leading-relaxed outline-none focus:ring-2 focus:ring-indigo-200 disabled:bg-slate-50"
+              placeholder="填写用户提示词模板，可使用 {{candidateName}}、{{jdText}}、{{resumeBlock}} 等占位符"
+            />
+          </div>
+        </div>
+
+        <aside className="space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <label className="flex items-center justify-between gap-3">
+              <span>
+                <span className="block text-sm font-semibold text-slate-900">启用数据库配置</span>
+                <span className="mt-1 block text-xs leading-relaxed text-slate-500">
+                  关闭后服务端回退到代码内置默认模板。
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                checked={enabled}
+                onChange={(e) => setEnabled(e.target.checked)}
+                disabled={loading || saving}
+                className="h-5 w-5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+              />
+            </label>
+            <div className="mt-4 rounded-lg bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-500">
+              <p>最后更新：{data?.updatedAt || '—'}</p>
+              <p>更新人：{data?.updatedBy || '—'}</p>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-4 text-sm text-indigo-950">
+            <h2 className="font-semibold">可用占位符</h2>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {placeholders.map((p) => (
+                <code key={p} className="rounded bg-white px-2 py-1 text-xs text-indigo-700 shadow-sm">
+                  {'{{' + p + '}}'}
+                </code>
+              ))}
+            </div>
+            <p className="mt-3 text-xs leading-relaxed text-indigo-900/80">
+              `resumeBlock` 会自动包含“简历全文（节选）：...”或无简历时的兜底说明；JD 和简历仍会按服务端规则压缩空白并限制长度。
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs leading-relaxed text-amber-900">
+            <p className="font-semibold">注意</p>
+            <p className="mt-1">
+              System Prompt 里仍建议保留 JSON 输出格式要求，否则服务端可能解析不到 `questions`，候选人会看到“模型输出格式异常”。
+            </p>
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+type InterviewPromptRole = string;
+
+type InterviewPromptTemplateRow = {
+  id: string;
+  name: string;
+  systemPrompt: string;
+  enabled: boolean;
+  isDefault: boolean;
+  visibleRoles: InterviewPromptRole[];
+  editableRoles: InterviewPromptRole[];
+  canEdit?: boolean;
+  updatedBy?: string;
+  updatedAt?: string;
+};
+
+type InterviewPromptTemplatesPayload = {
+  data?: InterviewPromptTemplateRow[];
+  defaults?: { systemPrompt?: string };
+  message?: string;
+};
+
+const INTERVIEW_PROMPT_ROLE_LABEL: Record<string, string> = {
+  admin: '管理员',
+  delivery_manager: '交付经理',
+  recruiter: '招聘专员',
+  recruiting_manager: '招聘经理'
+};
+
+const SYS_INTERVIEW_PROMPT_COLUMNS: ColumnSpec[] = [
+  { id: 'name', defaultWidth: 320, minWidth: 220, maxWidth: 640 },
+  { id: 'status', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
+  { id: 'enabled', defaultWidth: 110, minWidth: 90, maxWidth: 180 },
+  { id: 'updated', defaultWidth: 260, minWidth: 200, maxWidth: 500 },
+  { id: 'actions', defaultWidth: 240, minWidth: 180, maxWidth: 400 }
+];
+
+function SystemInterviewPromptTemplatesView() {
+  const cols = useColumnWidths('sys-interview-prompt', SYS_INTERVIEW_PROMPT_COLUMNS);
+  const [rows, setRows] = useState<InterviewPromptTemplateRow[]>([]);
+  const [selectedId, setSelectedId] = useState('');
+  const selectedIdRef = useRef('');
+  const [editing, setEditing] = useState<InterviewPromptTemplateRow | null>(null);
+  const dialogSnapshotRef = useRef<InterviewPromptTemplateRow | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [systemPrompt, setSystemPrompt] = useState('');
+  const [enabled, setEnabled] = useState(true);
+  const [isDefault, setIsDefault] = useState(false);
+  const [defaultPrompt, setDefaultPrompt] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const [okMsg, setOkMsg] = useState('');
+
+  const selectForEdit = useCallback((row: InterviewPromptTemplateRow | null) => {
+    setEditing(row);
+    const nextId = row?.id || '';
+    selectedIdRef.current = nextId;
+    setSelectedId(nextId);
+    setName(row?.name || '');
+    setSystemPrompt(row?.systemPrompt || '');
+    setEnabled(row ? Boolean(row.enabled) : true);
+    setIsDefault(row ? Boolean(row.isDefault) : false);
+  }, []);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setErr('');
+    setOkMsg('');
+    try {
+      const r = await miniappApiFetch('/api/admin/interview-question-prompt-templates');
+      const j = (await r.json().catch(() => ({}))) as InterviewPromptTemplatesPayload;
+      if (!r.ok || !Array.isArray(j.data)) throw new Error(j.message || '加载失败');
+      setRows(j.data);
+      setDefaultPrompt(j.defaults?.systemPrompt || '');
+      selectForEdit(j.data.find((x) => x.id === selectedIdRef.current) || j.data[0] || null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : '加载失败');
+      setRows([]);
+      selectForEdit(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectForEdit]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = async () => {
+    const sys = systemPrompt.trim();
+    const nm = name.trim();
+    if (!nm || !sys) {
+      setErr('模板名称和 System Prompt 都不能为空');
+      return;
+    }
+    setSaving(true);
+    setErr('');
+    setOkMsg('');
+    try {
+      const payload = {
+        name: nm,
+        systemPrompt: sys,
+        enabled: enabled ? 1 : 0,
+        isDefault: 0
+      };
+      const isDraft = Boolean(editing?.id.startsWith('draft-'));
+      const r = await miniappApiFetch(
+        editing && !isDraft
+          ? `/api/admin/interview-question-prompt-templates/${encodeURIComponent(editing.id)}`
+          : '/api/admin/interview-question-prompt-templates',
+        {
+          method: editing && !isDraft ? 'PATCH' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }
+      );
+      const j = (await r.json().catch(() => ({}))) as { message?: string };
+      if (!r.ok) throw new Error(j.message || '保存失败');
+      setOkMsg(editing && !isDraft ? '模板已保存。' : '模板已新增。');
+      setDialogOpen(false);
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : '保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (row: InterviewPromptTemplateRow) => {
+    if (row.id.startsWith('draft-')) {
+      setRows((prev) => prev.filter((x) => x.id !== row.id));
+      if (selectedId === row.id) selectForEdit(rows.find((x) => x.id !== row.id) || null);
+      return;
+    }
+    if (!window.confirm(`确定删除模板「${row.name}」？已发出的历史邀请不建议删除关联模板。`)) return;
+    setSaving(true);
+    setErr('');
+    try {
+      const r = await miniappApiFetch(`/api/admin/interview-question-prompt-templates/${encodeURIComponent(row.id)}`, {
+        method: 'DELETE'
+      });
+      const j = (await r.json().catch(() => ({}))) as { message?: string };
+      if (!r.ok) throw new Error(j.message || '删除失败');
+      setOkMsg('模板已删除。');
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : '删除失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const createNew = () => {
+    const tempId = `draft-${Date.now()}`;
+    const draft: InterviewPromptTemplateRow = {
+      id: tempId,
+      name: '',
+      systemPrompt: '',
+      enabled: true,
+      isDefault: false,
+      visibleRoles: [],
+      editableRoles: [],
+      canEdit: true
+    };
+    setRows((prev) => [...prev, draft]);
+    selectForEdit(draft);
+    dialogSnapshotRef.current = { ...draft };
+    setDialogOpen(true);
+  };
+
+  const copyCurrent = () => {
+    if (!editing) return;
+    const source = editing;
+    const tempId = `draft-${Date.now()}`;
+    const draft: InterviewPromptTemplateRow = {
+      ...source,
+      id: tempId,
+      name: `${source.name} - 副本`,
+      enabled: true,
+      isDefault: false,
+      canEdit: true
+    };
+    setRows((prev) => [...prev, draft]);
+    selectForEdit(draft);
+    dialogSnapshotRef.current = { ...draft };
+    setDialogOpen(true);
+    setOkMsg('已复制到编辑区，修改后点击保存会创建新模板。');
+  };
+
+  const copyRow = (source: InterviewPromptTemplateRow) => {
+    const tempId = `draft-${Date.now()}`;
+    const draft: InterviewPromptTemplateRow = {
+      ...source,
+      id: tempId,
+      name: `${source.name} - 副本`,
+      enabled: true,
+      isDefault: false,
+      canEdit: true
+    };
+    setRows((prev) => [...prev, draft]);
+    selectForEdit(draft);
+    dialogSnapshotRef.current = { ...draft };
+    setDialogOpen(true);
+    setOkMsg('已复制到编辑区，修改后点击保存会创建新模板。');
+  };
+
+  const restoreDefaultPrompt = () => {
+    const snap = dialogSnapshotRef.current;
+    if (!snap) return;
+    if (!window.confirm('确定恢复为打开窗口时的内容？未保存修改会被覆盖。')) return;
+    setName(snap.name);
+    setSystemPrompt(snap.systemPrompt);
+    setEnabled(Boolean(snap.enabled));
+  };
+
+  const readOnly = Boolean(editing && editing.canEdit === false);
+  const dirty =
+    !editing ||
+    editing.id.startsWith('draft-') ||
+    name !== editing.name ||
+    systemPrompt !== editing.systemPrompt ||
+    enabled !== Boolean(editing.enabled);
+  const dialogSnapshot = dialogSnapshotRef.current;
+  const dialogChangedFromOpen =
+    Boolean(dialogSnapshot) &&
+    (name !== dialogSnapshot.name ||
+      systemPrompt !== dialogSnapshot.systemPrompt ||
+      enabled !== Boolean(dialogSnapshot.enabled));
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">AI 面试官管理</h1>
+          <p className="mt-1 max-w-3xl text-sm text-slate-600 leading-relaxed">
+            这里只配置出题用的 <strong>System Prompt</strong>。发起面试邀请时可选择具体模板；候选人姓名、岗位、JD、简历仍由服务端固定逻辑拼入 User Prompt。
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={createNew} disabled={loading || saving} className={btnSecondarySm}>
+            新建模板
+          </button>
+        </div>
+      </div>
+
+      {err ? <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{err}</div> : null}
+      {okMsg ? <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{okMsg}</div> : null}
+
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+          <div className="border-b border-slate-100 px-4 py-3">
+            <h2 className="text-sm font-bold text-slate-900">模板列表</h2>
+          </div>
+          {loading ? (
+            <p className="px-4 py-10 text-center text-sm text-slate-500">加载中…</p>
+          ) : rows.length ? (
+            <div className="overflow-x-auto">
+              <table
+                className="table-fixed text-left text-sm"
+                ref={cols.tableRef} style={cols.tableStyle}
+              >
+                <colgroup>{cols.colNodes}</colgroup>
+                <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                  <tr>
+                    <ResizableTh col={cols.byId.name} className="px-4 py-3 font-medium">模板名称</ResizableTh>
+                    <ResizableTh col={cols.byId.status} className="px-4 py-3 font-medium">状态</ResizableTh>
+                    <ResizableTh col={cols.byId.enabled} className="px-4 py-3 font-medium">启用</ResizableTh>
+                    <ResizableTh col={cols.byId.updated} className="px-4 py-3 font-medium">更新信息</ResizableTh>
+                    <ResizableTh col={cols.byId.actions} className="px-4 py-3 font-medium text-right">操作</ResizableTh>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {rows.map((row) => (
+                    <tr key={row.id} className={selectedId === row.id ? 'bg-indigo-50/70' : 'hover:bg-slate-50'}>
+                      <td className="px-4 py-3 font-semibold text-slate-900">
+                        {row.name}
+                        {row.id.startsWith('draft-') ? <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700">未保存</span> : null}
+                        {row.isDefault ? <span className="ml-2 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-700">默认</span> : null}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-slate-500">{row.canEdit ? '可编辑' : '只读'}</td>
+                      <td className="px-4 py-3">
+                        <input
+                          type="checkbox"
+                          checked={row.enabled}
+                          disabled={row.canEdit === false || row.id.startsWith('draft-')}
+                          onChange={(e) => {
+                            setRows((prev) => prev.map((x) => (x.id === row.id ? { ...x, enabled: e.target.checked } : x)));
+                            if (selectedId === row.id) setEnabled(e.target.checked);
+                            void miniappApiFetch(`/api/admin/interview-question-prompt-templates/${encodeURIComponent(row.id)}`, {
+                              method: 'PATCH',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ enabled: e.target.checked ? 1 : 0 })
+                            }).then(() => load());
+                          }}
+                          className="h-4 w-4 rounded border-slate-300 text-indigo-600"
+                        />
+                      </td>
+                      <td className="px-4 py-3 text-xs text-slate-500">
+                        {row.updatedBy || '—'}{row.updatedAt ? ` · ${row.updatedAt}` : ''}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <button type="button" onClick={() => { selectForEdit(row); dialogSnapshotRef.current = { ...row }; setDialogOpen(true); }} className="mr-3 text-xs font-medium text-indigo-600 hover:text-indigo-800">
+                          编辑
+                        </button>
+                        <button type="button" onClick={() => copyRow(row)} className="mr-3 text-xs font-medium text-indigo-600 hover:text-indigo-800">
+                          复制
+                        </button>
+                        <button type="button" disabled={row.isDefault} onClick={() => void remove(row)} className="text-xs font-medium text-rose-600 hover:text-rose-800 disabled:cursor-not-allowed disabled:text-slate-300">
+                          删除
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="px-4 py-10 text-center text-sm text-slate-500">当前角色没有可查看的模板。</p>
+          )}
+      </div>
+      <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-4 text-sm text-indigo-950">
+        <h2 className="font-semibold">权限说明</h2>
+        <p className="mt-2 text-xs leading-relaxed text-indigo-900/80">
+          模板查看、发起选择、编辑权限统一由「角色管理」里的 `AI面试官` 菜单控制。User Prompt 仍由服务端自动拼：候选人姓名、岗位、部门、JD、简历全文节选都会按原规则注入。
+        </p>
+      </div>
+
+      <SystemCrudModal
+        open={dialogOpen}
+        title={editing?.id.startsWith('draft-') ? '新增模板' : '编辑模板'}
+        onClose={() => {
+          if (saving) return;
+          if (dialogChangedFromOpen && !window.confirm('已有未保存的修改，确定要退出吗？')) return;
+          if (editing?.id.startsWith('draft-')) {
+            const draftId = editing.id;
+            setRows((prev) => prev.filter((r) => r.id !== draftId));
+            setEditing(null);
+            setSelectedId('');
+          }
+          dialogSnapshotRef.current = null;
+          setDialogOpen(false);
+        }}
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => {
+                if (saving) return;
+                if (dialogChangedFromOpen && !window.confirm('已有未保存的修改，确定要退出吗？')) return;
+                if (editing?.id.startsWith('draft-')) {
+                  const draftId = editing.id;
+                  setRows((prev) => prev.filter((r) => r.id !== draftId));
+                  setEditing(null);
+                  setSelectedId('');
+                }
+                dialogSnapshotRef.current = null;
+                setDialogOpen(false);
+              }}
+              disabled={saving}
+              className={btnSecondarySm}
+            >
+              取消
+            </button>
+            <button type="button" onClick={() => void save()} disabled={saving || readOnly || !dirty} className={btnSaveSm}>
+              {saving ? '保存中…' : '保存'}
+            </button>
+          </>
+        }
+      >
+        <div>
+          <label className="mb-1 block text-xs font-medium text-slate-600">模板名称</label>
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            disabled={saving || readOnly}
+            className={systemFieldClass}
+            placeholder="例如：前端校招模板 / 管理岗追问模板"
+          />
+        </div>
+        <div>
+          <label className="mb-1 flex items-center justify-between text-xs font-medium text-slate-600">
+            <span>System Prompt</span>
+            <span className="text-slate-400">{systemPrompt.length} 字符</span>
+          </label>
+          <textarea
+            value={systemPrompt}
+            onChange={(e) => setSystemPrompt(e.target.value)}
+            disabled={saving || readOnly}
+            rows={14}
+            className={`${systemFieldClass} min-h-[320px] font-mono leading-relaxed`}
+            placeholder="填写系统提示词，例如要求模型输出 JSON、题目数量、题型分布等"
+          />
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={restoreDefaultPrompt} disabled={!editing || saving || readOnly || !dialogChangedFromOpen} className={btnSecondarySm}>
+            恢复
+          </button>
+        </div>
+      </SystemCrudModal>
+    </div>
+  );
 }
 
 type JobRoleBaseAdminRow = { id: string; name: string; sort_order: number; enabled: 0 | 1 };
@@ -11247,7 +12852,15 @@ function SystemAiInterviewSettingsView() {
   );
 }
 
+const JOB_ROLE_BASES_COLUMNS: ColumnSpec[] = [
+  { id: 'name', defaultWidth: 260, minWidth: 180, maxWidth: 640 },
+  { id: 'sort', defaultWidth: 120, minWidth: 90, maxWidth: 220 },
+  { id: 'enabled', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
+  { id: 'actions', defaultWidth: 150, minWidth: 120, maxWidth: 260 }
+];
+
 function SystemJobRoleBasesView() {
+  const cols = useColumnWidths('sys-job-role-bases', JOB_ROLE_BASES_COLUMNS);
   const refreshGlobal = useRefreshJobRoleBases();
   const [rows, setRows] = useState<JobRoleBaseAdminRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -11382,13 +12995,17 @@ function SystemJobRoleBasesView() {
           <p className="px-4 py-10 text-center text-sm text-slate-500">暂无数据；请确认已执行迁移 SQL 且 API 服务已重启。</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[520px] text-left text-sm">
+            <table
+              className="table-fixed text-left text-sm"
+              ref={cols.tableRef} style={cols.tableStyle}
+            >
+              <colgroup>{cols.colNodes}</colgroup>
               <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
                 <tr>
-                  <th className="px-4 py-3 font-medium">名称</th>
-                  <th className="px-4 py-3 font-medium whitespace-nowrap">排序</th>
-                  <th className="px-4 py-3 font-medium whitespace-nowrap">启用</th>
-                  <th className="px-4 py-3 font-medium text-right whitespace-nowrap">操作</th>
+                  <ResizableTh col={cols.byId.name} className="px-4 py-3 font-medium">名称</ResizableTh>
+                  <ResizableTh col={cols.byId.sort} className="px-4 py-3 font-medium whitespace-nowrap">排序</ResizableTh>
+                  <ResizableTh col={cols.byId.enabled} className="px-4 py-3 font-medium whitespace-nowrap">启用</ResizableTh>
+                  <ResizableTh col={cols.byId.actions} className="px-4 py-3 font-medium text-right whitespace-nowrap">操作</ResizableTh>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -11455,7 +13072,16 @@ function normalizeDeptFormType(s: string | undefined): '交付' | '招聘' | '�
   return '其他';
 }
 
+const SYS_DEPT_COLUMNS: ColumnSpec[] = [
+  { id: 'name', defaultWidth: 420, minWidth: 260, maxWidth: 860 },
+  { id: 'type', defaultWidth: 140, minWidth: 110, maxWidth: 220 },
+  { id: 'manager', defaultWidth: 170, minWidth: 130, maxWidth: 300 },
+  { id: 'count', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
+  { id: 'actions', defaultWidth: 260, minWidth: 200, maxWidth: 420 }
+];
+
 function SystemDeptView() {
+  const cols = useColumnWidths('sys-dept', SYS_DEPT_COLUMNS);
   const [depts, setDepts] = useState<Dept[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -11463,6 +13089,8 @@ function SystemDeptView() {
   const [deptListPage, setDeptListPage] = useState(1);
   const [deptPageSize, setDeptPageSize] = useState(10);
   const [collapsedDeptIds, setCollapsedDeptIds] = useState<Set<string>>(new Set());
+  const [sortMode, setSortMode] = useState(false);
+  const [draggingDeptId, setDraggingDeptId] = useState('');
   const [dialog, setDialog] = useState<
     null | { mode: 'create' | 'edit' | 'child'; parent?: Dept; record?: Dept }
   >(null);
@@ -11474,6 +13102,7 @@ function SystemDeptView() {
   const [formCount, setFormCount] = useState('0');
   const [hrUsers, setHrUsers] = useState<User[]>([]);
   const [deptDeleteConfirm, setDeptDeleteConfirm] = useState<Dept | null>(null);
+  const [dialogInitialSnapshot, setDialogInitialSnapshot] = useState('');
 
   const deptById = useMemo(() => new Map(depts.map((d) => [d.id, d])), [depts]);
 
@@ -11527,9 +13156,10 @@ function SystemDeptView() {
   }, [depts, q, collapsedDeptIds]);
 
   const pagedRows = useMemo(() => {
+    if (sortMode) return displayRows;
     const start = (deptListPage - 1) * deptPageSize;
     return displayRows.slice(start, start + deptPageSize);
-  }, [displayRows, deptListPage, deptPageSize]);
+  }, [displayRows, deptListPage, deptPageSize, sortMode]);
 
   useEffect(() => {
     setDeptListPage(1);
@@ -11549,6 +13179,36 @@ function SystemDeptView() {
     });
   };
 
+  const reorderSiblingDepts = async (dragId: string, targetId: string) => {
+    if (!dragId || !targetId || dragId === targetId) return;
+    const drag = depts.find((d) => d.id === dragId);
+    const target = depts.find((d) => d.id === targetId);
+    if (!drag || !target || String(drag.parentId || '') !== String(target.parentId || '')) return;
+    const siblings = depts
+      .filter((d) => String(d.parentId || '') === String(drag.parentId || ''))
+      .sort((a, b) => (Number(a.sortOrder) || 0) - (Number(b.sortOrder) || 0));
+    const next = siblings.filter((d) => d.id !== dragId);
+    const targetIdx = next.findIndex((d) => d.id === targetId);
+    next.splice(targetIdx, 0, drag);
+    const orderedIds = next.map((d) => d.id);
+    setDepts((prev) =>
+      prev.map((d) => {
+        const idx = orderedIds.indexOf(d.id);
+        return idx >= 0 ? { ...d, sortOrder: (idx + 1) * 10 } : d;
+      })
+    );
+    try {
+      await adminFetchJson('/api/depts/reorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentId: drag.parentId || '', orderedIds })
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '保存排序失败');
+      await load();
+    }
+  };
+
   const openCreate = () => {
     setDialog({ mode: 'create' });
     setFormName('');
@@ -11556,6 +13216,7 @@ function SystemDeptView() {
     setFormLevel('0');
     setFormManager('');
     setFormCount('0');
+    setDialogInitialSnapshot(JSON.stringify({ name: '', deptType: '交付', level: '', manager: '', count: '0' }));
   };
 
   const openChild = (parent: Dept) => {
@@ -11564,6 +13225,7 @@ function SystemDeptView() {
     setFormDeptType('交付');
     setFormManager('');
     setFormCount('0');
+    setDialogInitialSnapshot(JSON.stringify({ name: '', deptType: '交付', level: '', manager: '', count: '0' }));
   };
 
   const openEdit = (d: Dept) => {
@@ -11573,11 +13235,32 @@ function SystemDeptView() {
     setFormLevel(String(Number(d.level) || 0));
     setFormManager(d.manager || '');
     setFormCount(String(Number(d.count) || 0));
+    setDialogInitialSnapshot(
+      JSON.stringify({
+        name: d.name,
+        deptType: normalizeDeptFormType(d.deptType),
+        level: String(Number(d.level) || 0),
+        manager: d.manager || '',
+        count: String(Number(d.count) || 0)
+      })
+    );
   };
+
+  const dialogDirty =
+    Boolean(dialog && dialogInitialSnapshot) &&
+    JSON.stringify({
+      name: formName,
+      deptType: formDeptType,
+      level: dialog?.mode === 'edit' ? formLevel : '',
+      manager: formManager,
+      count: formCount
+    }) !== dialogInitialSnapshot;
 
   const closeDialog = () => {
     if (saving) return;
+    if (dialogDirty && !window.confirm('已有未保存的修改，确定要退出吗？')) return;
     setDialog(null);
+    setDialogInitialSnapshot('');
   };
 
   const load = useCallback(async () => {
@@ -11696,13 +13379,22 @@ function SystemDeptView() {
             className="pl-10 pr-4 py-2 border border-slate-200 rounded-lg w-80 max-w-full focus:ring-2 focus:ring-indigo-500 outline-none"
           />
         </div>
-        <button
-          type="button"
-          onClick={openCreate}
-          className={btnPrimarySmFlex}
-        >
-          <Plus className="w-4 h-4" /> 新增顶级部门
-        </button>
+        <div className="flex items-center gap-3 flex-wrap">
+          <button
+            type="button"
+            onClick={openCreate}
+            className={btnPrimarySmFlex}
+          >
+            <Plus className="w-4 h-4" /> 新增顶级部门
+          </button>
+          <button
+            type="button"
+            onClick={() => setSortMode((v) => !v)}
+            className={btnSecondarySm}
+          >
+            {sortMode ? '完成排序' : '调整排序'}
+          </button>
+        </div>
       </div>
       {error ? (
         <div className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-4 py-3 flex items-center justify-between gap-4">
@@ -11721,19 +13413,36 @@ function SystemDeptView() {
           <div className="py-16 text-center text-slate-500 text-sm">{q.trim() ? '无匹配部门' : '暂无部门数据'}</div>
         ) : (
           <>
-          <table className="w-full text-left text-sm">
+          <div className="overflow-x-auto">
+          <table
+            className="table-fixed text-left text-sm"
+            ref={cols.tableRef} style={cols.tableStyle}
+          >
+            <colgroup>{cols.colNodes}</colgroup>
             <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
               <tr>
-                <th className="px-6 py-4 font-medium">部门名称</th>
-                <th className="px-6 py-4 font-medium">部门类型</th>
-                <th className="px-6 py-4 font-medium">负责人</th>
-                <th className="px-6 py-4 font-medium">成员数量</th>
-                <th className="px-6 py-4 font-medium text-right">操作</th>
+                <ResizableTh col={cols.byId.name} className="px-6 py-4 font-medium">部门名称</ResizableTh>
+                <ResizableTh col={cols.byId.type} className="px-6 py-4 font-medium">部门类型</ResizableTh>
+                <ResizableTh col={cols.byId.manager} className="px-6 py-4 font-medium">负责人</ResizableTh>
+                <ResizableTh col={cols.byId.count} className="px-6 py-4 font-medium">成员数量</ResizableTh>
+                <ResizableTh col={cols.byId.actions} className="px-6 py-4 font-medium text-right">操作</ResizableTh>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {pagedRows.map(({ dept, depth }) => (
-                <tr key={dept.id} className="hover:bg-slate-50 transition-colors">
+                <tr
+                  key={dept.id}
+                  draggable={sortMode && !q.trim()}
+                  onDragStart={() => setDraggingDeptId(dept.id)}
+                  onDragEnd={() => setDraggingDeptId('')}
+                  onDragOver={(e) => {
+                    if (!sortMode || !draggingDeptId) return;
+                    const drag = depts.find((d) => d.id === draggingDeptId);
+                    if (drag && String(drag.parentId || '') === String(dept.parentId || '')) e.preventDefault();
+                  }}
+                  onDrop={() => void reorderSiblingDepts(draggingDeptId, dept.id)}
+                  className={`transition-colors hover:bg-slate-50 ${sortMode ? 'cursor-grab' : ''} ${draggingDeptId === dept.id ? 'opacity-50' : ''}`}
+                >
                   <td
                     className="px-6 py-4 font-medium text-slate-900"
                     style={{ paddingLeft: `${depth * 1.5 + 1.5}rem` }}
@@ -11806,16 +13515,23 @@ function SystemDeptView() {
               ))}
             </tbody>
           </table>
-          <ListPaginationBar
-            page={deptListPage}
-            pageSize={deptPageSize}
-            total={displayRows.length}
-            onPageChange={setDeptListPage}
-            onPageSizeChange={(n) => {
-              setDeptPageSize(n);
-              setDeptListPage(1);
-            }}
-          />
+          </div>
+          {sortMode ? (
+            <div className="border-t border-slate-100 bg-amber-50 px-6 py-3 text-sm text-amber-800">
+              拖拽同级部门可调整顺序；当前排序会立即保存。搜索时请先退出排序模式。
+            </div>
+          ) : (
+            <ListPaginationBar
+              page={deptListPage}
+              pageSize={deptPageSize}
+              total={displayRows.length}
+              onPageChange={setDeptListPage}
+              onPageSizeChange={(n) => {
+                setDeptPageSize(n);
+                setDeptListPage(1);
+              }}
+            />
+          )}
           </>
         )}
       </div>
@@ -11893,11 +13609,9 @@ function SystemDeptView() {
         </div>
         <div>
           <label className="block text-xs font-medium text-slate-500 mb-1">负责人</label>
-          <select
-            className={systemFieldClass}
+          <SearchableSelect
             value={deptManagerSelectValue}
-            onChange={(e) => {
-              const un = e.target.value;
+            onChange={(un) => {
               if (!un) {
                 setFormManager('');
                 return;
@@ -11906,14 +13620,16 @@ function SystemDeptView() {
               if (u?.name) setFormManager(u.name);
             }}
             disabled={saving}
-          >
-            <option value="">从用户列表选择…</option>
-            {deptFormUsersSorted.map((u) => (
-              <option key={u.username} value={u.username}>
-                {u.name}（{u.username}）{u.dept && u.dept !== '-' ? ` · ${u.dept}` : ''}
-              </option>
-            ))}
-          </select>
+            placeholder="从用户列表选择…"
+            searchPlaceholder="搜索姓名、账号、部门…"
+            pageSize={8}
+            options={deptFormUsersSorted.map((u) => ({
+              value: u.username,
+              label: `${u.name}（${u.username}）`,
+              description: u.dept && u.dept !== '-' ? u.dept : undefined,
+              keywords: [u.name, u.username, u.dept]
+            }))}
+          />
           <input
             className={`${systemFieldClass} mt-2`}
             value={formManager === '-' ? '' : formManager}
@@ -11935,6 +13651,15 @@ function SystemDeptView() {
   );
 }
 
+const SYS_USER_COLUMNS: ColumnSpec[] = [
+  { id: 'name', defaultWidth: 230, minWidth: 170, maxWidth: 400 },
+  { id: 'username', defaultWidth: 190, minWidth: 150, maxWidth: 340 },
+  { id: 'dept', defaultWidth: 250, minWidth: 180, maxWidth: 460 },
+  { id: 'roles', defaultWidth: 300, minWidth: 220, maxWidth: 520 },
+  { id: 'status', defaultWidth: 130, minWidth: 100, maxWidth: 200 },
+  { id: 'actions', defaultWidth: 200, minWidth: 160, maxWidth: 340 }
+];
+
 function SystemUserView({
   currentRole,
   authProfile
@@ -11942,6 +13667,7 @@ function SystemUserView({
   currentRole: Role;
   authProfile: AdminLoginProfile | null;
 }) {
+  const cols = useColumnWidths('sys-user', SYS_USER_COLUMNS);
   const [users, setUsers] = useState<User[]>([]);
   const [deptTree, setDeptTree] = useState<Dept[]>([]);
   const [deptNames, setDeptNames] = useState<string[]>([]);
@@ -11950,6 +13676,7 @@ function SystemUserView({
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState('');
   const [deptFilter, setDeptFilter] = useState('');
+  const [roleFilter, setRoleFilter] = useState('');
   const [userListPage, setUserListPage] = useState(1);
   const [userPageSize, setUserPageSize] = useState(10);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
@@ -11959,10 +13686,12 @@ function SystemUserView({
   const [ufUsername, setUfUsername] = useState('');
   const [ufDept, setUfDept] = useState('');
   const [ufRole, setUfRole] = useState('');
+  const [ufRoleIds, setUfRoleIds] = useState<string[]>([]);
   const [ufStatus, setUfStatus] = useState<'正常' | '停用'>('正常');
   const [ufPassword, setUfPassword] = useState('');
   const [ufPasswordConfirm, setUfPasswordConfirm] = useState('');
   const [userDeleteConfirm, setUserDeleteConfirm] = useState<User | null>(null);
+  const [userDialogInitialSnapshot, setUserDialogInitialSnapshot] = useState('');
 
   const myDept = String(authProfile?.dept || '').trim();
   const myDeptOk = Boolean(myDept && myDept !== '-');
@@ -12043,7 +13772,19 @@ function SystemUserView({
 
   useEffect(() => {
     setUserListPage(1);
-  }, [q, deptFilter]);
+  }, [q, deptFilter, roleFilter]);
+
+  const roleFilterOptions = useMemo(() => {
+    return [...new Set(users.flatMap((u) => (u.roles?.length ? u.roles.map((r) => r.name) : [u.role]).map((x) => String(x || '').trim()).filter(Boolean)))].sort((a, b) =>
+      a.localeCompare(b, 'zh-CN')
+    );
+  }, [users]);
+
+  useEffect(() => {
+    if (roleFilter && !roleFilterOptions.includes(roleFilter)) {
+      setRoleFilter('');
+    }
+  }, [roleFilter, roleFilterOptions]);
 
   const userDialogRoleSelectOptions = useMemo(() => {
     const base = roleOptions.filter((r) => roleNameAllowedInUserDialogForCreator(currentRole, r.name));
@@ -12057,11 +13798,46 @@ function SystemUserView({
     return list;
   }, [roleOptions, currentRole, userDialog]);
 
+  const userDeptTreeOptions = useMemo(() => {
+    const allowedNames = new Set(deptNames)
+    return deptTreePickerOptions(deptTree).filter((o) => allowedNames.has(o.value))
+  }, [deptTree, deptNames])
+
+  const userRolePickerOptions = useMemo<PickerOption[]>(
+    () =>
+      (userDialogRoleSelectOptions.length
+        ? userDialogRoleSelectOptions
+        : [{ id: '__fallback__', name: '招聘人员', desc: '', users: 0 }]
+      ).map((r) => ({
+        value: r.id,
+        label: r.name,
+        description: r.desc || undefined,
+        keywords: [r.name, r.desc]
+      })),
+    [userDialogRoleSelectOptions]
+  )
+
+  const userFormSnapshot = useMemo(
+    () =>
+      JSON.stringify({
+        name: ufName,
+        username: ufUsername,
+        dept: ufDept,
+        role: ufRole,
+        roleIds: [...ufRoleIds].sort(),
+        status: ufStatus,
+        password: ufPassword,
+        passwordConfirm: ufPasswordConfirm
+      }),
+    [ufDept, ufName, ufPassword, ufPasswordConfirm, ufRole, ufRoleIds, ufStatus, ufUsername]
+  )
+  const userDialogDirty = Boolean(userDialog && userDialogInitialSnapshot && userFormSnapshot !== userDialogInitialSnapshot)
+
   const openUserCreate = () => {
     setUserDialog({ mode: 'create' });
-    setUfName('');
-    setUfUsername('');
-    setUfDept(listAllUsers ? '' : myDeptOk && deptNames.includes(myDept) ? myDept : deptNames[0] || '');
+    const nextName = '';
+    const nextUsername = '';
+    const nextDept = listAllUsers ? '' : myDeptOk && deptNames.includes(myDept) ? myDept : deptNames[0] || '';
     const allowed = roleOptions.filter((r) => roleNameAllowedInUserDialogForCreator(currentRole, r.name));
     const priority: string[] =
       currentRole === 'delivery_manager'
@@ -12077,27 +13853,66 @@ function SystemUserView({
       }
     }
     if (!def) def = allowed[0]?.name || roleOptions[0]?.name || '招聘人员';
+    const defRole = allowed.find((r) => r.name === def) || roleOptions.find((r) => r.name === def);
+    const nextRoleIds = defRole?.id ? [defRole.id] : [];
+    setUfName(nextName);
+    setUfUsername(nextUsername);
+    setUfDept(nextDept);
     setUfRole(def);
+    setUfRoleIds(nextRoleIds);
     setUfStatus('正常');
     setUfPassword('');
     setUfPasswordConfirm('');
+    setUserDialogInitialSnapshot(
+      JSON.stringify({
+        name: nextName,
+        username: nextUsername,
+        dept: nextDept,
+        role: def,
+        roleIds: [...nextRoleIds].sort(),
+        status: '正常',
+        password: '',
+        passwordConfirm: ''
+      })
+    );
   };
 
   const openUserEdit = (u: User) => {
     setUserDialog({ mode: 'edit', user: u });
-    setUfName(u.name);
-    setUfUsername(u.username);
-    setUfDept(u.dept || '');
-    setUfRole(u.role || '');
-    setUfStatus(u.status === '停用' ? '停用' : '正常');
+    const nextName = u.name;
+    const nextUsername = u.username;
+    const nextDept = u.dept || '';
+    const nextRole = u.role || '';
+    const nextRoleIds = u.roleIds?.length ? u.roleIds : [];
+    const nextStatus = u.status === '停用' ? '停用' : '正常';
+    setUfName(nextName);
+    setUfUsername(nextUsername);
+    setUfDept(nextDept);
+    setUfRole(nextRole);
+    setUfRoleIds(nextRoleIds);
+    setUfStatus(nextStatus);
     setUfPassword('');
     setUfPasswordConfirm('');
+    setUserDialogInitialSnapshot(
+      JSON.stringify({
+        name: nextName,
+        username: nextUsername,
+        dept: nextDept,
+        role: nextRole,
+        roleIds: [...nextRoleIds].sort(),
+        status: nextStatus,
+        password: '',
+        passwordConfirm: ''
+      })
+    );
   };
 
   const closeUserDialog = () => {
     if (saving) return;
+    if (userDialogDirty && !window.confirm('已有未保存的修改，确定要退出吗？')) return;
     setUserDialog(null);
     setUfPasswordConfirm('');
+    setUserDialogInitialSnapshot('');
   };
 
   const submitUser = async () => {
@@ -12108,6 +13923,10 @@ function SystemUserView({
       currentRole === 'delivery_manager' && myDeptOk ? myDept : ufDept.trim() || '-';
     const dept = deptLocked;
     const role = ufRole.trim() || '招聘人员';
+    const selectedRoleNames = ufRoleIds
+      .map((id) => roleOptions.find((r) => r.id === id)?.name || '')
+      .filter(Boolean);
+    const primaryRole = selectedRoleNames[0] || role;
     if (!name.trim()) {
       setError('请填写姓名');
       return;
@@ -12116,7 +13935,7 @@ function SystemUserView({
       if (userDialog.mode === 'create' && !roleAllowsNonMobileLoginUsername(role)) {
         setError('请填写手机号（即登录账号）');
       } else {
-        setError(roleAllowsNonMobileLoginUsername(role) ? '请填写登录账号' : '请填写手机号（即登录账号）');
+        setError(roleAllowsNonMobileLoginUsername(primaryRole) ? '请填写登录账号' : '请填写手机号（即登录账号）');
       }
       return;
     }
@@ -12128,7 +13947,7 @@ function SystemUserView({
       setError('请选择所属部门');
       return;
     }
-    const unErr = loginUsernameErrorForRole(username, role);
+    const unErr = loginUsernameErrorForRole(username, primaryRole);
     if (unErr) {
       setError(unErr);
       return;
@@ -12147,13 +13966,13 @@ function SystemUserView({
         return;
       }
     }
-    if (currentRole !== 'admin' && userDialog.mode === 'create' && !roleNameAllowedInUserDialogForCreator(currentRole, role)) {
+    if (currentRole !== 'admin' && userDialog.mode === 'create' && !selectedRoleNames.every((r) => roleNameAllowedInUserDialogForCreator(currentRole, r))) {
       setError('当前账号无权创建该角色');
       return;
     }
     if (currentRole !== 'admin' && userDialog.mode === 'edit' && userDialog.user) {
       const prev = String(userDialog.user.role || '').trim();
-      if (role !== prev && !roleNameAllowedInUserDialogForCreator(currentRole, role)) {
+      if (primaryRole !== prev && !selectedRoleNames.every((r) => roleNameAllowedInUserDialogForCreator(currentRole, r))) {
         setError('当前账号无权将该用户改为所选角色');
         return;
       }
@@ -12167,6 +13986,7 @@ function SystemUserView({
           username,
           dept,
           role,
+          roleIds: ufRoleIds,
           status: ufStatus
         };
         if (ufPassword.trim()) body.password = ufPassword.trim();
@@ -12184,6 +14004,7 @@ function SystemUserView({
             username,
             dept,
             role,
+            roleIds: ufRoleIds,
             status: ufStatus,
             password: ufPassword.trim()
           })
@@ -12241,6 +14062,7 @@ function SystemUserView({
         const sub = adminDeptSubtree;
         if (sub && sub.length && !userDeptInSubtree(String(u.dept || ''), sub)) return false;
       }
+      if (roleFilter && !userHasRoleName(u, (r) => r === roleFilter)) return false;
       if (!q.trim()) return true;
       const s = q.trim().toLowerCase();
       return (
@@ -12250,7 +14072,7 @@ function SystemUserView({
         String(u.role || '').toLowerCase().includes(s)
       );
     });
-  }, [users, deptFilter, listAllUsers, adminDeptSubtree, q]);
+  }, [users, deptFilter, listAllUsers, adminDeptSubtree, roleFilter, q]);
 
   const pagedUsers = useMemo(() => {
     const start = (userListPage - 1) * userPageSize;
@@ -12290,20 +14112,25 @@ function SystemUserView({
             />
           </div>
           {listAllUsers ? (
-            <select
-              value={deptFilter}
-              onChange={(e) => setDeptFilter(e.target.value)}
-              title="按组织树筛选：选中部门时包含该部门及全部下级部门内的人员"
-              className="w-full min-w-0 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 outline-none sm:w-auto sm:min-w-[10rem]"
-            >
-              <option value="">全部部门</option>
-              {deptNames.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
+            <div className="w-full min-w-0 sm:w-auto sm:min-w-[12rem]">
+              <TreeSelect
+                value={deptFilter}
+                onChange={setDeptFilter}
+                options={[{ value: '', label: '全部部门', depth: 0 }, ...deptTreePickerOptions(deptTree)]}
+                placeholder="全部部门"
+                searchPlaceholder="搜索部门…"
+              />
+            </div>
           ) : null}
+          <div className="w-full min-w-0 sm:w-auto sm:min-w-[10rem]">
+            <SearchableSelect
+              value={roleFilter}
+              onChange={setRoleFilter}
+              placeholder="全部角色"
+              searchPlaceholder="搜索角色…"
+              options={[{ value: '', label: '全部角色' }, ...roleFilterOptions.map((roleName) => ({ value: roleName, label: roleName }))]}
+            />
+          </div>
         </div>
         <button
           type="button"
@@ -12329,7 +14156,7 @@ function SystemUserView({
           </div>
         ) : filtered.length === 0 ? (
           <div className="py-16 text-center text-slate-500 text-sm">
-            {q.trim() || (listAllUsers && deptFilter)
+            {q.trim() || (listAllUsers && deptFilter) || roleFilter
               ? '无匹配用户'
               : listAllUsers
                 ? '暂无用户数据'
@@ -12340,15 +14167,19 @@ function SystemUserView({
         ) : (
           <>
             <div className="overflow-x-auto overscroll-x-contain">
-              <table className="w-full min-w-[36rem] text-left text-sm">
+              <table
+                className="table-fixed text-left text-sm"
+                ref={cols.tableRef} style={cols.tableStyle}
+              >
+                <colgroup>{cols.colNodes}</colgroup>
                 <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
                   <tr>
-                    <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">姓名</th>
-                    <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">手机号（登录）</th>
-                    <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">所属部门</th>
-                    <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">角色</th>
-                    <th className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">状态</th>
-                    <th className="px-3 py-3 text-right text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">操作</th>
+                    <ResizableTh col={cols.byId.name} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">姓名</ResizableTh>
+                    <ResizableTh col={cols.byId.username} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">手机号（登录）</ResizableTh>
+                    <ResizableTh col={cols.byId.dept} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">所属部门</ResizableTh>
+                    <ResizableTh col={cols.byId.roles} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">角色</ResizableTh>
+                    <ResizableTh col={cols.byId.status} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">状态</ResizableTh>
+                    <ResizableTh col={cols.byId.actions} className="px-3 py-3 text-right text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">操作</ResizableTh>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -12370,9 +14201,13 @@ function SystemUserView({
                         </td>
                         <td className="max-w-[8rem] truncate px-3 py-3 text-slate-600 sm:max-w-none sm:px-6 sm:py-4">{user.dept}</td>
                         <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
-                          <span className="rounded-md border border-indigo-100 bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700">
-                            {user.role}
-                          </span>
+                          <div className="flex max-w-[14rem] flex-wrap gap-1">
+                            {(user.roles?.length ? user.roles.map((r) => r.name) : [user.role]).filter(Boolean).map((r) => (
+                              <span key={`${user.id}-${r}`} className="rounded-md border border-indigo-100 bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700">
+                                {r}
+                              </span>
+                            ))}
+                          </div>
                         </td>
                         <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
                           {active ? (
@@ -12499,26 +14334,18 @@ function SystemUserView({
             </div>
           ) : (
             <>
-              <select
-                className={systemFieldClass}
-                value={deptNames.includes(ufDept) ? ufDept : ufDept ? `__other:${ufDept}` : ''}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v.startsWith('__other:')) setUfDept(v.slice('__other:'.length));
-                  else setUfDept(v);
-                }}
+              <TreeSelect
+                value={ufDept}
+                onChange={setUfDept}
+                options={userDeptTreeOptions}
+                placeholder="请选择部门"
+                searchPlaceholder="搜索部门…"
                 disabled={saving || (!listAllUsers && myDeptOk && deptNames.length <= 1)}
-              >
-                <option value="">请选择部门</option>
-                {deptNames.map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-                {ufDept.trim() && !deptNames.includes(ufDept) ? (
-                  <option value={`__other:${ufDept}`}>{ufDept}（当前值，不在部门列表中）</option>
-                ) : null}
-              </select>
+                invalidValueLabel={ufDept.trim() && !deptNames.includes(ufDept) ? `${ufDept}（当前值，不在部门列表中）` : undefined}
+              />
+              {ufDept.trim() && !deptNames.includes(ufDept) ? (
+                <p className="mt-1 text-[11px] text-amber-700">当前值不在部门树中，重新选择后会保存为新的部门。</p>
+              ) : null}
               {deptNames.length === 0 ? (
                 <p className="text-[11px] text-amber-700 mt-1.5">
                   暂无部门数据，请先在「部门管理」中新增部门后再创建用户。
@@ -12528,22 +14355,27 @@ function SystemUserView({
           )}
         </div>
         <div>
-          <label className="block text-xs font-medium text-slate-500 mb-1">角色</label>
-          <select
-            className={systemFieldClass}
-            value={ufRole}
-            onChange={(e) => setUfRole(e.target.value)}
-          >
-            {userDialogRoleSelectOptions.length === 0 ? (
-              <option value="招聘人员">招聘人员</option>
-            ) : (
-              userDialogRoleSelectOptions.map((r) => (
-                <option key={r.id} value={r.name}>
-                  {r.name}
-                </option>
-              ))
-            )}
-          </select>
+          <label className="block text-xs font-medium text-slate-500 mb-1">角色（可多选）</label>
+          <MultiSelectPanel
+            values={
+              ufRoleIds.length
+                ? ufRoleIds
+                : userDialogRoleSelectOptions.find((r) => r.name === ufRole)?.id
+                  ? [userDialogRoleSelectOptions.find((r) => r.name === ufRole)!.id]
+                  : []
+            }
+            options={userRolePickerOptions}
+            searchPlaceholder="搜索角色…"
+            pageSize={6}
+            emptyText="暂无可选角色"
+            onChange={(next) => {
+              const uniq = Array.from(new Set<string>(next.filter((x): x is string => Boolean(x))))
+              setUfRoleIds(uniq)
+              const first = userDialogRoleSelectOptions.find((x) => x.id === uniq[0])
+              setUfRole(first?.name || '招聘人员')
+            }}
+          />
+          <p className="mt-1 text-[11px] text-slate-500">第一个选中的角色会同步到旧字段作为主角色，保证历史逻辑兼容。</p>
         </div>
         <div>
           <label className="block text-xs font-medium text-slate-500 mb-1">状态</label>
@@ -12628,8 +14460,18 @@ function mapRoleMenuKeysFromRow(raw: unknown): string[] | null | undefined {
   }
 }
 
+const SYS_ROLE_COLUMNS: ColumnSpec[] = [
+  { id: 'name', defaultWidth: 240, minWidth: 170, maxWidth: 520 },
+  { id: 'desc', defaultWidth: 380, minWidth: 240, maxWidth: 840 },
+  { id: 'menuKeys', defaultWidth: 190, minWidth: 150, maxWidth: 360 },
+  { id: 'users', defaultWidth: 140, minWidth: 110, maxWidth: 220 },
+  { id: 'actions', defaultWidth: 170, minWidth: 130, maxWidth: 260 }
+];
+
 function SystemRoleView() {
+  const cols = useColumnWidths('sys-role', SYS_ROLE_COLUMNS);
   const [roles, setRoles] = useState<SysRole[]>([]);
+  const [roleMenuGroups, setRoleMenuGroups] = useState<{ group: string; items: { id: string; label: string }[] }[]>(ADMIN_ROLE_MENU_OPTIONS);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState('');
@@ -12641,10 +14483,11 @@ function SystemRoleView() {
   const [rfMenuMode, setRfMenuMode] = useState<'inherit' | 'custom'>('inherit');
   const [rfMenuChecked, setRfMenuChecked] = useState<Set<string>>(() => new Set());
   const [roleDeleteConfirm, setRoleDeleteConfirm] = useState<SysRole | null>(null);
+  const [dialogInitialSnapshot, setDialogInitialSnapshot] = useState('');
 
   const allMenuIds = useMemo(
-    () => ADMIN_ROLE_MENU_OPTIONS.flatMap((g) => g.items.map((i) => i.id)),
-    []
+    () => roleMenuGroups.flatMap((g) => g.items.map((i) => i.id)),
+    [roleMenuGroups]
   );
 
   const toggleRfMenuKey = (id: string) => {
@@ -12660,7 +14503,26 @@ function SystemRoleView() {
     setLoading(true);
     setError(null);
     try {
-      const rows = await adminFetchJson<Array<Record<string, unknown>>>('/api/roles');
+      const [rows, menuRows] = await Promise.all([
+        adminFetchJson<Array<Record<string, unknown>>>('/api/roles'),
+        adminFetchJson<Array<Record<string, unknown>>>('/api/menus').catch(() => null)
+      ]);
+      if (Array.isArray(menuRows)) {
+        const visible: { id: string; label: string }[] = [];
+        const hidden: { id: string; label: string }[] = [];
+        for (const m of menuRows) {
+          const id = String(m.id || '').trim();
+          const label = String(m.name || id).trim();
+          const type = String(m.type || '').trim();
+          if (!id || type === '目录') continue;
+          if (type === '不可见菜单') hidden.push({ id, label });
+          else visible.push({ id, label });
+        }
+        setRoleMenuGroups([
+          { group: '可见菜单', items: visible },
+          ...(hidden.length ? [{ group: '不可见菜单 / 数据权限', items: hidden }] : [])
+        ]);
+      }
       const mapped: SysRole[] = rows.map((r) => ({
         id: String(r.id ?? ''),
         name: String(r.name ?? ''),
@@ -12688,6 +14550,9 @@ function SystemRoleView() {
     setRfUsers('0');
     setRfMenuMode('inherit');
     setRfMenuChecked(new Set(allMenuIds));
+    setDialogInitialSnapshot(
+      JSON.stringify({ name: '', desc: '', users: '0', menuMode: 'inherit', menuChecked: [...allMenuIds].sort() })
+    );
   };
 
   const openEdit = (r: SysRole) => {
@@ -12702,11 +14567,32 @@ function SystemRoleView() {
       setRfMenuMode('custom');
       setRfMenuChecked(new Set(r.menuKeys));
     }
+    setDialogInitialSnapshot(
+      JSON.stringify({
+        name: r.name,
+        desc: r.desc,
+        users: String(r.users),
+        menuMode: r.menuKeys === undefined || r.menuKeys === null ? 'inherit' : 'custom',
+        menuChecked: [...(r.menuKeys === undefined || r.menuKeys === null ? allMenuIds : r.menuKeys)].sort()
+      })
+    );
   };
+
+  const dialogDirty =
+    Boolean(dialog && dialogInitialSnapshot) &&
+    JSON.stringify({
+      name: rfName,
+      desc: rfDesc,
+      users: rfUsers,
+      menuMode: rfMenuMode,
+      menuChecked: [...rfMenuChecked].sort()
+    }) !== dialogInitialSnapshot;
 
   const closeDialog = () => {
     if (saving) return;
+    if (dialogDirty && !window.confirm('已有未保存的修改，确定要退出吗？')) return;
     setDialog(null);
+    setDialogInitialSnapshot('');
   };
 
   const submitRole = async () => {
@@ -12814,14 +14700,19 @@ function SystemRoleView() {
         ) : filtered.length === 0 ? (
           <div className="py-16 text-center text-slate-500 text-sm">{q.trim() ? '无匹配角色' : '暂无角色数据'}</div>
         ) : (
-          <table className="w-full text-left text-sm">
+          <div className="overflow-x-auto">
+          <table
+            className="table-fixed text-left text-sm"
+            ref={cols.tableRef} style={cols.tableStyle}
+          >
+            <colgroup>{cols.colNodes}</colgroup>
             <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
               <tr>
-                <th className="px-6 py-4 font-medium">角色名称</th>
-                <th className="px-6 py-4 font-medium">角色描述</th>
-                <th className="px-6 py-4 font-medium">菜单权限</th>
-                <th className="px-6 py-4 font-medium">关联用户数</th>
-                <th className="px-6 py-4 font-medium text-right">操作</th>
+                <ResizableTh col={cols.byId.name} className="px-6 py-4 font-medium">角色名称</ResizableTh>
+                <ResizableTh col={cols.byId.desc} className="px-6 py-4 font-medium">角色描述</ResizableTh>
+                <ResizableTh col={cols.byId.menuKeys} className="px-6 py-4 font-medium">菜单权限</ResizableTh>
+                <ResizableTh col={cols.byId.users} className="px-6 py-4 font-medium">关联用户数</ResizableTh>
+                <ResizableTh col={cols.byId.actions} className="px-6 py-4 font-medium text-right">操作</ResizableTh>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -12864,6 +14755,7 @@ function SystemRoleView() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 
@@ -12943,7 +14835,7 @@ function SystemRoleView() {
           </div>
           {rfMenuMode === 'custom' ? (
             <div className="space-y-3 max-h-48 overflow-y-auto rounded-lg border border-slate-100 bg-slate-50/80 p-3">
-              {ADMIN_ROLE_MENU_OPTIONS.map((g) => (
+              {roleMenuGroups.map((g) => (
                 <div key={g.group}>
                   <p className="text-[11px] font-medium text-slate-500 mb-1.5">{g.group}</p>
                   <div className="flex flex-wrap gap-x-4 gap-y-2">
@@ -12991,10 +14883,20 @@ const SYSTEM_MENU_ICON_OPTIONS = [
   'Network',
   'Shield',
   'UserCog',
-  'Tags'
+  'Tags',
+  'Bot'
 ] as const;
 
+const SYS_MENU_COLUMNS: ColumnSpec[] = [
+  { id: 'name', defaultWidth: 360, minWidth: 220, maxWidth: 840 },
+  { id: 'icon', defaultWidth: 110, minWidth: 90, maxWidth: 180 },
+  { id: 'type', defaultWidth: 160, minWidth: 120, maxWidth: 260 },
+  { id: 'path', defaultWidth: 300, minWidth: 220, maxWidth: 640 },
+  { id: 'actions', defaultWidth: 210, minWidth: 160, maxWidth: 340 }
+];
+
 function SystemMenuView() {
+  const cols = useColumnWidths('sys-menu', SYS_MENU_COLUMNS);
   const [menus, setMenus] = useState<Menu[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -13011,6 +14913,7 @@ function SystemMenuView() {
   const [mfPath, setMfPath] = useState('/');
   const [mfLevel, setMfLevel] = useState('0');
   const [menuDeleteConfirm, setMenuDeleteConfirm] = useState<Menu | null>(null);
+  const [dialogInitialSnapshot, setDialogInitialSnapshot] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -13078,6 +14981,8 @@ function SystemMenuView() {
         return <UserCog className="w-4 h-4" />;
       case 'Tags':
         return <Tags className="w-4 h-4" />;
+      case 'Bot':
+        return <Bot className="w-4 h-4" />;
       default:
         return <MenuIcon className="w-4 h-4" />;
     }
@@ -13086,19 +14991,31 @@ function SystemMenuView() {
   const openCreate = () => {
     setDialog({ mode: 'create' });
     setMfName('');
-    setMfType('菜单');
+    setMfType('可见菜单');
     setMfIcon('Briefcase');
     setMfPath('/');
     setMfLevel('0');
+    setDialogInitialSnapshot(
+      JSON.stringify({ name: '', type: '可见菜单', icon: 'Briefcase', path: '/', level: '0' })
+    );
   };
 
   const openChild = (parent: Menu) => {
     setDialog({ mode: 'child', parent });
     setMfName('');
-    setMfType('菜单');
+    setMfType('可见菜单');
     setMfIcon('Briefcase');
     setMfPath(suggestedChildMenuPath(parent));
     setMfLevel(String((Number(parent.level) || 0) + 1));
+    setDialogInitialSnapshot(
+      JSON.stringify({
+        name: '',
+        type: '可见菜单',
+        icon: 'Briefcase',
+        path: suggestedChildMenuPath(parent),
+        level: String((Number(parent.level) || 0) + 1)
+      })
+    );
   };
 
   const openEdit = (m: Menu) => {
@@ -13108,11 +15025,27 @@ function SystemMenuView() {
     setMfIcon(m.icon || 'Menu');
     setMfPath(m.path || '/');
     setMfLevel(String(Number(m.level) || 0));
+    setDialogInitialSnapshot(
+      JSON.stringify({
+        name: m.name,
+        type: m.type || '菜单',
+        icon: m.icon || 'Menu',
+        path: m.path || '/',
+        level: String(Number(m.level) || 0)
+      })
+    );
   };
+
+  const dialogDirty =
+    Boolean(dialog && dialogInitialSnapshot) &&
+    JSON.stringify({ name: mfName, type: mfType, icon: mfIcon, path: mfPath, level: mfLevel }) !==
+      dialogInitialSnapshot;
 
   const closeDialog = () => {
     if (saving) return;
+    if (dialogDirty && !window.confirm('已有未保存的修改，确定要退出吗？')) return;
     setDialog(null);
+    setDialogInitialSnapshot('');
   };
 
   const submitMenu = async () => {
@@ -13127,7 +15060,7 @@ function SystemMenuView() {
     try {
       const payload = {
         name,
-        type: mfType.trim() || '菜单',
+        type: mfType.trim() || '可见菜单',
         icon: mfIcon.trim() || 'Menu',
         path: mfPath.trim() || '/',
         level: Number(mfLevel) || 0
@@ -13222,14 +15155,19 @@ function SystemMenuView() {
           <div className="py-16 text-center text-slate-500 text-sm">{q.trim() ? '无匹配菜单' : '暂无菜单数据'}</div>
         ) : (
           <>
-            <table className="w-full text-left text-sm">
+            <div className="overflow-x-auto">
+            <table
+              className="table-fixed text-left text-sm"
+              ref={cols.tableRef} style={cols.tableStyle}
+            >
+              <colgroup>{cols.colNodes}</colgroup>
               <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
                 <tr>
-                  <th className="px-6 py-4 font-medium">菜单名称</th>
-                  <th className="px-6 py-4 font-medium">图标</th>
-                  <th className="px-6 py-4 font-medium">类型</th>
-                  <th className="px-6 py-4 font-medium">路由路径</th>
-                  <th className="px-6 py-4 font-medium text-right">操作</th>
+                  <ResizableTh col={cols.byId.name} className="px-6 py-4 font-medium">菜单名称</ResizableTh>
+                  <ResizableTh col={cols.byId.icon} className="px-6 py-4 font-medium">图标</ResizableTh>
+                  <ResizableTh col={cols.byId.type} className="px-6 py-4 font-medium">类型</ResizableTh>
+                  <ResizableTh col={cols.byId.path} className="px-6 py-4 font-medium">路由路径</ResizableTh>
+                  <ResizableTh col={cols.byId.actions} className="px-6 py-4 font-medium text-right">操作</ResizableTh>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -13248,7 +15186,11 @@ function SystemMenuView() {
                     <td className="px-6 py-4">
                       <span
                         className={`px-2 py-1 rounded text-xs font-medium ${
-                          menu.type === '目录' ? 'bg-slate-100 text-slate-700' : 'bg-blue-50 text-blue-700'
+                          menu.type === '目录'
+                            ? 'bg-slate-100 text-slate-700'
+                            : menu.type === '不可见菜单'
+                              ? 'bg-amber-50 text-amber-800'
+                              : 'bg-blue-50 text-blue-700'
                         }`}
                       >
                         {menu.type}
@@ -13282,6 +15224,7 @@ function SystemMenuView() {
                 ))}
               </tbody>
             </table>
+            </div>
             <ListPaginationBar
               page={menuListPage}
               pageSize={menuPageSize}
@@ -13335,7 +15278,8 @@ function SystemMenuView() {
             <label className="block text-xs font-medium text-slate-500 mb-1">类型</label>
             <select className={systemFieldClass} value={mfType} onChange={(e) => setMfType(e.target.value)}>
               <option value="目录">目录</option>
-              <option value="菜单">菜单</option>
+              <option value="可见菜单">可见菜单</option>
+              <option value="不可见菜单">不可见菜单（数据权限）</option>
             </select>
           </div>
           <div>

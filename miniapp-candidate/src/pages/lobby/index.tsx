@@ -22,7 +22,14 @@ export default function LobbyPage() {
     flowLogInfo('等候区', `岗位 ${j.title} session=${(Taro.getStorageSync('session_id') as string) || ''}`)
     setProfile(p)
     setJob(j)
-    void prefetchInterviewQuestions(j.id, p.name, typeof p.resumeScreeningId === 'number' ? p.resumeScreeningId : undefined)
+    const sid = p.sessionId || ((Taro.getStorageSync('session_id') as string) || '')
+    void prefetchInterviewQuestions(
+      j.id,
+      p.name,
+      typeof p.resumeScreeningId === 'number' ? p.resumeScreeningId : undefined,
+      p.inviteCode,
+      sid
+    )
   })
 
   /** 答题页会拉题、建会话；纯 AI 面无需人工接听视频 */

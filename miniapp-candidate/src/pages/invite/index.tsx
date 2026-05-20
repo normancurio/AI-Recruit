@@ -57,7 +57,8 @@ export default function InvitePage() {
         name: data.candidateName || '候选人',
         phone: '',
         inviteCode: invite.inviteId,
-        openid
+        openid,
+        sessionId: data.sessionId
       }
       if (typeof data.resumeScreeningId === 'number' && data.resumeScreeningId > 0) {
         profile.resumeScreeningId = data.resumeScreeningId
@@ -104,4 +105,3 @@ export default function InvitePage() {
     </View>
   )
 }
-

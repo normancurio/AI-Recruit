@@ -11,6 +11,8 @@ export type AdminLoginProfile = {
   dept?: string
   /** 非空时与职级默认菜单求交，仅显示这些侧边栏 id（来自管理库 roles.menu_keys） */
   allowedMenuKeys?: string[]
+  /** 管理库多角色名称列表 */
+  roles?: string[]
 }
 
 export function getAdminLoginProfile(): AdminLoginProfile | null {
@@ -44,7 +46,10 @@ export function getAdminLoginProfile(): AdminLoginProfile | null {
         username: p.username,
         uiRole: p.uiRole,
         ...(typeof deptRaw === 'string' ? { dept } : {}),
-        ...(allowedMenuKeys !== undefined ? { allowedMenuKeys } : {})
+        ...(allowedMenuKeys !== undefined ? { allowedMenuKeys } : {}),
+        ...(Array.isArray((p as { roles?: unknown }).roles)
+          ? { roles: (p as { roles: unknown[] }).roles.map((x) => String(x || '').trim()).filter(Boolean) }
+          : {})
       }
     }
   } catch {

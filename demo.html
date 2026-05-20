@@ -1,0 +1,806 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>招聘权限系统 Demo</title>
+  <style>
+    :root {
+      --bg: #f4efe6;
+      --paper: #fffaf0;
+      --ink: #15201b;
+      --muted: #6c756d;
+      --line: #ded2bd;
+      --green: #0f6b4d;
+      --green-2: #dcefe5;
+      --orange: #c2652d;
+      --orange-2: #fff0df;
+      --blue: #315b91;
+      --blue-2: #e3ecf8;
+      --red: #a34040;
+      --shadow: 0 18px 55px rgba(64, 48, 28, .13);
+      --radius: 22px;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 10%, rgba(194, 101, 45, .16), transparent 28%),
+        radial-gradient(circle at 88% 3%, rgba(49, 91, 145, .15), transparent 30%),
+        linear-gradient(135deg, #f7f1e7 0%, #f2eadb 52%, #efe5d2 100%);
+      font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      min-height: 100vh;
+    }
+
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+
+    .shell {
+      width: min(1480px, calc(100vw - 42px));
+      margin: 0 auto;
+      padding: 28px 0 40px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
+    .hero-card {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid rgba(21, 32, 27, .12);
+      border-radius: 30px;
+      background: rgba(255, 250, 240, .74);
+      box-shadow: var(--shadow);
+      padding: 28px;
+    }
+
+    .hero-card::after {
+      content: "";
+      position: absolute;
+      right: -90px;
+      top: -120px;
+      width: 300px;
+      height: 300px;
+      border-radius: 50%;
+      background: repeating-linear-gradient(45deg, rgba(15, 107, 77, .10) 0 8px, transparent 8px 17px);
+      transform: rotate(8deg);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid rgba(15, 107, 77, .22);
+      border-radius: 999px;
+      background: rgba(220, 239, 229, .72);
+      color: var(--green);
+      padding: 7px 12px;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: .04em;
+    }
+
+    h1 {
+      position: relative;
+      z-index: 1;
+      margin: 18px 0 12px;
+      font-size: clamp(32px, 4vw, 56px);
+      line-height: 1;
+      letter-spacing: -.08em;
+    }
+
+    .hero p {
+      position: relative;
+      z-index: 1;
+      margin: 0;
+      max-width: 760px;
+      color: #4c574f;
+      font-size: 16px;
+      line-height: 1.8;
+    }
+
+    .formula {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      height: 100%;
+    }
+
+    .formula-box {
+      min-height: 150px;
+      border: 1px solid rgba(21, 32, 27, .12);
+      border-radius: 26px;
+      background: rgba(255, 250, 240, .74);
+      box-shadow: var(--shadow);
+      padding: 18px;
+    }
+
+    .formula-box b {
+      display: block;
+      font-size: 20px;
+      margin-bottom: 8px;
+    }
+
+    .formula-box span {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 300px 1fr 420px;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .panel {
+      border: 1px solid rgba(21, 32, 27, .12);
+      border-radius: var(--radius);
+      background: rgba(255, 250, 240, .82);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 18px 18px 12px;
+      border-bottom: 1px solid rgba(21, 32, 27, .08);
+    }
+
+    .panel-head h2 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: -.03em;
+    }
+
+    .panel-body { padding: 16px 18px 18px; }
+
+    .user-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .user-btn {
+      width: 100%;
+      text-align: left;
+      border: 1px solid rgba(21, 32, 27, .10);
+      border-radius: 18px;
+      background: #fff9ed;
+      padding: 14px;
+      transition: .18s ease;
+    }
+
+    .user-btn:hover { transform: translateY(-1px); border-color: rgba(15, 107, 77, .35); }
+    .user-btn.active {
+      background: #17362b;
+      color: #fffaf0;
+      border-color: #17362b;
+      box-shadow: 0 14px 30px rgba(23, 54, 43, .22);
+    }
+
+    .name-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      font-weight: 900;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: 800;
+      background: var(--green-2);
+      color: var(--green);
+      white-space: nowrap;
+    }
+
+    .user-btn.active .tag {
+      background: rgba(255, 250, 240, .16);
+      color: #fff1d5;
+    }
+
+    .sub {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .user-btn.active .sub { color: rgba(255, 250, 240, .72); }
+
+    .org-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .tree {
+      border-radius: 20px;
+      background: #fff8eb;
+      border: 1px solid rgba(21, 32, 27, .1);
+      padding: 16px;
+      min-height: 430px;
+    }
+
+    .node {
+      position: relative;
+      margin: 7px 0 7px var(--indent, 0);
+      border: 1px solid rgba(21, 32, 27, .1);
+      border-radius: 14px;
+      padding: 10px 12px;
+      background: rgba(255, 255, 255, .46);
+      transition: .18s ease;
+    }
+
+    .node.active {
+      background: #17362b;
+      color: #fffaf0;
+      border-color: #17362b;
+      transform: translateX(4px);
+    }
+
+    .node.scope {
+      border-color: rgba(15, 107, 77, .36);
+      box-shadow: inset 4px 0 0 var(--green);
+    }
+
+    .node small {
+      display: block;
+      color: var(--muted);
+      margin-top: 4px;
+      font-size: 12px;
+    }
+
+    .node.active small { color: rgba(255, 250, 240, .7); }
+
+    .rule-stack {
+      display: grid;
+      gap: 12px;
+    }
+
+    .rule-card {
+      border: 1px solid rgba(21, 32, 27, .1);
+      border-radius: 18px;
+      background: #fff8eb;
+      padding: 14px;
+    }
+
+    .rule-card h3 {
+      margin: 0 0 8px;
+      font-size: 15px;
+    }
+
+    .rule-card p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.7;
+      font-size: 13px;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .pill {
+      border: 1px solid rgba(21, 32, 27, .13);
+      border-radius: 999px;
+      background: #fff8eb;
+      padding: 9px 12px;
+      color: #4b554d;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .pill.active {
+      background: var(--orange);
+      border-color: var(--orange);
+      color: #fffaf0;
+    }
+
+    .cards {
+      display: grid;
+      gap: 12px;
+    }
+
+    .resume-card {
+      border: 1px solid rgba(21, 32, 27, .1);
+      border-radius: 18px;
+      background: #fff8eb;
+      padding: 14px;
+      transition: .18s ease;
+    }
+
+    .resume-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 16px 34px rgba(64, 48, 28, .12);
+    }
+
+    .resume-card.hidden-item {
+      opacity: .52;
+      filter: grayscale(.25);
+    }
+
+    .resume-top {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .resume-title {
+      font-weight: 950;
+      font-size: 16px;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 10px;
+    }
+
+    .mini {
+      border-radius: 999px;
+      background: rgba(49, 91, 145, .10);
+      color: var(--blue);
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .status-ok { background: var(--green-2); color: var(--green); }
+    .status-no { background: #f8dddd; color: var(--red); }
+
+    .detail {
+      position: sticky;
+      top: 18px;
+    }
+
+    .big-number {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .metric {
+      border-radius: 18px;
+      background: #fff8eb;
+      border: 1px solid rgba(21, 32, 27, .1);
+      padding: 14px;
+    }
+
+    .metric b {
+      display: block;
+      font-size: 28px;
+      letter-spacing: -.05em;
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .explain {
+      border-radius: 18px;
+      background: #17362b;
+      color: #fffaf0;
+      padding: 16px;
+      line-height: 1.8;
+    }
+
+    .explain h3 {
+      margin: 0 0 10px;
+      font-size: 18px;
+    }
+
+    .explain ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+
+    .danger {
+      margin-top: 12px;
+      border: 1px dashed rgba(163, 64, 64, .45);
+      border-radius: 16px;
+      background: rgba(248, 221, 221, .55);
+      color: #6f2929;
+      padding: 12px;
+      line-height: 1.7;
+      font-size: 13px;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .flow div {
+      border-radius: 16px;
+      background: var(--blue-2);
+      color: #244a78;
+      padding: 12px;
+      font-size: 13px;
+      font-weight: 900;
+      text-align: center;
+    }
+
+    @media (max-width: 1180px) {
+      .layout, .hero { grid-template-columns: 1fr; }
+      .detail { position: static; }
+    }
+
+    @media (max-width: 760px) {
+      .shell { width: min(100vw - 24px, 1480px); }
+      .formula, .org-grid, .big-number, .flow { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div class="hero-card">
+        <span class="eyebrow">权限系统 Demo / 可点击原型</span>
+        <h1>角色管功能，组织管范围，资源归属管数据隔离。</h1>
+        <p>
+          这个页面用 mock 数据演示招聘系统权限：招聘经理只看自己招聘部门，交付经理看自己交付范围内项目，招聘专员默认只看自己上传的简历资产。
+        </p>
+      </div>
+      <div class="formula">
+        <div class="formula-box">
+          <b>角色</b>
+          <span>决定能做什么：项目管理、岗位分配、简历查看、用户管理。</span>
+        </div>
+        <div class="formula-box">
+          <b>组织</b>
+          <span>决定管哪里：公司、交付部、招聘部、一部、二部。</span>
+        </div>
+        <div class="formula-box">
+          <b>资产</b>
+          <span>决定数据是谁的：上传人、所属招聘部门、所属项目。</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="layout">
+      <aside class="panel">
+        <div class="panel-head">
+          <h2>切换登录用户</h2>
+          <span class="tag">Mock</span>
+        </div>
+        <div class="panel-body">
+          <div class="user-list" id="userList"></div>
+        </div>
+      </aside>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>组织范围与规则</h2>
+          <span class="tag" id="currentScopeTag">-</span>
+        </div>
+        <div class="panel-body">
+          <div class="org-grid">
+            <div class="tree" id="orgTree"></div>
+            <div>
+              <div class="rule-stack" id="ruleStack"></div>
+              <div class="flow">
+                <div>角色：能干什么</div>
+                <div>组织：能管哪里</div>
+                <div>资源：能看哪些</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="panel detail">
+        <div class="panel-head">
+          <h2>权限结果</h2>
+          <span class="tag" id="visibleTag">0 条可见</span>
+        </div>
+        <div class="panel-body">
+          <div class="big-number">
+            <div class="metric"><b id="projectCount">0</b><span>可见项目</span></div>
+            <div class="metric"><b id="resumeCount">0</b><span>可见简历</span></div>
+            <div class="metric"><b id="hiddenCount">0</b><span>被隔离</span></div>
+          </div>
+          <div class="explain" id="explainBox"></div>
+          <div class="danger">
+            重点：同一个岗位下，两个招聘专员上传的简历也不是默认共享。共享、转交、协作要单独授权。
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="panel" style="margin-top:18px;">
+      <div class="panel-head">
+        <h2>简历资产列表</h2>
+        <span class="tag">点击卡片看原因</span>
+      </div>
+      <div class="panel-body">
+        <div class="toolbar">
+          <button class="pill active" data-filter="all">全部 mock 数据</button>
+          <button class="pill" data-filter="visible">只看可见</button>
+          <button class="pill" data-filter="hidden">只看不可见</button>
+        </div>
+        <div class="cards" id="resumeCards"></div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const orgs = [
+      { id: "gbx", name: "金保信", type: "公司", parent: null, level: 0 },
+      { id: "delivery", name: "交付部", type: "交付", parent: "gbx", level: 1 },
+      { id: "delivery-1", name: "交付一部", type: "交付", parent: "delivery", level: 2 },
+      { id: "delivery-2", name: "交付二部", type: "交付", parent: "delivery", level: 2 },
+      { id: "recruit", name: "招聘部", type: "招聘", parent: "gbx", level: 1 },
+      { id: "recruit-1", name: "招聘一部", type: "招聘", parent: "recruit", level: 2 },
+      { id: "recruit-2", name: "招聘二部", type: "招聘", parent: "recruit", level: 2 }
+    ];
+
+    const users = [
+      { id: "u-admin", name: "陈总", role: "公司管理员", scope: "gbx", org: "金保信" },
+      { id: "u-delivery", name: "王交付", role: "交付经理", scope: "delivery-1", org: "交付一部" },
+      { id: "u-rm1", name: "李瑞", role: "招聘经理", scope: "recruit-1", org: "招聘一部" },
+      { id: "u-rm2", name: "周敏", role: "招聘经理", scope: "recruit-2", org: "招聘二部" },
+      { id: "u-rec1", name: "安隔", role: "招聘专员", scope: "recruit-1", org: "招聘一部" },
+      { id: "u-rec2", name: "赵可", role: "招聘专员", scope: "recruit-1", org: "招聘一部" },
+      { id: "u-rec3", name: "孙宁", role: "招聘专员", scope: "recruit-2", org: "招聘二部" }
+    ];
+
+    const projects = [
+      { id: "p1", name: "平安寿险项目", deliveryOrg: "delivery-1", recruitOrgs: ["recruit-1"] },
+      { id: "p2", name: "银行客服外包项目", deliveryOrg: "delivery-1", recruitOrgs: ["recruit-2"] },
+      { id: "p3", name: "制造业蓝领项目", deliveryOrg: "delivery-2", recruitOrgs: ["recruit-1", "recruit-2"] }
+    ];
+
+    const resumes = [
+      { id: "r1", candidate: "罗熊", job: "Java 开发", project: "p1", owner: "u-rec1", ownerOrg: "recruit-1", score: 86 },
+      { id: "r2", candidate: "张雨", job: "大数据开发", project: "p1", owner: "u-rec2", ownerOrg: "recruit-1", score: 78 },
+      { id: "r3", candidate: "陈晨", job: "客服专员", project: "p2", owner: "u-rec3", ownerOrg: "recruit-2", score: 81 },
+      { id: "r4", candidate: "刘洋", job: "Java 开发", project: "p1", owner: "u-rec1", ownerOrg: "recruit-1", score: 64 },
+      { id: "r5", candidate: "黄靖", job: "生产主管", project: "p3", owner: "u-rec3", ownerOrg: "recruit-2", score: 73 },
+      { id: "r6", candidate: "吴越", job: "质检员", project: "p3", owner: "u-rec2", ownerOrg: "recruit-1", score: 69 }
+    ];
+
+    let currentUserId = "u-rm1";
+    let filter = "all";
+    let selectedResumeId = "r1";
+
+    function orgName(id) {
+      return orgs.find(o => o.id === id)?.name || "-";
+    }
+
+    function userName(id) {
+      return users.find(u => u.id === id)?.name || "-";
+    }
+
+    function projectName(id) {
+      return projects.find(p => p.id === id)?.name || "-";
+    }
+
+    function childOrgIds(rootId) {
+      const out = new Set([rootId]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        orgs.forEach(o => {
+          if (o.parent && out.has(o.parent) && !out.has(o.id)) {
+            out.add(o.id);
+            changed = true;
+          }
+        });
+      }
+      return out;
+    }
+
+    function canSeeResume(user, resume) {
+      const scopeSet = childOrgIds(user.scope);
+      const project = projects.find(p => p.id === resume.project);
+
+      if (user.role === "公司管理员") {
+        return { ok: true, reason: "公司管理员拥有本公司全部数据权限。" };
+      }
+
+      if (user.role === "交付经理") {
+        const ok = project && scopeSet.has(project.deliveryOrg);
+        return ok
+          ? { ok: true, reason: `项目归属 ${orgName(project.deliveryOrg)}，在该交付经理范围内。` }
+          : { ok: false, reason: "项目不属于该交付经理的交付组织范围。" };
+      }
+
+      if (user.role === "招聘经理") {
+        const ok = scopeSet.has(resume.ownerOrg);
+        return ok
+          ? { ok: true, reason: `简历归属 ${orgName(resume.ownerOrg)}，属于该招聘经理管理范围。` }
+          : { ok: false, reason: `简历归属 ${orgName(resume.ownerOrg)}，不是该招聘经理部门。` };
+      }
+
+      if (user.role === "招聘专员") {
+        const ok = resume.owner === user.id;
+        return ok
+          ? { ok: true, reason: "这是该招聘专员自己上传的简历资产。" }
+          : { ok: false, reason: `这份简历由 ${userName(resume.owner)} 上传，专员之间默认不共享。` };
+      }
+
+      return { ok: false, reason: "没有匹配到可用权限规则。" };
+    }
+
+    function canSeeProject(user, project) {
+      const scopeSet = childOrgIds(user.scope);
+      if (user.role === "公司管理员") return true;
+      if (user.role === "交付经理") return scopeSet.has(project.deliveryOrg);
+      if (user.role === "招聘经理") return project.recruitOrgs.some(id => scopeSet.has(id));
+      if (user.role === "招聘专员") {
+        return resumes.some(r => r.project === project.id && r.owner === user.id);
+      }
+      return false;
+    }
+
+    function renderUsers() {
+      const box = document.getElementById("userList");
+      box.innerHTML = users.map(u => `
+        <button class="user-btn ${u.id === currentUserId ? "active" : ""}" data-user="${u.id}">
+          <div class="name-line">
+            <span>${u.name}</span>
+            <span class="tag">${u.role}</span>
+          </div>
+          <div class="sub">范围：${u.org}</div>
+        </button>
+      `).join("");
+
+      box.querySelectorAll("button").forEach(btn => {
+        btn.onclick = () => {
+          currentUserId = btn.dataset.user;
+          selectedResumeId = resumes[0].id;
+          render();
+        };
+      });
+    }
+
+    function renderOrgTree(user) {
+      const scopeSet = childOrgIds(user.scope);
+      document.getElementById("currentScopeTag").textContent = `${user.role} / ${orgName(user.scope)}`;
+      document.getElementById("orgTree").innerHTML = orgs.map(o => `
+        <div class="node ${o.id === user.scope ? "active" : ""} ${scopeSet.has(o.id) ? "scope" : ""}" style="--indent:${o.level * 18}px">
+          ${o.name}
+          <small>${o.type}${scopeSet.has(o.id) ? " · 当前范围内" : ""}</small>
+        </div>
+      `).join("");
+    }
+
+    function renderRules(user) {
+      const rules = {
+        "公司管理员": [
+          ["功能权限", "可管理本公司组织、用户、角色、项目、岗位、简历。"],
+          ["数据范围", "范围是整家公司，所有项目和简历都可见。"],
+          ["资产规则", "可以查看和处理本公司全部资产。"]
+        ],
+        "交付经理": [
+          ["功能权限", "重点管理项目和岗位需求，可查看自己交付范围内项目。"],
+          ["数据范围", "按交付组织树过滤，默认看自己部门及下级部门项目。"],
+          ["资产规则", "是否能看简历详情可配置，但不能跨交付范围。"]
+        ],
+        "招聘经理": [
+          ["功能权限", "负责本招聘部门的岗位分配、简历过程和人员协同。"],
+          ["数据范围", "只能绑定一个招聘部门，只看本部门数据。"],
+          ["资产规则", "能看本部门招聘专员上传的简历。"]
+        ],
+        "招聘专员": [
+          ["功能权限", "上传简历、跟进自己负责的候选人。"],
+          ["数据范围", "按本人分配岗位和本人上传资产过滤。"],
+          ["资产规则", "只看自己上传的简历，专员之间默认隔离。"]
+        ]
+      };
+
+      document.getElementById("ruleStack").innerHTML = rules[user.role].map(r => `
+        <div class="rule-card">
+          <h3>${r[0]}</h3>
+          <p>${r[1]}</p>
+        </div>
+      `).join("");
+    }
+
+    function renderResumes(user) {
+      const list = resumes.map(r => ({ ...r, access: canSeeResume(user, r) }));
+      const shown = list.filter(r => {
+        if (filter === "visible") return r.access.ok;
+        if (filter === "hidden") return !r.access.ok;
+        return true;
+      });
+
+      document.getElementById("resumeCards").innerHTML = shown.map(r => `
+        <button class="resume-card ${r.access.ok ? "" : "hidden-item"}" data-resume="${r.id}">
+          <div class="resume-top">
+            <div>
+              <div class="resume-title">${r.candidate} · ${r.job}</div>
+              <div class="sub">${projectName(r.project)}</div>
+            </div>
+            <span class="tag ${r.access.ok ? "status-ok" : "status-no"}">${r.access.ok ? "可见" : "不可见"}</span>
+          </div>
+          <div class="meta">
+            <span class="mini">上传人：${userName(r.owner)}</span>
+            <span class="mini">招聘部门：${orgName(r.ownerOrg)}</span>
+            <span class="mini">简历分：${r.score}</span>
+          </div>
+        </button>
+      `).join("");
+
+      document.querySelectorAll(".resume-card").forEach(card => {
+        card.onclick = () => {
+          selectedResumeId = card.dataset.resume;
+          renderDetail(user);
+        };
+      });
+    }
+
+    function renderDetail(user) {
+      const visibleResumes = resumes.filter(r => canSeeResume(user, r).ok);
+      const visibleProjects = projects.filter(p => canSeeProject(user, p));
+      const hidden = resumes.length - visibleResumes.length;
+      const selected = resumes.find(r => r.id === selectedResumeId) || resumes[0];
+      const access = canSeeResume(user, selected);
+
+      document.getElementById("visibleTag").textContent = `${visibleResumes.length} 条可见`;
+      document.getElementById("projectCount").textContent = visibleProjects.length;
+      document.getElementById("resumeCount").textContent = visibleResumes.length;
+      document.getElementById("hiddenCount").textContent = hidden;
+
+      document.getElementById("explainBox").innerHTML = `
+        <h3>${user.name} 看「${selected.candidate}」</h3>
+        <ul>
+          <li>当前角色：${user.role}</li>
+          <li>组织范围：${orgName(user.scope)}</li>
+          <li>简历归属：${orgName(selected.ownerOrg)} / ${userName(selected.owner)}</li>
+          <li>判断结果：${access.ok ? "允许查看" : "禁止查看"}</li>
+          <li>原因：${access.reason}</li>
+        </ul>
+      `;
+    }
+
+    function bindFilter() {
+      document.querySelectorAll(".pill").forEach(btn => {
+        btn.onclick = () => {
+          filter = btn.dataset.filter;
+          document.querySelectorAll(".pill").forEach(x => x.classList.remove("active"));
+          btn.classList.add("active");
+          render();
+        };
+      });
+    }
+
+    function render() {
+      const user = users.find(u => u.id === currentUserId);
+      renderUsers();
+      renderOrgTree(user);
+      renderRules(user);
+      renderResumes(user);
+      renderDetail(user);
+    }
+
+    bindFilter();
+    render();
+  </script>
+</body>
+</html>

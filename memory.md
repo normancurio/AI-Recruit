@@ -1,0 +1,392 @@
+# AI-Recruit 本地调试上下文
+
+## 项目与本地服务
+
+- 项目路径：`/Users/jsonhe/shenpu-project/AI-Recruit`
+- API：`http://127.0.0.1:3011`
+- 管理后台：`http://127.0.0.1:3010`
+- 候选人 H5：`http://127.0.0.1:10086`
+- 当前目标：本地从零跑通完整招聘流程：
+  1. 后台创建/选择项目与岗位
+  2. 上传简历做 AI 筛查
+  3. 发起面试邀约并生成邀请码
+  4. 候选人 H5 填姓名、手机号、邀请码
+  5. 完成 AI 面试
+  6. 回后台查看面试报告
+
+## 本地隔离环境
+
+- `.env` 已配置本地隔离环境，不打线上 API。
+- MySQL：`192.168.2.114:3306`
+- MySQL 用户：`root`
+- MySQL 密码：`MySQL@2026!`
+- 数据库：`ai_recruit` / `ai_recruit_admin`
+- Redis：`192.168.2.114:6379`
+- Redis 密码：`Redis@2026!`
+- `DASHSCOPE_API_KEY` 已从线上 `.env` 同步到本地。
+- `.env` 已追加：`ALLOW_H5_DEV_LOGIN="1"`
+
+## 远程机器与数据
+
+- timbo 本地隔离机器：
+  - SSH MCP：`user-company-mac-ssh`
+  - `connectionName=timbo-ssh`
+  - 地址：`timbo@192.168.2.114`
+  - 已安装 MySQL 8.0.40 和 Redis 8.6.3，均开机自启
+- 线上服务器：
+  - SSH MCP：`user-家庭医生-ssh`
+  - `connectionName=家庭医生-ssh`
+  - 线上项目目录：`/opt/AI-Recruit`
+- 已从线上只读 `mysqldump` 了 `ai_recruit` / `ai_recruit_admin` 并完整导入 timbo。
+- 已校验表数量和每表行数一致。
+- 没有修改线上数据库。
+- 线上简历原文件不在 `/opt/AI-Recruit/storage/resumes`，真实位置是 Docker volume：
+  - `/var/lib/docker/volumes/ai-recruit_resume_screening_files/_data`
+- 已把线上简历原文件同步到本地：
+  - `/Users/jsonhe/shenpu-project/AI-Recruit/storage/resumes`
+- 同步后校验：
+  - `resume_screening_files` 共 474 条；
+  - 本地 473 条能匹配到原文件；
+  - 仅 `screening_id=579` 缺文件，原文件名：`申朴-java-罗熊.pdf`；
+  - 该文件在线上 volume、`/opt/AI-Recruit/storage`、`/opt/AI-Recruit` 都没找到。
+- `.gitignore` 已忽略 `storage/resumes/`，避免真实简历文件误提交。
+
+## timbo SSH 与 OpenClaw
+
+- `company-ssh` MCP 的可用连接：
+  - MCP server：`user-company-mac-ssh`
+  - `connectionName=timbo-ssh`
+  - SSH：`timbo@192.168.2.114:22`
+- 目标 Mac SSH 状态：
+  - `Remote Login: On`
+  - `PasswordAuthentication yes`
+  - `KbdInteractiveAuthentication yes`
+  - `UsePAM yes`
+  - 监听 `0.0.0.0:22`
+  - 本机防火墙关闭
+- `timbo` 账号密码已用 `dscl . -authonly timbo '123456'` 校验通过。
+- 同事连不上 SSH 时，已在目标日志里看到 `invalid user tibmo`，正确用户名是 `timbo`，不是 `tibmo`。
+- 如果客户端报 `Too many authentication failures`，通常是本机 SSH agent 先尝试太多公钥；可用：
+  - `ssh -o PubkeyAuthentication=no timbo@192.168.2.114`
+- OpenClaw gateway：
+  - 进程：`/usr/local/bin/node /Users/timbo/openclaw/node_modules/openclaw/dist/index.js gateway --port 18789`
+  - launchd 服务：`ai.openclaw.gateway`
+  - 内网访问地址：`http://192.168.2.114:18789`
+  - 本机地址：`http://127.0.0.1:18789`
+  - 日志：`/Users/timbo/.openclaw/logs/gateway.log` 和 `/Users/timbo/.openclaw/logs/gateway.err.log`
+- OpenClaw 浏览器提示 token 时，日志会出现 `gateway token missing`。
+- OpenClaw 原生命令生成带 token 的 dashboard URL：
+  - `PATH=/usr/local/bin:$PATH openclaw dashboard --no-open`
+  - SSH 登录后可再执行 `pbpaste` 查看目标 Mac 剪贴板里的 URL。
+  - URL 形态是 `http://127.0.0.1:18789/#token=xxxxx`。
+  - 给内网同事用时，把 host 改成 `192.168.2.114`：`http://192.168.2.114:18789/#token=xxxxx`。
+- 如果只想直接查看 OpenClaw gateway token，可读配置：
+  - `python3 -c 'import json; c=json.load(open("/Users/timbo/.openclaw/openclaw.json")); print(c["gateway"]["auth"]["token"])'`
+
+## 已做过的本地改动
+
+- `miniapp-candidate/package.json`
+  - 添加了 `dev:h5`
+  - 添加了 `build:h5`
+- 已安装 H5 相关依赖：
+  - `@tarojs/plugin-platform-h5`
+  - `@tarojs/router`
+  - `@pmmmwh/react-refresh-webpack-plugin`
+- `miniapp-candidate/.env.local`
+  - `TARO_APP_API_BASE=http://127.0.0.1:3011`
+  - `TARO_APP_FLOW_DEBUG=1`
+- `server/index.ts`
+  - 增加 H5 本地登录兼容：`ALLOW_H5_DEV_LOGIN=1` 时支持 `h5-dev:*` 登录码。
+- `miniapp-candidate/src/services/authApi.ts`
+  - 已适配 H5 无 `wx.login` 的情况。
+- `miniapp-candidate/src/pages/login/index.tsx`
+  - 已适配 H5 无 `wx.login` 的情况。
+- `miniapp-candidate/dist/index.html`
+  - 因 Taro H5 dev server 没生成 `index.html`，临时写入，用于加载 `/runtime.js` 和 `/app.js`。
+- `miniapp-candidate/src/pages/interview/index.tsx`
+  - 增加 H5 本地调试答题兜底：浏览器没有微信 `WechatSI` 同声传译插件时，显示“本地调试回答”输入框。
+- `miniapp-candidate/src/pages/interview/index.scss`
+  - 为 H5 本地调试回答输入框增加样式。
+
+## 已确认状态
+
+- API 健康检查正常：`/api/health` 返回 `ok:true`、`db:true`、`redis:true`。
+- H5 登录页可打开：`http://127.0.0.1:10086/#/pages/login/index`
+- H5 面试页在普通浏览器里没有微信 `WechatSI` 插件，所以必须使用已加的“本地调试回答”输入框来跑通流程。
+- H5 热编译通过。
+- 已检查 `miniapp-candidate/src/pages/interview/index.tsx` 和 `index.scss`，没有 linter 报错。
+- 本地后台所有用户密码已统一重置为 `123456`：
+  - 库：`ai_recruit_admin.users`
+  - 共更新 37 个用户；
+  - 使用服务端同款 `scrypt` 哈希格式；
+  - 校验结果 `verifyFailed = 0`。
+
+## 本地可用测试账号
+
+- 管理员：
+  - 账号：`admin`
+  - 密码：`123456`
+  - 角色：`平台管理员`
+- 招聘经理测试账号：
+  - 姓名：`李瑞`
+  - 账号：`18810429891`
+  - 密码：`123456`
+  - 角色：`招聘经理`
+  - 部门：`郑州招聘团队`
+- 招聘专员测试账号：
+  - 姓名：`安隔`
+  - 账号：`15943053941`
+  - 密码：`123456`
+  - 角色：`招聘专员`
+  - 部门：`郑州招聘团队`
+- 这组账号有现成项目/岗位关系：
+  - 项目：`2026平安寿险项目`
+  - 项目 ID：`PRJ-2026-949`
+  - 岗位：`初级大数据开发工程师`
+  - 岗位码：`JMP21AS02`
+
+## 当前业务操作提示
+
+- 添加岗位弹窗中，“招聘部门”提示“将根据下方已选招聘人员自动显示”。
+- 含义：该字段不用手填，它展示的是负责招聘这个岗位的招聘人员所属部门。
+- 它不是“业务岗位所在部门”。
+- 岗位归属项目由“所属项目”决定，例如当前用户选择的是 `json 测试项目`。
+- 添加岗位时重点填写：
+  - 所属项目
+  - 岗位
+  - 地点
+  - 级别
+  - 薪资范围
+  - 技能关键词
+  - JD
+  - 招聘人员/岗位负责人（如果弹窗下方有该选择项）
+
+## 推荐完整调试流程
+
+1. 后台打开 `http://127.0.0.1:3010`
+2. 进入「岗位管理」→「项目管理」
+   - 有可用项目就直接用
+   - 没有就新建项目，并把当前账号设为项目招聘负责人
+3. 进入「岗位管理」→「岗位分配」
+   - 新建或选择一个岗位
+   - 确保岗位绑定到项目
+   - 确保当前账号有权限操作该岗位
+4. 进入「招聘管理」→「简历管理」
+   - 先选择具体项目和具体岗位，不要停在“全部”
+   - 点「上传简历」
+   - 上传 PDF/DOCX/TXT
+   - 等待提示“解析与打分已完成”
+5. 简历列表中确认：
+   - 候选人姓名正确
+   - 手机号正确
+   - 匹配分最好 `>= 60`
+   - 如姓名/手机号不对，点「简历详情」修改
+6. 点击该简历行右侧「发起面试」图标。
+7. 弹窗里复制完整邀请码。
+8. 打开候选人 H5：
+   - `http://127.0.0.1:10086/#/pages/login/index`
+9. 填写：
+   - 姓名：必须和简历列表里的姓名一致
+   - 手机号：建议和简历列表一致
+   - 邀请码：后台复制的完整邀请码
+10. 登录成功后进入等候页，点击「进入 AI 面试」。
+11. 在 H5 面试页每题用“本地调试回答”输入不少于 2 个字。
+12. 逐题点「下一题」，最后点「提交面试」。
+13. 回后台「招聘管理」→「初面管理」
+14. 点「刷新」，搜索候选人姓名。
+15. 阶段变成「AI面试完成」后，右侧点「查看」面试报告。
+
+## 卡住时优先排查
+
+- 如果 H5 登录失败：
+  - 检查姓名是否和简历筛查记录一致
+  - 检查手机号是否是 11 位中国手机号
+  - 检查邀请码是否复制完整
+  - 检查 API 是否仍是 `http://127.0.0.1:3011`
+- 如果简历不能上传：
+  - 检查是否选择了具体岗位，不能停在“全部岗位”
+  - 检查岗位是否属于当前账号可操作范围
+  - 检查大模型 key 是否可用
+- 如果 H5 面试不能点下一题：
+  - 普通浏览器没有微信语音插件，要使用“本地调试回答”输入框
+  - 输入内容至少 2 个字
+- 如果后台看不到报告：
+  - 先在「初面管理」点刷新
+  - 用候选人姓名搜索
+  - 确认候选人 H5 最后一题已点「提交面试」
+
+## 当前代码里的核心业务关系
+
+- 部门、项目、岗位关系：
+  - 部门是公司内部组织，例如交付六部、招聘一部。
+  - 项目是一批招聘需求，项目表里有 `project.dept`，表示由哪个部门负责。
+  - 岗位挂在项目下面。
+  - 最简单理解：`部门 → 项目 → 岗位`。
+- 交付经理：
+  - 负责项目层面。
+  - 看自己 `users.dept` 对应部门负责的项目。
+  - 可以创建/编辑项目，项目创建时要指定“项目招聘负责人”。
+  - 可以创建项目下岗位。
+  - 不直接分配招聘专员，岗位招聘人员通常由招聘经理在「岗位分配」里配置。
+- 招聘经理：
+  - 属于某个部门，也就是 `users.dept`。
+  - 只有被加入某个项目的 `recruitment_leads`（项目招聘负责人）后，才看这个项目。
+  - 看的是自己负责项目下所有岗位和简历，不区分哪个招聘专员上传。
+  - 如果同一个项目里有招聘经理 A、B，A 和 B 都能看这个项目下所有简历。
+- 招聘专员/招聘人员：
+  - 按岗位看数据。
+  - 如果岗位 A 同时分给招聘专员甲、乙，甲乙都能看岗位 A 下全部简历，不区分谁上传。
+  - 跨项目同名岗位不共享权限，例如项目 1 的岗位 A 和项目 2 的岗位 A 是两套范围。
+- 管理员：
+  - 默认能看全部。
+
+## 角色与菜单权限
+
+- 当前后台用户是单角色模型。
+- `ai_recruit_admin.users.role` 只有一个字符串字段，一个用户只能有一个角色。
+- 后端映射出的主要 UI 角色：
+  - `admin`
+  - `delivery_manager`
+  - `recruiting_manager`
+  - `recruiter`
+- `roles.menu_keys` 是菜单可见性控制，不代表一个用户多角色。
+- “分组经理”目前没有专门业务逻辑，代码里没有独立按“分组经理”处理数据权限；更像预留/自定义菜单角色。
+- 角色管理页面能配置的内容主要是菜单显示，不是完整 RBAC 权限体系。
+- 代码里的内部角色不是数据库里直接创建的角色，而是后端把中文角色名转换出来的：
+  - `平台管理员` / `系统管理` / `超级管理` / 包含 `管理` → `admin`
+  - 包含 `交付` → `delivery_manager`
+  - 包含 `招聘经理` / `招募经理` → `recruiting_manager`
+  - 包含 `招聘` → `recruiter`
+  - 都匹配不上 → 默认 `delivery_manager`
+- 角色管理里的“跟随职级默认”含义：
+  - 不手动勾菜单；
+  - `roles.menu_keys = null`；
+  - 系统根据角色名称猜出内部角色，再使用该内部角色在代码里的默认菜单。
+- 角色管理里的“自定义可见菜单”含义：
+  - 手动勾菜单；
+  - `roles.menu_keys` 保存为 JSON 数组；
+  - 登录后前端按这个数组显示侧边栏菜单。
+- `roles.users` / 页面上的“展示用关联用户数”目前更像展示字段，不是实时从 `users` 表统计。
+
+## 当前数据权限逻辑
+
+- 数据权限不是从角色管理动态配置出来的，而是代码写死的“内部角色 + 部门 + 项目负责人 + 岗位招聘人员”规则。
+- 简历筛查列表后端会调用 `allowedJobCodesForScreeningListToken` 算出当前用户可见的 `job_code`，再在列表 SQL 上加：
+  - `s.job_code IN (...)`
+- 管理员 `admin`：
+  - 基本不限制，可看全部。
+- 招聘专员 `recruiter`：
+  - 看 `jobs.recruiters` 中包含自己姓名或账号的岗位；
+  - 只能看这些岗位下的简历。
+- 招聘经理 `recruiting_manager`：
+  - 看 `projects.recruitment_leads` 中包含自己姓名或账号的项目；
+  - 能看这些项目下所有岗位和简历。
+- 交付经理 `delivery_manager`：
+  - 看自己 `users.dept` 匹配 `projects.dept` 的项目；
+  - 再看到这些项目下的岗位和简历；
+  - 简单关系是：`交付经理所属部门 → 该部门负责的项目 → 项目下岗位 → 岗位下简历`。
+- 简历删除也有后端权限判断：
+  - 管理员可删全部；
+  - 招聘专员只能删自己负责岗位下的简历；
+  - 招聘经理只能删自己负责项目下的简历；
+  - 交付经理只能删同部门项目下的简历。
+- 项目管理、岗位管理、系统管理等不少地方仍主要靠前端过滤和按钮显示控制，后端不是完整权限拦截。
+
+## 招聘经理选择范围
+
+- 项目里的“项目招聘负责人”候选人，来自用户表中角色为招聘经理/招募经理的用户。
+- 管理员一般能从所有“部门类型 = 招聘”的部门中选择招聘经理。
+- 交付经理不是全公司任意选，而是：
+  - 先找到自己所属部门在组织树上的顶级祖先；
+  - 再从这个顶级组织下面所有“招聘”类型部门里选择招聘经理。
+- 招聘经理本人只能看到自己被设为项目招聘负责人的项目。
+
+## 添加岗位弹窗的真实逻辑
+
+- “招聘部门”不是手填字段。
+- 它根据已选“招聘人员”的 `users.dept` 自动推导展示。
+- 但当前管理员在「项目管理」里添加岗位时，代码传的是 `recruiterFieldMode="none"`，所以不会显示招聘人员选择区。
+- 因此管理员添加岗位时看到“将根据下方已选招聘人员自动显示”，但下方没有可选招聘人员，这是 UI 文案和当前角色逻辑不一致。
+- 当前代码设计更像：
+  - 管理员/交付经理先建项目和岗位；
+  - 招聘经理后续在「岗位分配」里给岗位分配招聘人员。
+
+## 简历管理与简历库
+
+- 简历管理：
+  - 管“一次投递/一次筛查记录”。
+  - 一个人投多个岗位，在简历管理里可能有多条。
+  - 用于上传简历、AI 筛查、发起面试邀约、看流程阶段。
+- 简历库：
+  - 管“候选人档案/人才库”。
+  - 更偏按人合并展示，同一个人多次投递会偏向合并成一个候选人视角。
+  - 用于查候选人、看历史投递、看原始简历、维护候选人档案字段。
+- 数据权限本质仍然看该简历对应的岗位/项目是否在当前用户权限范围内。
+
+## 简历重复判断
+
+- 同一岗位下，简历正文完全相同会判重复：
+  - 系统先抽取 PDF/DOCX/TXT 里的文字；
+  - 再对文字算 SHA256；
+  - 不是按文件名判断。
+- 同一岗位下，简历内容里识别出的手机号相同，也会判重复。
+- 只改文件名没用。
+- 只改一个标点会让正文 hash 变化，但如果手机号不变且还是同岗位，仍会重复。
+- 同一份简历投不同岗位，不算重复。
+
+## 简历文件与数据库映射
+
+- 浏览器里的 `blob:http://127.0.0.1:3010/...` 不是本地文件路径，只是浏览器临时预览地址。
+- 预览原件按钮请求：
+  - `GET /api/admin/resume-screenings/{resume.id}/file?mode=preview`
+- 映射关系：
+  - `resume_screenings.id`
+  - → `resume_screening_files.screening_id`
+  - → `resume_screening_files.storage_path`
+  - → `storage/resumes/{storage_path}`
+- `storage_path` 文件名规则类似：`时间戳-UUID.扩展名`，真实业务绑定靠数据库字段，不靠猜文件名。
+
+## 简历详情编辑字段
+
+- “简历详情编辑”里的姓名、性别、年龄、手机号、学历等是前端固定表单项。
+- 数据保存到 `resume_screening_profiles` 固定列。
+- 不是 PDF 里有什么字段页面就自动出现什么字段。
+- PDF 里有“爱好”“证书”等，如果当前表和页面没有对应字段，就不会作为标签/字段单独保存。
+
+## 面试分与面试报告
+
+- 列表里的“简历分”来自简历筛查。
+- 面试完成后的 AI 分数在「初面管理」列表的“面试分”列，以及右侧“面试报告 → 查看”详情里。
+- 面试报告表：`ai_recruit.interview_reports`
+- 关键字段：
+  - `overall_score`：面试总分
+  - `passed`：是否通过
+  - `dimension_scores`：维度分
+  - `overall_feedback`：AI 总评
+  - `qa_json`：问答内容
+- “暂无面试结论”通常表示还没有生成 `interview_reports`，即候选人还没完成并提交面试。
+
+## RTC / 1v1 视频通话现状
+
+- 项目里有腾讯云 TRTC：
+  - 候选人小程序面试页用 `trtc-wx-sdk` 和 `LivePusher mode="RTC"` 采集/推候选人视频。
+  - 服务端接口 `POST /api/candidate/trtc/credential` 负责签发 UserSig、roomId 等进房凭证。
+- 后台网页没有观看 RTC 推流页面，也没有 `LivePlayer`。
+- 项目里还有微信小程序原生 1v1 通话能力：
+  - `wx.setEnable1v1Chat`
+  - `wx.join1v1Chat`
+  - 位置：`miniapp-candidate/src/pages/interviewer/index.tsx`
+- 1v1 通话只能在微信小程序环境测试，H5 和后台网页不能测。
+- 普通小程序入口现在默认是候选人填邀请码页；面试官页面存在但入口不完整/偏隐藏：
+  - `/pages/interviewer/index`
+- 面试官身份靠小程序用户 openid 绑定手机号后，后端查 `interviewer_phone_whitelist` 判断是否为 interviewer。
+
+## 部门成员数量
+
+- 部门管理里的“成员数量”显示的是 `ai_recruit_admin.depts.count` 字段。
+- 它不是实时统计 `users.dept` 得来的。
+- 所以可能出现页面显示 0 人，但 `users` 表里实际有人属于该部门。
+- 如果要真实，应该改为按 `users.dept` 实时统计，或在用户部门变更时同步更新 `depts.count`。
+
+
+注意涉及到数据修改的都是在192.168.2.114这个目标机器上的数据改，不要去改远程服务器

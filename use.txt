@@ -1,0 +1,62 @@
+AI-Recruit 本地启动用法
+
+前置条件：
+- 先确认数据库服务器 192.168.2.114 可用。
+- 如果服务器刚重启，MySQL / Redis 可能没自动起来，需要先在服务器上启动：
+
+  /Users/timbo/mysql-8.0/bin/mysqld --defaults-file=/Users/timbo/mysql-8.0/my.cnf --daemonize
+  /usr/local/opt/redis/bin/redis-server /usr/local/etc/redis.conf --daemonize yes
+
+一键重启 3 个服务（推荐）：
+
+  ./restart-services.sh
+
+脚本会自动处理：
+- 检查并停止已占用的本项目端口：3011、3010、10086、24679
+- 重新启动 API、后台管理端、候选人 H5
+- 自动补齐候选人 H5 的 `dist/index.html`，避免 10086 显示 `listing directory /`
+- 日志写入 .logs/dev/
+- PID 写入 .pids/dev/
+- 启动后检查 3 个访问地址是否可用
+
+查看日志：
+
+  tail -f .logs/dev/api.log
+  tail -f .logs/dev/admin.log
+  tail -f .logs/dev/h5.log
+
+如果系统有 screen，脚本会用后台 screen 会话保持服务常驻：
+
+  screen -ls
+
+手动启动 3 个服务：
+
+1. 启动 API
+
+  npm run dev:api
+
+2. 启动后台管理端
+
+  ADMIN_UI_PORT=3010 ADMIN_API_UPSTREAM=http://127.0.0.1:3011 npm run dev
+
+3. 启动候选人 H5
+
+  cd miniapp-candidate
+  npm run dev:h5
+
+访问地址：
+
+- 后台管理端：http://127.0.0.1:3010
+- API 健康检查：http://127.0.0.1:3011/api/health
+- 候选人 H5：http://127.0.0.1:10086/
+
+正常状态：
+
+- API 健康检查应返回类似：{"ok":true,"db":true,"redis":true}
+- 候选人 H5 应显示“欢迎参加面试”的登录表单。
+
+常见问题：
+
+- 如果 API 返回 db:false，优先检查 192.168.2.114:3306 是否通。
+- 如果 API 返回 redis:false，优先检查 192.168.2.114:6379 是否通。
+- 如果候选人 H5 打开后是 listing directory，检查 miniapp-candidate/dist/index.html 是否存在。

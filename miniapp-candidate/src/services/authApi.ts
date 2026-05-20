@@ -2,11 +2,29 @@ import Taro from '@tarojs/taro'
 
 import { assertApiBase, httpErrorMessage } from '../config/apiBase'
 
-export async function loginAndGetOpenId(role: 'candidate' | 'interviewer'): Promise<string> {
-  const base = assertApiBase()
+const H5_OPENID_KEY = 'h5_dev_openid'
+const IS_H5 = process.env.TARO_ENV === 'h5'
+
+function getH5DevOpenId(role: 'candidate' | 'interviewer') {
+  const cached = String(Taro.getStorageSync(H5_OPENID_KEY) || '').trim()
+  if (cached) return cached
+  const openid = `h5_${role}_${Date.now().toString(36)}`
+  Taro.setStorageSync(H5_OPENID_KEY, openid)
+  return openid
+}
+
+export async function getWechatLoginCode(role: 'candidate' | 'interviewer'): Promise<string> {
+  if (IS_H5) return `h5-dev:${getH5DevOpenId(role)}`
   const loginRes = await Taro.login()
   const code = loginRes.code || ''
   if (!code) throw new Error('获取微信登录 code 失败，请重开小程序再试')
+  return code
+}
+
+export async function loginAndGetOpenId(role: 'candidate' | 'interviewer'): Promise<string> {
+  if (IS_H5) return getH5DevOpenId(role)
+  const base = assertApiBase()
+  const code = await getWechatLoginCode(role)
 
   let res: Taro.request.SuccessCallbackResult<{ data: { openid: string } }>
   try {

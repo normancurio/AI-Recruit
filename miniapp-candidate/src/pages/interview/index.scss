@@ -349,6 +349,85 @@
   box-shadow: 0 8rpx 28rpx rgba(30, 58, 95, 0.06);
 }
 
+.test-helper-panel {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 18px;
+  padding: 16px;
+  border: 1px dashed rgba(148, 163, 184, 0.8);
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(248, 250, 252, 0.98), rgba(241, 245, 249, 0.92));
+}
+
+.test-helper-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.test-helper-title {
+  display: block;
+  font-size: 22px;
+  font-weight: 700;
+  color: #334155;
+}
+
+.test-helper-desc {
+  display: block;
+  font-size: 22px;
+  line-height: 1.45;
+  color: #64748b;
+}
+
+.test-helper-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.test-helper-btn {
+  flex: 1;
+  height: 68px;
+  line-height: 68px;
+  margin: 0;
+  border-radius: 999px;
+  font-size: 24px;
+  font-weight: 700;
+  color: #0f172a;
+  background: #ffffff;
+  border: 1px solid rgba(148, 163, 184, 0.7);
+}
+
+.test-helper-btn::after {
+  border: 0;
+}
+
+.interview-page .test-helper-btn,
+.interview-page .test-helper-btn[disabled] {
+  opacity: 1;
+}
+
+.interview-page .test-helper-btn--low,
+.interview-page .test-helper-btn--low[disabled] {
+  color: #991b1b;
+  background: #fff1f2;
+  border-color: rgba(185, 28, 28, 0.35);
+}
+
+.interview-page .test-helper-btn--medium,
+.interview-page .test-helper-btn--medium[disabled] {
+  color: #854d0e;
+  background: #fef9c3;
+  border-color: rgba(161, 98, 7, 0.38);
+}
+
+.interview-page .test-helper-btn--high,
+.interview-page .test-helper-btn--high[disabled] {
+  color: #14532d;
+  background: #dcfce7;
+  border-color: rgba(22, 101, 52, 0.35);
+}
+
 .answer-label {
   display: block;
   font-size: 22px;
@@ -387,6 +466,19 @@
   flex-direction: column;
   gap: 12px;
   min-height: 120px;
+}
+
+.manual-answer-input {
+  width: 100%;
+  min-height: 180px;
+  box-sizing: border-box;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 28px;
+  line-height: 1.55;
 }
 
 .transcript-final-row {
@@ -480,4 +572,3 @@
   font-weight: 600;
   box-shadow: 0 8rpx 24rpx rgba(30, 64, 175, 0.35);
 }
-

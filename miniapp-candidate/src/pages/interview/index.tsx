@@ -1,7 +1,7 @@
 /// <reference path="../../types/trtc-wx-sdk.d.ts" />
 import Taro, { getCurrentInstance, useDidHide, useDidShow } from '@tarojs/taro'
 import { useCallback, useMemo, useRef, useState } from 'react'
-import { Button, Camera, LivePusher, Text, View } from '@tarojs/components'
+import { Button, Camera, LivePusher, Text, Textarea, View } from '@tarojs/components'
 import type { LivePusherProps } from '@tarojs/components/types/LivePusher'
 import TrtcWx from 'trtc-wx-sdk'
 
@@ -14,6 +14,7 @@ import {
   fetchInterviewQuestionsOrPrefetched,
   fetchPreparedFollowUp,
   fetchTrtcCredential,
+  generateInterviewTestAnswer,
   startLiveSession,
   submitInterview,
   syncLiveQa,
@@ -32,6 +33,8 @@ import './index.scss'
 const requirePluginFn = (globalThis as any).requirePlugin as ((name: string) => any) | undefined
 
 type PusherState = Record<string, any> | null
+type InterviewTestAnswerQuality = 'low' | 'medium' | 'high'
+declare const TARO_INTERVIEW_TEST_HELPER: string
 
 export default function InterviewPage() {
   const [profile, setProfile] = useState<CandidateProfile | null>(null)
@@ -42,10 +45,12 @@ export default function InterviewPage() {
   const [transcriptFinalized, setTranscriptFinalized] = useState<string[]>([])
   /** onRecognize 流式中间态，未定稿 */
   const [transcriptStreaming, setTranscriptStreaming] = useState('')
+  const [manualAnswer, setManualAnswer] = useState('')
   const transcriptFinalizedRef = useRef<string[]>([])
   transcriptFinalizedRef.current = transcriptFinalized
   const [answers, setAnswers] = useState<InterviewAnswer[]>([])
   const [loading, setLoading] = useState(false)
+  const [testAnswerLoading, setTestAnswerLoading] = useState<InterviewTestAnswerQuality | ''>('')
   const [sessionId, setSessionId] = useState('')
   const [transcribing, setTranscribing] = useState(false)
   const [showAnswerTranscript, setShowAnswerTranscript] = useState(false)
@@ -64,6 +69,9 @@ export default function InterviewPage() {
   /** 已用 TRTC live-pusher 进房（未配置或服务端 503 时为 false，使用原生 Camera） */
   const [trtcActive, setTrtcActive] = useState(false)
   const [pusher, setPusher] = useState<PusherState>(null)
+  const useManualAnswerFallback = !requirePluginFn
+  const showInterviewTestHelper =
+    String(typeof TARO_INTERVIEW_TEST_HELPER !== 'undefined' ? TARO_INTERVIEW_TEST_HELPER : '').trim() === '1'
 
   const transcribingRef = useRef(false)
   transcribingRef.current = transcribing
@@ -580,6 +588,10 @@ export default function InterviewPage() {
       } catch (e) {
         answerTranscriptOpenRef.current = false
         suppressAutoRestartRef.current = false
+        if (!requirePluginFn) {
+          setCallStatusLine('H5 本地调试模式：请手动输入回答')
+          setShowAnswerTranscript(true)
+        }
         flowLog('WechatSI start', false, e instanceof Error ? e.message : 'plugin unavailable')
       }
     }
@@ -610,7 +622,8 @@ export default function InterviewPage() {
     const playTtsThenResume = (sidInner: string, ttsRaw: string) => {
       if (!requirePluginFn) {
         questionTtsPlayingRef.current = false
-        setCallStatusLine('请口述您的回答')
+        setCallStatusLine('H5 本地调试模式：请手动输入回答')
+        setShowAnswerTranscript(true)
         if (!transcribingRef.current) openRecognition(sidInner)
         else resumeAnswerAfterQuestionTts(sidInner)
         return
@@ -774,7 +787,9 @@ export default function InterviewPage() {
           const list = await fetchInterviewQuestionsOrPrefetched(
             j.id,
             p.name,
-            typeof p.resumeScreeningId === 'number' ? p.resumeScreeningId : undefined
+            typeof p.resumeScreeningId === 'number' ? p.resumeScreeningId : undefined,
+            p.inviteCode,
+            p.sessionId || sid
           )
           const cleaned = list.filter((q) => q && String(q.text || '').trim())
           if (!cleaned.length) throw new Error('empty questions')
@@ -786,6 +801,7 @@ export default function InterviewPage() {
           transcriptFinalizedRef.current = []
           setTranscriptFinalized([])
           setTranscriptStreaming('')
+          setManualAnswer('')
           setSessionId(sid)
           await startLiveSession({
             sessionId: sid,
@@ -857,8 +873,8 @@ export default function InterviewPage() {
   const current = questions[index]
   const isLast = questions.length > 0 && index === questions.length - 1
   const composedAnswer = useMemo(
-    () => (transcriptFinalized.join('') + transcriptStreaming).trim(),
-    [transcriptFinalized, transcriptStreaming]
+    () => (useManualAnswerFallback ? manualAnswer : transcriptFinalized.join('') + transcriptStreaming).trim(),
+    [manualAnswer, transcriptFinalized, transcriptStreaming, useManualAnswerFallback]
   )
   const canNext = useMemo(() => composedAnswer.length >= 2, [composedAnswer])
   const speakingHighlight = transcribing && transcriptStreaming.length > 0
@@ -913,6 +929,38 @@ export default function InterviewPage() {
     [buildShortAnswerFollowUp, sessionId]
   )
 
+  const handleGenerateTestAnswer = async (quality: InterviewTestAnswerQuality) => {
+    if (!current || !profile || !job || testAnswerLoading) return
+    try {
+      setTestAnswerLoading(quality)
+      const answer = await generateInterviewTestAnswer({
+        jobId: job.id,
+        candidateName: profile.name,
+        resumeScreeningId: profile.resumeScreeningId,
+        questionId: current.id,
+        question: current.text,
+        quality
+      })
+      if (useManualAnswerFallback) {
+        setManualAnswer(answer)
+      } else {
+        transcriptFinalizedRef.current = [answer]
+        setTranscriptFinalized([answer])
+        setTranscriptStreaming('')
+        latestLiveTranscriptSyncRef.current = answer
+        setShowAnswerTranscript(true)
+        pushTranscriptRemoteNow(sessionId, answer)
+      }
+    } catch (e) {
+      Taro.showToast({
+        title: e instanceof Error ? e.message.slice(0, 18) : '生成测试回答失败',
+        icon: 'none'
+      })
+    } finally {
+      setTestAnswerLoading('')
+    }
+  }
+
   const handleNext = async () => {
     if (!current || !canNext || !profile || !job) return
 
@@ -926,6 +974,7 @@ export default function InterviewPage() {
     transcriptFinalizedRef.current = []
     setTranscriptFinalized([])
     setTranscriptStreaming('')
+    setManualAnswer('')
 
     const followUp = await fetchFollowUpWithoutWaiting(current, composedAnswer)
     if (followUp?.text) {
@@ -1073,25 +1122,74 @@ export default function InterviewPage() {
         {cameraError ? <Text className='camera-error-text'>{cameraError}</Text> : null}
         <View className='question-box'>
           <Text className='question-text'>{current?.text || (questions.length ? '题目索引异常' : '正在加载题目…')}</Text>
+          {showInterviewTestHelper ? (
+            <View className='test-helper-panel'>
+              <View className='test-helper-copy'>
+                <Text className='test-helper-title'>测试助手</Text>
+                <Text className='test-helper-desc'>一键生成当前题的模拟回答，用于快速回归评分链路</Text>
+              </View>
+              <View className='test-helper-actions'>
+                <Button
+                  className='test-helper-btn test-helper-btn--low'
+                  loading={testAnswerLoading === 'low'}
+                  disabled={!current || Boolean(testAnswerLoading)}
+                  onClick={() => void handleGenerateTestAnswer('low')}
+                >
+                  低分
+                </Button>
+                <Button
+                  className='test-helper-btn test-helper-btn--medium'
+                  loading={testAnswerLoading === 'medium'}
+                  disabled={!current || Boolean(testAnswerLoading)}
+                  onClick={() => void handleGenerateTestAnswer('medium')}
+                >
+                  中等
+                </Button>
+                <Button
+                  className='test-helper-btn test-helper-btn--high'
+                  loading={testAnswerLoading === 'high'}
+                  disabled={!current || Boolean(testAnswerLoading)}
+                  onClick={() => void handleGenerateTestAnswer('high')}
+                >
+                  高分
+                </Button>
+              </View>
+            </View>
+          ) : null}
           <View className='answer-box'>
-            <Text className='answer-label'>实时转写回答</Text>
+              <Text className='answer-label'>{useManualAnswerFallback ? '本地调试回答' : '实时转写回答'}</Text>
             <View className='transcript-composer'>
-              {!showAnswerTranscript ? <Text className='answer-placeholder'>读题中，转写内容暂不显示</Text> : null}
-              {showAnswerTranscript && transcriptFinalized.length === 0 && !transcriptStreaming && !transcribing ? (
-                <Text className='answer-placeholder'>请直接口述作答，转写文本将显示在这里</Text>
-              ) : null}
-              {showAnswerTranscript &&
-                transcriptFinalized.map((line, i) => (
-                <View key={`fin-${i}`} className='transcript-final-row'>
-                  <Text className='transcript-final-text'>{line}</Text>
-                </View>
-                ))}
-              {showAnswerTranscript && (transcribing || transcriptStreaming.length > 0) ? (
-                <View className='transcript-stream-row'>
-                  <Text className='transcript-stream-text'>{transcriptStreaming}</Text>
-                  {transcribing ? <Text className='transcript-caret'>▍</Text> : null}
-                </View>
-              ) : null}
+                {useManualAnswerFallback ? (
+                  <>
+                    <Text className='answer-placeholder'>当前是 H5 调试环境，请直接输入本题回答</Text>
+                    <Textarea
+                      className='manual-answer-input'
+                      value={manualAnswer}
+                      maxlength={1000}
+                      placeholder='输入不少于 2 个字后可进入下一题'
+                      onInput={(e) => setManualAnswer(String(e.detail.value || ''))}
+                    />
+                  </>
+                ) : (
+                  <>
+                    {!showAnswerTranscript ? <Text className='answer-placeholder'>读题中，转写内容暂不显示</Text> : null}
+                    {showAnswerTranscript && transcriptFinalized.length === 0 && !transcriptStreaming && !transcribing ? (
+                      <Text className='answer-placeholder'>请直接口述作答，转写文本将显示在这里</Text>
+                    ) : null}
+                    {showAnswerTranscript &&
+                      transcriptFinalized.map((line, i) => (
+                      <View key={`fin-${i}`} className='transcript-final-row'>
+                        <Text className='transcript-final-text'>{line}</Text>
+                      </View>
+                      ))}
+                    {showAnswerTranscript && (transcribing || transcriptStreaming.length > 0) ? (
+                      <View className='transcript-stream-row'>
+                        <Text className='transcript-stream-text'>{transcriptStreaming}</Text>
+                        {transcribing ? <Text className='transcript-caret'>▍</Text> : null}
+                      </View>
+                    ) : null}
+                  </>
+                )}
             </View>
           </View>
         </View>

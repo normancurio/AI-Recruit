@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS depts (
   name VARCHAR(128),
   dept_type VARCHAR(32) NOT NULL DEFAULT '' COMMENT '交付/招聘/其他等，招聘类可选入项目招聘负责人部门',
   level INT,
+  sort_order INT NOT NULL DEFAULT 0,
   manager VARCHAR(64),
   count INT,
   KEY idx_depts_parent (parent_id)
@@ -84,6 +85,14 @@ CREATE TABLE IF NOT EXISTS roles (
   `desc` VARCHAR(255),
   users INT,
   menu_keys TEXT NULL COMMENT 'JSON array of sidebar menu ids for role-based visibility'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS user_roles (
+  user_id VARCHAR(64) NOT NULL,
+  role_id VARCHAR(64) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id, role_id),
+  KEY idx_user_roles_role (role_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS menus (
@@ -152,16 +161,17 @@ ON DUPLICATE KEY UPDATE
   aiEval = VALUES(aiEval),
   status = VALUES(status);
 
-INSERT INTO depts (id, parent_id, name, dept_type, level, manager, count) VALUES
-  ('D1', NULL, '集团总部', '其他', 0, '张总', 120),
-  ('D2', 'D1', '华北交付中心', '交付', 1, '李总', 45),
-  ('D3', 'D2', '研发一部', '招聘', 2, '王经理', 20),
-  ('D4', 'D1', '华南交付中心', '交付', 1, '赵总', 38)
+INSERT INTO depts (id, parent_id, name, dept_type, level, sort_order, manager, count) VALUES
+  ('D1', NULL, '集团总部', '其他', 0, 10, '张总', 120),
+  ('D2', 'D1', '华北交付中心', '交付', 1, 10, '李总', 45),
+  ('D3', 'D2', '研发一部', '招聘', 2, 10, '王经理', 20),
+  ('D4', 'D1', '华南交付中心', '交付', 1, 20, '赵总', 38)
 ON DUPLICATE KEY UPDATE
   parent_id = VALUES(parent_id),
   name = VALUES(name),
   dept_type = VALUES(dept_type),
   level = VALUES(level),
+  sort_order = VALUES(sort_order),
   manager = VALUES(manager),
   count = VALUES(count);
 
@@ -179,28 +189,40 @@ ON DUPLICATE KEY UPDATE
 INSERT INTO roles (id, name, `desc`, users) VALUES
   ('R1', '平台管理员', '拥有系统所有模块的最高权限', 1),
   ('R2', '交付经理', '负责客户维护与招聘项目管理', 12),
-  ('R3', '招聘人员', '负责岗位发布、简历筛查与面试跟进', 45)
+  ('R3', '招聘人员', '负责岗位发布、简历筛查与面试跟进', 45),
+  ('R_AI_INTERVIEWER_MANAGER', 'AI面试官管理员', '可维护 AI 面试官提示词模板', 0)
 ON DUPLICATE KEY UPDATE
   name = VALUES(name),
   `desc` = VALUES(`desc`),
   users = VALUES(users);
 
+UPDATE roles
+SET menu_keys = COALESCE(NULLIF(menu_keys, ''), JSON_ARRAY('sys-interview-prompt'))
+WHERE id = 'R_AI_INTERVIEWER_MANAGER';
+
+INSERT IGNORE INTO user_roles (user_id, role_id)
+SELECT u.id, r.id
+FROM users u
+JOIN roles r ON r.name = u.role
+WHERE TRIM(COALESCE(u.role, '')) <> '';
+
 -- 与 App.tsx NAV_TEMPLATE / 侧边栏 id 一致（非旧版 M1/M2 编码）
 INSERT INTO menus (id, name, type, icon, path, parent_id, level) VALUES
-  ('workbench', '工作台', '菜单', 'LayoutDashboard', '/workbench', NULL, 0),
+  ('workbench', '工作台', '可见菜单', 'LayoutDashboard', '/workbench', NULL, 0),
   ('projects', '岗位管理', '目录', 'Briefcase', '/projects', NULL, 0),
-  ('project-list', '项目管理', '菜单', 'Briefcase', '/projects/list', 'projects', 1),
-  ('job-query', '岗位分配', '菜单', 'UserCog', '/recruitment/jobs', 'projects', 1),
+  ('project-list', '项目管理', '可见菜单', 'Briefcase', '/projects/list', 'projects', 1),
+  ('job-query', '岗位分配', '可见菜单', 'UserCog', '/recruitment/jobs', 'projects', 1),
   ('recruitment', '招聘管理', '目录', 'Users', '/recruitment', NULL, 0),
-  ('resume-screening', '简历筛查', '菜单', 'FileText', '/recruitment/resume', 'recruitment', 1),
-  ('resume-library', '简历库', '菜单', 'FolderOpen', '/recruitment/resume-library', 'recruitment', 1),
-  ('application-mgmt', '初面管理', '菜单', 'UserCheck', '/recruitment/applications', 'recruitment', 1),
+  ('resume-screening', '简历筛查', '可见菜单', 'FileText', '/recruitment/resume', 'recruitment', 1),
+  ('resume-library', '简历库', '可见菜单', 'FolderOpen', '/recruitment/resume-library', 'recruitment', 1),
+  ('application-mgmt', '初面管理', '可见菜单', 'UserCheck', '/recruitment/applications', 'recruitment', 1),
   ('system', '系统管理', '目录', 'Settings', '/system', NULL, 0),
-  ('sys-dept', '部门管理', '菜单', 'Network', '/system/dept', 'system', 1),
-  ('sys-user', '用户管理', '菜单', 'UserCog', '/system/users', 'system', 1),
-  ('sys-role', '角色管理', '菜单', 'Shield', '/system/roles', 'system', 1),
-  ('sys-menu', '菜单管理', '菜单', 'Menu', '/system/menus', 'system', 1),
-  ('sys-job-role-bases', '标准岗位', '菜单', 'Tags', '/system/job-role-bases', 'system', 1)
+  ('sys-dept', '部门管理', '可见菜单', 'Network', '/system/dept', 'system', 1),
+  ('sys-user', '用户管理', '可见菜单', 'UserCog', '/system/users', 'system', 1),
+  ('sys-role', '角色管理', '可见菜单', 'Shield', '/system/roles', 'system', 1),
+  ('sys-menu', '菜单管理', '可见菜单', 'Menu', '/system/menus', 'system', 1),
+  ('sys-job-role-bases', '标准岗位', '可见菜单', 'Tags', '/system/job-role-bases', 'system', 1),
+  ('sys-interview-prompt', 'AI面试官', '可见菜单', 'Bot', '/system/ai-interviewer', 'system', 1)
 ON DUPLICATE KEY UPDATE
   name = VALUES(name),
   type = VALUES(type),
