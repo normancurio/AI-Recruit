@@ -264,13 +264,81 @@ export async function startLiveSession(params: {
   })
 }
 
-export async function syncLiveTranscript(sessionId: string, text: string) {
+export async function syncLiveTranscript(
+  sessionId: string,
+  text: string,
+  meta?: { questionId?: string; question?: string }
+) {
   if (useMock() || !text.trim()) return
   await Taro.request({
     url: `${getApiBase()}/api/live/session/transcript`,
     method: 'POST',
-    data: { sessionId, text }
+    data: {
+      sessionId,
+      text,
+      questionId: meta?.questionId || '',
+      question: meta?.question || ''
+    }
   })
+}
+
+export type PreparedFollowUpResult =
+  | { status: 'ready'; question: InterviewQuestion }
+  | { status: 'pending' | 'none' | 'skipped' | 'error'; question?: undefined }
+
+export type InterviewFollowUpConfig = {
+  enabled: boolean
+  maxPerInterview: number
+  maxPerQuestion: number
+  modelWaitMs: number
+  shortAnswerThreshold: number
+  fallbackEnabled: boolean
+  model?: string
+  prompt?: string
+}
+
+export const DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG: InterviewFollowUpConfig = {
+  enabled: true,
+  maxPerInterview: 3,
+  maxPerQuestion: 1,
+  modelWaitMs: 700,
+  shortAnswerThreshold: 18,
+  fallbackEnabled: true
+}
+
+export async function fetchInterviewFollowUpConfig(jobId: string, sessionId?: string): Promise<InterviewFollowUpConfig> {
+  if (useMock() || (!jobId && !sessionId)) return DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG
+  const res = await Taro.request<{ data?: Partial<InterviewFollowUpConfig>; message?: string }>({
+    url: `${getApiBase()}/api/candidate/interview-followup-config`,
+    method: 'GET',
+    data: { jobId, sessionId: sessionId || '' }
+  })
+  if (res.statusCode >= 400) return DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG
+  return {
+    ...DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG,
+    ...(res.data?.data || {})
+  }
+}
+
+export async function fetchPreparedFollowUp(params: {
+  sessionId: string
+  questionId: string
+  waitMs?: number
+  requireModel?: boolean
+}): Promise<PreparedFollowUpResult> {
+  if (useMock() || !params.sessionId || !params.questionId) return { status: 'none' }
+  const res = await Taro.request<{ data?: PreparedFollowUpResult; message?: string }>({
+    url: `${getApiBase()}/api/live/session/follow-up`,
+    method: 'GET',
+    data: {
+      sessionId: params.sessionId,
+      questionId: params.questionId,
+      waitMs: params.waitMs || 0,
+      requireModel: params.requireModel ? '1' : ''
+    }
+  })
+  if (res.statusCode >= 400) return { status: 'error' }
+  return res.data?.data || { status: 'none' }
 }
 
 /** TRTC 旁路信令：字幕写入服务端，监考端可轮询 session/state */

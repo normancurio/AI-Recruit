@@ -9,13 +9,17 @@ import { getApiBase } from '../../config/apiBase'
 import { AI_INTERVIEWER_IMG_URL } from '../../config/aiInterviewerImgUrl'
 import {
   bindSessionMember,
+  DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG,
+  fetchInterviewFollowUpConfig,
   fetchInterviewQuestionsOrPrefetched,
+  fetchPreparedFollowUp,
   fetchTrtcCredential,
   startLiveSession,
   submitInterview,
   syncLiveQa,
   syncLiveTranscript,
   syncTrtcRoomSignal,
+  type InterviewFollowUpConfig,
   type TrtcCredential
 } from '../../services/interviewApi'
 import { trySendTrtcPusherCustomMessage } from '../../utils/trtcPusherMsg'
@@ -73,6 +77,9 @@ export default function InterviewPage() {
   const questionCountRef = useRef(0)
   questionCountRef.current = questions.length
   const questionListRef = useRef<InterviewQuestion[]>([])
+  const followUpCountRef = useRef(0)
+  const followUpParentIdsRef = useRef<Set<string>>(new Set())
+  const followUpConfigRef = useRef<InterviewFollowUpConfig>(DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG)
   questionListRef.current = questions
   const questionIndexRef = useRef(0)
   questionIndexRef.current = index
@@ -92,6 +99,8 @@ export default function InterviewPage() {
   const questionTtsPlayingRef = useRef(false)
   /** 读题结束后的短窗口，忽略可能被拾取到的播报残音 */
   const ignoreRecognizeBeforeTsRef = useRef(0)
+  /** 每次真正进入作答转写的时间；开头一小段最容易夹带读题尾音 */
+  const answerRecognitionOpenedAtRef = useRef(0)
   /**
    * 仅在为「当前题作答」启动 RecordRecognition 后为 true。
    * 拉题、建会话、读题 TTS 期间均为 false，避免加载的几秒内或播报被写入回答框。
@@ -111,7 +120,11 @@ export default function InterviewPage() {
   const pushTranscriptRemoteNow = useCallback((sidInner: string, fullText: string) => {
     const t = String(fullText || '').trim()
     if (!t) return
-    syncLiveTranscript(sidInner, t)
+    const q = questionListRef.current[questionIndexRef.current]
+    syncLiveTranscript(sidInner, t, {
+      questionId: q?.id || '',
+      question: q?.text || ''
+    })
     void syncTrtcRoomSignal(sidInner, t, 'subtitle')
     trySendTrtcPusherCustomMessage(trtcRef.current, t)
   }, [])
@@ -351,12 +364,40 @@ export default function InterviewPage() {
     const openRecognition = (sidInner: string, opts?: { preserveAccumulated?: boolean }) => {
       const preserveAccumulated = Boolean(opts?.preserveAccumulated)
       const normalizeText = (v: string) => String(v || '').replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').toLowerCase()
+      const longestCommonSubstringLen = (a: string, b: string) => {
+        if (!a || !b) return 0
+        const prev = new Array(b.length + 1).fill(0)
+        let best = 0
+        for (let i = 1; i <= a.length; i += 1) {
+          let lastDiag = 0
+          for (let j = 1; j <= b.length; j += 1) {
+            const saved = prev[j]
+            if (a[i - 1] === b[j - 1]) {
+              prev[j] = lastDiag + 1
+              if (prev[j] > best) best = prev[j]
+            } else {
+              prev[j] = 0
+            }
+            lastDiag = saved
+          }
+        }
+        return best
+      }
       const shouldDropQuestionEcho = (raw: string) => {
         const t = normalizeText(raw)
         if (!t || t.length < 6) return false
         const q = normalizeText(String(questionListRef.current[questionIndexRef.current]?.text || ''))
         if (!q || q.length < 6) return false
+        const sinceOpen = Date.now() - answerRecognitionOpenedAtRef.current
+        if (sinceOpen >= 0 && sinceOpen < 1800) {
+          const common = longestCommonSubstringLen(t, q)
+          const coverage = common / Math.max(1, Math.min(t.length, q.length))
+          if (common >= 8 && coverage >= 0.55) return true
+        }
         if (q.includes(t)) return true
+        if (t.includes(q)) return true
+        if (t.length >= 12 && q.includes(t.slice(0, 12))) return true
+        if (t.length >= 12 && q.includes(t.slice(-12))) return true
         if (t.length > 20 && t.includes(q.slice(0, 20))) return true
         return false
       }
@@ -529,6 +570,7 @@ export default function InterviewPage() {
             latestLiveTranscriptSyncRef.current = transcriptFinalizedRef.current.join('')
           }
           setTranscriptStreaming('')
+          answerRecognitionOpenedAtRef.current = Date.now()
           answerTranscriptOpenRef.current = true
           setShowAnswerTranscript(true)
         }, gateDelayMs)
@@ -573,13 +615,27 @@ export default function InterviewPage() {
         else resumeAnswerAfterQuestionTts(sidInner)
         return
       }
+      const activeMgr = recordManagerRef.current
+      if (activeMgr) {
+        try {
+          activeMgr.stop?.()
+        } catch {
+          /* ignore */
+        }
+      }
+      recordManagerRef.current = null
+      setTranscribing(false)
       questionTtsPlayingRef.current = true
       setCallStatusLine('AI 正在读题...')
       closeAnswerTranscriptDisplay()
+      transcriptFinalizedRef.current = []
+      setTranscriptFinalized([])
+      setTranscriptStreaming('')
+      latestLiveTranscriptSyncRef.current = ''
       const ttsText = String(ttsRaw || '').trim()
       const ttsStartAt = Date.now()
-      // 最短屏蔽时长：防止 InnerAudio onEnded 过早触发导致 questionTtsPlaying 提前关闭、读题声进框。
-      const minTtsCoverMs = Math.max(4200, Math.min(24000, ttsText.length * 200 + 2400))
+      // 兜底屏蔽时长只防异常早结束；主要防护靠读题前硬停识别和开头回声相似度过滤。
+      const minTtsCoverMs = Math.max(1800, Math.min(8000, ttsText.length * 70 + 1000))
       ignoreRecognizeBeforeTsRef.current = ttsStartAt + minTtsCoverMs
       let prebuilt: string | undefined
       if (pendingUsePrefetchedFirstTtsRef.current && questionIndexRef.current === 0) {
@@ -607,9 +663,10 @@ export default function InterviewPage() {
           const holdMs = Math.max(0, minTtsCoverMs - elapsed)
           const releaseTtsAndResume = () => {
             questionTtsPlayingRef.current = false
-            // 仅保留极短冷却，避免用户读题结束立即作答时被整段吞掉。
-            ignoreRecognizeBeforeTsRef.current = Date.now() + 180
-            setTimeout(() => resumeAnswerAfterQuestionTts(sidInner), 30)
+            // 短冷却避免读题尾音进框，同时尽量不吞候选人开头作答。
+            ignoreRecognizeBeforeTsRef.current = Date.now() + 360
+            setTranscriptStreaming('')
+            setTimeout(() => resumeAnswerAfterQuestionTts(sidInner), 60)
           }
           if (holdMs <= 0) {
             releaseTtsAndResume()
@@ -702,6 +759,18 @@ export default function InterviewPage() {
         closeAnswerTranscriptDisplay()
         try {
           setCallStatusLine('正在准备题目…')
+          followUpConfigRef.current = DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG
+          void fetchInterviewFollowUpConfig(j.id, sid)
+            .then((cfg) => {
+              followUpConfigRef.current = { ...DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG, ...cfg }
+              flowLogInfo(
+                '追问配置',
+                `enabled=${cfg.enabled ? '1' : '0'} max=${cfg.maxPerInterview} waitMs=${cfg.modelWaitMs}`
+              )
+            })
+            .catch(() => {
+              followUpConfigRef.current = DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG
+            })
           const list = await fetchInterviewQuestionsOrPrefetched(
             j.id,
             p.name,
@@ -712,6 +781,8 @@ export default function InterviewPage() {
           flowLog('AI 题目生成', true, `${cleaned.length} 题`)
           flowLogInfo('AI 首题', cleaned[0]?.text?.slice(0, 40) || '')
           setQuestions(cleaned)
+          followUpCountRef.current = 0
+          followUpParentIdsRef.current = new Set()
           transcriptFinalizedRef.current = []
           setTranscriptFinalized([])
           setTranscriptStreaming('')
@@ -792,6 +863,56 @@ export default function InterviewPage() {
   const canNext = useMemo(() => composedAnswer.length >= 2, [composedAnswer])
   const speakingHighlight = transcribing && transcriptStreaming.length > 0
 
+  const buildShortAnswerFollowUp = useCallback((parent: InterviewQuestion, answer: string): InterviewQuestion | null => {
+    const cfg = followUpConfigRef.current
+    if (!cfg.enabled || !cfg.fallbackEnabled) return null
+    const compact = String(answer || '').replace(/\s+/g, '')
+    if (compact.length >= cfg.shortAnswerThreshold) return null
+    return {
+      id: `FU-${parent.id}-short`,
+      text: '可以结合一个具体项目或经历，再展开说明一下吗？',
+      type: 'follow_up',
+      parentQuestionId: parent.id
+    }
+  }, [])
+
+  const fetchFollowUpWithoutWaiting = useCallback(
+    async (parent: InterviewQuestion, answer: string): Promise<InterviewQuestion | null> => {
+      const cfg = followUpConfigRef.current
+      if (!cfg.enabled) return null
+      if (!sessionId) return null
+      if (parent.type === 'follow_up') return null
+      if (cfg.maxPerInterview <= 0 || cfg.maxPerQuestion <= 0) return null
+      if (followUpCountRef.current >= cfg.maxPerInterview) return null
+      if (followUpParentIdsRef.current.has(parent.id)) return null
+
+      const mainOrdinal =
+        questionListRef.current
+          .slice(0, questionIndexRef.current + 1)
+          .filter((q) => q.type !== 'follow_up').length || 0
+      flowLogInfo(
+        '追问检查',
+        `mainOrdinal=${mainOrdinal} index=${questionIndexRef.current} qid=${parent.id} answerLen=${answer.length}`
+      )
+
+      const got = await fetchPreparedFollowUp({
+        sessionId,
+        questionId: parent.id,
+        waitMs: cfg.modelWaitMs
+      }).catch(() => null)
+      flowLogInfo('追问检查', `追问状态=${got?.status || 'request_failed'}`)
+      if (got?.status === 'ready' && got.question?.text) {
+        return {
+          ...got.question,
+          type: 'follow_up',
+          parentQuestionId: got.question.parentQuestionId || parent.id
+        }
+      }
+      return buildShortAnswerFollowUp(parent, answer)
+    },
+    [buildShortAnswerFollowUp, sessionId]
+  )
+
   const handleNext = async () => {
     if (!current || !canNext || !profile || !job) return
 
@@ -805,6 +926,21 @@ export default function InterviewPage() {
     transcriptFinalizedRef.current = []
     setTranscriptFinalized([])
     setTranscriptStreaming('')
+
+    const followUp = await fetchFollowUpWithoutWaiting(current, composedAnswer)
+    if (followUp?.text) {
+      followUpCountRef.current += 1
+      followUpParentIdsRef.current.add(current.id)
+      const nextIdx = index + 1
+      const nextQuestions = [...questions]
+      nextQuestions.splice(nextIdx, 0, followUp)
+      setQuestions(nextQuestions)
+      closeAnswerTranscriptDisplay()
+      pendingTtsAfterStopRef.current = followUp.text
+      setIndex(nextIdx)
+      void startWechatSiTranscribe(sessionId, true)
+      return
+    }
 
     if (!isLast) {
       const nextIdx = index + 1

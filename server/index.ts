@@ -703,6 +703,388 @@ function parseAiInterviewScoreJson(raw: string): AiInterviewScore | null {
   }
 }
 
+type FollowUpCacheValue = {
+  status: 'pending' | 'ready' | 'skipped' | 'error'
+  question?: string
+  parentQuestion?: string
+  answer?: string
+  updatedAt: number
+}
+
+const followUpCache = new Map<string, FollowUpCacheValue>()
+const FOLLOW_UP_CACHE_TTL_MS = 2 * 60 * 60 * 1000
+type InterviewFollowUpConfig = {
+  enabled: boolean
+  maxPerInterview: number
+  maxPerQuestion: number
+  modelWaitMs: number
+  shortAnswerThreshold: number
+  fallbackEnabled: boolean
+  model: string
+  prompt: string
+}
+
+const DEFAULT_FOLLOW_UP_PROMPT = [
+  '你是结构化技术面试里的追问面试官。你的任务不是评价答案是否充分，而是从候选人的回答里继续追深一层，验证真实性、深度和个人贡献。',
+  '只要候选人回答了有效内容，默认 should_follow_up=true，并生成 1 个具体追问。',
+  '优先围绕回答中出现的项目、技术方案、难点、指标结果、个人职责、协作取舍、失败复盘来追问；追问要锚定候选人刚才说过的具体信息。',
+  '只有以下情况才返回 should_follow_up=false：回答为空；明显只是复述题目或读题回声；只说“不知道/没有/不会”且无法继续追；回答完全无法理解。',
+  '不要问泛泛的“能否展开说说”；不要重复原题；不要一次问多个问题；不要输出解释。',
+  '只返回 JSON：{"should_follow_up": boolean, "question": string}。question 控制在 15-45 个中文字符。'
+].join('\n')
+
+const DEFAULT_FOLLOW_UP_CONFIG: InterviewFollowUpConfig = {
+  enabled: true,
+  maxPerInterview: 3,
+  maxPerQuestion: 1,
+  modelWaitMs: 700,
+  shortAnswerThreshold: 18,
+  fallbackEnabled: true,
+  model: '',
+  prompt: DEFAULT_FOLLOW_UP_PROMPT
+}
+
+function sanitizeFollowUpConfig(raw: Partial<InterviewFollowUpConfig> = {}): InterviewFollowUpConfig {
+  const clampInt = (v: unknown, fallback: number, min: number, max: number) => {
+    const n = Number(v)
+    return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fallback
+  }
+  return {
+    enabled: raw.enabled !== undefined ? Boolean(raw.enabled) : DEFAULT_FOLLOW_UP_CONFIG.enabled,
+    maxPerInterview: clampInt(raw.maxPerInterview, DEFAULT_FOLLOW_UP_CONFIG.maxPerInterview, 0, 10),
+    maxPerQuestion: clampInt(raw.maxPerQuestion, DEFAULT_FOLLOW_UP_CONFIG.maxPerQuestion, 0, 1),
+    modelWaitMs: clampInt(raw.modelWaitMs, DEFAULT_FOLLOW_UP_CONFIG.modelWaitMs, 0, 5000),
+    shortAnswerThreshold: clampInt(raw.shortAnswerThreshold, DEFAULT_FOLLOW_UP_CONFIG.shortAnswerThreshold, 2, 80),
+    fallbackEnabled:
+      raw.fallbackEnabled !== undefined ? Boolean(raw.fallbackEnabled) : DEFAULT_FOLLOW_UP_CONFIG.fallbackEnabled,
+    model: String(raw.model || '').trim().slice(0, 80),
+    prompt: String(raw.prompt || DEFAULT_FOLLOW_UP_PROMPT).trim().slice(0, 4000) || DEFAULT_FOLLOW_UP_PROMPT
+  }
+}
+
+function followUpConfigForJson(config: InterviewFollowUpConfig) {
+  return {
+    enabled: config.enabled,
+    maxPerInterview: config.maxPerInterview,
+    maxPerQuestion: config.maxPerQuestion,
+    modelWaitMs: config.modelWaitMs,
+    shortAnswerThreshold: config.shortAnswerThreshold,
+    fallbackEnabled: config.fallbackEnabled,
+    model: config.model,
+    prompt: config.prompt
+  }
+}
+
+function followUpConfigFromRow(row: Record<string, unknown> | null | undefined): InterviewFollowUpConfig {
+  if (!row) return { ...DEFAULT_FOLLOW_UP_CONFIG }
+  return sanitizeFollowUpConfig({
+    enabled: Number(row.enabled) !== 0,
+    maxPerInterview: Number(row.max_per_interview),
+    maxPerQuestion: Number(row.max_per_question),
+    modelWaitMs: Number(row.model_wait_ms),
+    shortAnswerThreshold: Number(row.short_answer_threshold),
+    fallbackEnabled: Number(row.fallback_enabled) !== 0,
+    model: String(row.model || ''),
+    prompt: String(row.prompt || '')
+  })
+}
+
+async function loadSystemFollowUpConfig(): Promise<InterviewFollowUpConfig> {
+  try {
+    const [rows] = await mysqlPool.query<any[]>(
+      `SELECT enabled, max_per_interview, max_per_question, model_wait_ms,
+              short_answer_threshold, fallback_enabled, model, prompt
+       FROM interview_followup_settings WHERE id=1 LIMIT 1`
+    )
+    return followUpConfigFromRow(rows[0])
+  } catch {
+    return { ...DEFAULT_FOLLOW_UP_CONFIG }
+  }
+}
+
+async function saveSystemFollowUpConfig(raw: unknown): Promise<InterviewFollowUpConfig> {
+  const config = sanitizeFollowUpConfig((raw || {}) as Partial<InterviewFollowUpConfig>)
+  await mysqlPool.query(
+    `INSERT INTO interview_followup_settings
+       (id, enabled, max_per_interview, max_per_question, model_wait_ms,
+        short_answer_threshold, fallback_enabled, model, prompt)
+     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       enabled=VALUES(enabled),
+       max_per_interview=VALUES(max_per_interview),
+       max_per_question=VALUES(max_per_question),
+       model_wait_ms=VALUES(model_wait_ms),
+       short_answer_threshold=VALUES(short_answer_threshold),
+       fallback_enabled=VALUES(fallback_enabled),
+       model=VALUES(model),
+       prompt=VALUES(prompt)`,
+    [
+      config.enabled ? 1 : 0,
+      config.maxPerInterview,
+      config.maxPerQuestion,
+      config.modelWaitMs,
+      config.shortAnswerThreshold,
+      config.fallbackEnabled ? 1 : 0,
+      config.model || null,
+      config.prompt
+    ]
+  )
+  return config
+}
+
+async function loadFollowUpConfigByJobCode(jobCode: string): Promise<InterviewFollowUpConfig> {
+  const jc = String(jobCode || '').trim().toUpperCase()
+  if (!jc) return loadSystemFollowUpConfig()
+  try {
+    const [rows] = await mysqlPool.query<any[]>(
+      `SELECT enabled, max_per_interview, max_per_question, model_wait_ms,
+              short_answer_threshold, fallback_enabled, model, prompt
+       FROM interview_followup_configs WHERE job_code=? LIMIT 1`,
+      [jc]
+    )
+    return rows.length ? followUpConfigFromRow(rows[0]) : loadSystemFollowUpConfig()
+  } catch {
+    return loadSystemFollowUpConfig()
+  }
+}
+
+async function loadFollowUpConfigBySessionId(sessionId: string): Promise<InterviewFollowUpConfig> {
+  const sid = String(sessionId || '').trim()
+  if (!sid) return loadSystemFollowUpConfig()
+  try {
+    const [rows] = await mysqlPool.query<any[]>(
+      `SELECT s.invitation_id, j.job_code
+       FROM interview_sessions s
+       JOIN jobs j ON j.id = s.job_id
+       WHERE s.session_id=? LIMIT 1`,
+      [sid]
+    )
+    const inviteConfig = await loadFollowUpConfigByInvitationId(rows[0]?.invitation_id)
+    if (inviteConfig) return inviteConfig
+    return loadSystemFollowUpConfig()
+  } catch {
+    return loadSystemFollowUpConfig()
+  }
+}
+
+async function saveFollowUpConfigForJob(jobCode: string, raw: unknown): Promise<void> {
+  if (raw === undefined) return
+  const jc = String(jobCode || '').trim().toUpperCase()
+  if (!jc) return
+  const config = sanitizeFollowUpConfig((raw || {}) as Partial<InterviewFollowUpConfig>)
+  await mysqlPool.query(
+    `INSERT INTO interview_followup_configs
+       (job_code, enabled, max_per_interview, max_per_question, model_wait_ms,
+        short_answer_threshold, fallback_enabled, model, prompt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       enabled=VALUES(enabled),
+       max_per_interview=VALUES(max_per_interview),
+       max_per_question=VALUES(max_per_question),
+       model_wait_ms=VALUES(model_wait_ms),
+       short_answer_threshold=VALUES(short_answer_threshold),
+       fallback_enabled=VALUES(fallback_enabled),
+       model=VALUES(model),
+       prompt=VALUES(prompt)`,
+    [
+      jc,
+      config.enabled ? 1 : 0,
+      config.maxPerInterview,
+      config.maxPerQuestion,
+      config.modelWaitMs,
+      config.shortAnswerThreshold,
+      config.fallbackEnabled ? 1 : 0,
+      config.model || null,
+      config.prompt
+    ]
+  )
+}
+
+async function saveFollowUpConfigForInvitation(inviteId: string | number, raw: unknown): Promise<void> {
+  if (raw === undefined) return
+  const config = sanitizeFollowUpConfig((raw || {}) as Partial<InterviewFollowUpConfig>)
+  await mysqlPool.query(
+    `INSERT INTO interview_invitation_followup_configs
+       (invitation_id, enabled, max_per_interview, max_per_question, model_wait_ms,
+        short_answer_threshold, fallback_enabled, model, prompt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       enabled=VALUES(enabled),
+       max_per_interview=VALUES(max_per_interview),
+       max_per_question=VALUES(max_per_question),
+       model_wait_ms=VALUES(model_wait_ms),
+       short_answer_threshold=VALUES(short_answer_threshold),
+       fallback_enabled=VALUES(fallback_enabled),
+       model=VALUES(model),
+       prompt=VALUES(prompt)`,
+    [
+      inviteId,
+      config.enabled ? 1 : 0,
+      config.maxPerInterview,
+      config.maxPerQuestion,
+      config.modelWaitMs,
+      config.shortAnswerThreshold,
+      config.fallbackEnabled ? 1 : 0,
+      config.model || null,
+      config.prompt
+    ]
+  )
+}
+
+async function loadFollowUpConfigByInvitationId(invitationId: unknown): Promise<InterviewFollowUpConfig | null> {
+  const id = mysqlRowIdForParam(invitationId)
+  if (id == null) return null
+  try {
+    const [rows] = await mysqlPool.query<any[]>(
+      `SELECT enabled, max_per_interview, max_per_question, model_wait_ms,
+              short_answer_threshold, fallback_enabled, model, prompt
+       FROM interview_invitation_followup_configs WHERE invitation_id=? LIMIT 1`,
+      [id]
+    )
+    return rows.length ? followUpConfigFromRow(rows[0]) : null
+  } catch {
+    return null
+  }
+}
+
+function followUpCacheKey(sessionId: string, questionId: string) {
+  return `${sessionId.trim()}\t${questionId.trim()}`
+}
+
+function cleanupFollowUpCache() {
+  const now = Date.now()
+  for (const [key, value] of followUpCache.entries()) {
+    if (now - value.updatedAt > FOLLOW_UP_CACHE_TTL_MS) followUpCache.delete(key)
+  }
+}
+
+function parseFollowUpJson(raw: string): { shouldFollowUp: boolean; question: string } | null {
+  try {
+    let cleaned = raw
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```\s*$/i, '')
+    const firstBrace = cleaned.indexOf('{')
+    const lastBrace = cleaned.lastIndexOf('}')
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      cleaned = cleaned.slice(firstBrace, lastBrace + 1)
+    }
+    const parsed = JSON.parse(cleaned) as {
+      should_follow_up?: unknown
+      shouldFollowUp?: unknown
+      question?: unknown
+    }
+    const rawFlag = parsed.should_follow_up ?? parsed.shouldFollowUp
+    const shouldFollowUp =
+      typeof rawFlag === 'string' ? /^(true|yes|1|是|需要)$/i.test(rawFlag.trim()) : Boolean(rawFlag)
+    return {
+      shouldFollowUp,
+      question: String(parsed.question || '').trim()
+    }
+  } catch {
+    return null
+  }
+}
+
+function normalizeFollowUpQuestion(raw: string, parentQuestion: string): string {
+  let text = String(raw || '').replace(/\s+/g, ' ').trim()
+  text = text.replace(/^追问[:：]\s*/, '').trim()
+  if (!text) return ''
+  if (text.length > 90) text = text.slice(0, 90).trim()
+  const parent = String(parentQuestion || '').trim()
+  if (parent && (text === parent || parent.includes(text) || text.includes(parent))) return ''
+  if (!/[？?]$/.test(text)) text += '？'
+  return text
+}
+
+function buildInstantFollowUpQuestion(parentQuestion: string, answer: string): string {
+  const q = String(parentQuestion || '').trim()
+  const a = String(answer || '').replace(/\s+/g, ' ').trim()
+  const compact = a.replace(/\s+/g, '')
+  if (compact.length < 18) return ''
+
+  const mentioned = (pattern: RegExp) => pattern.test(a) || pattern.test(q)
+  if (mentioned(/(指标|提升|降低|优化|性能|耗时|并发|响应|成功率|准确率|效率|成本)/i)) {
+    return '你刚才提到优化效果，前后指标大概变化多少？'
+  }
+  if (mentioned(/(难点|问题|故障|瓶颈|挑战|卡住|排查|定位|异常|风险)/i)) {
+    return '你当时是怎么定位这个难点并最终解决的？'
+  }
+  if (mentioned(/(负责|主导|参与|协作|沟通|推动|落地|交付)/i)) {
+    return '这件事里你个人最关键的贡献是什么？'
+  }
+  if (mentioned(/(方案|架构|设计|选型|重构|拆分|模块|链路|流程)/i)) {
+    return '你为什么选择这个方案，而不是其他实现方式？'
+  }
+  if (mentioned(/(项目|系统|平台|产品|功能|需求|业务)/i)) {
+    return '这个项目里最能体现你能力的一点是什么？'
+  }
+  return '你刚才提到的这段经历，最关键的处理细节是什么？'
+}
+
+function shouldPrepareFollowUp(answer: string, question: string, config: InterviewFollowUpConfig) {
+  if (!config.enabled || config.maxPerInterview <= 0 || config.maxPerQuestion <= 0) return false
+  const a = String(answer || '').replace(/\s+/g, '')
+  const q = String(question || '').replace(/\s+/g, '')
+  if (a.length < config.shortAnswerThreshold || a.length > 1600) return false
+  if (q && (a.includes(q) || q.includes(a))) return false
+  return true
+}
+
+async function prepareInterviewFollowUp(params: {
+  sessionId: string
+  questionId: string
+  question: string
+  answer: string
+}) {
+  const sessionId = params.sessionId.trim()
+  const questionId = params.questionId.trim()
+  const question = params.question.trim()
+  const answer = params.answer.trim()
+  const config = await loadFollowUpConfigBySessionId(sessionId)
+  if (!sessionId || !questionId || !question || !shouldPrepareFollowUp(answer, question, config)) return
+
+  cleanupFollowUpCache()
+  const key = followUpCacheKey(sessionId, questionId)
+  const existing = followUpCache.get(key)
+  if (existing?.status === 'pending' || existing?.status === 'ready') return
+  followUpCache.set(key, { status: 'pending', parentQuestion: question, answer, updatedAt: Date.now() })
+
+  try {
+    const model = config.model || process.env.QWEN_FOLLOWUP_MODEL?.trim() || 'qwen-turbo'
+    const data = await dashScopeChatCompletions(
+      {
+        model,
+        messages: [
+          {
+            role: 'system',
+            content: config.prompt || DEFAULT_FOLLOW_UP_PROMPT
+          },
+          {
+            role: 'user',
+            content: `当前题目：${question}\n候选人回答：${answer}\n请基于回答中的具体点生成一个追问。`
+          }
+        ],
+        temperature: 0.35,
+        max_tokens: 180
+      },
+      { timeoutMs: Math.max(1500, Number(process.env.QWEN_FOLLOWUP_TIMEOUT_MS) || 6000) }
+    )
+    const content = String(data?.choices?.[0]?.message?.content || '').trim()
+    const parsed = parseFollowUpJson(content)
+    const followUp = parsed?.shouldFollowUp ? normalizeFollowUpQuestion(parsed.question, question) : ''
+    followUpCache.set(key, {
+      status: followUp ? 'ready' : 'skipped',
+      question: followUp || undefined,
+      parentQuestion: question,
+      answer,
+      updatedAt: Date.now()
+    })
+  } catch {
+    followUpCache.set(key, { status: 'error', parentQuestion: question, answer, updatedAt: Date.now() })
+  }
+}
+
 type InterviewReportPayload = {
   sessionId: string
   jobCode: string
@@ -3208,7 +3590,8 @@ function adminJobRowForJson(r: Record<string, unknown>) {
     skills: r.skills,
     level: r.level,
     salary: r.salary,
-    recruiters: recruitersFromRow(r.recruiters)
+    recruiters: recruitersFromRow(r.recruiters),
+    followUpConfig: followUpConfigForJson(followUpConfigFromRow(r))
   }
 }
 
@@ -3225,15 +3608,25 @@ app.get('/api/admin/jobs', async (req, res) => {
     if (scopeJobCodes) {
       const ph = scopeJobCodes.map(() => '?').join(', ')
       const [r] = await mysqlPool.query<any[]>(
-        `SELECT id, project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters
-         FROM jobs WHERE job_code IN (${ph}) ORDER BY id DESC`,
+        `SELECT j.id, j.project_id, j.job_code, j.title, j.department, j.jd_text, j.demand, j.location,
+                j.skills, j.level, j.salary, j.recruiters,
+                f.enabled, f.max_per_interview, f.max_per_question, f.model_wait_ms,
+                f.short_answer_threshold, f.fallback_enabled, f.model, f.prompt
+         FROM jobs j
+         LEFT JOIN interview_followup_configs f ON f.job_code = j.job_code
+         WHERE j.job_code IN (${ph}) ORDER BY j.id DESC`,
         scopeJobCodes
       )
       rows = r || []
     } else {
       const [r] = await mysqlPool.query<any[]>(
-        `SELECT id, project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters
-         FROM jobs ORDER BY id DESC`
+        `SELECT j.id, j.project_id, j.job_code, j.title, j.department, j.jd_text, j.demand, j.location,
+                j.skills, j.level, j.salary, j.recruiters,
+                f.enabled, f.max_per_interview, f.max_per_question, f.model_wait_ms,
+                f.short_answer_threshold, f.fallback_enabled, f.model, f.prompt
+         FROM jobs j
+         LEFT JOIN interview_followup_configs f ON f.job_code = j.job_code
+         ORDER BY j.id DESC`
       )
       rows = r || []
     }
@@ -3343,6 +3736,7 @@ app.post('/api/admin/jobs', async (req, res) => {
         recruitersJson
       ]
     )
+    await saveFollowUpConfigForJob(jobCode, req.body?.followUpConfig)
     res.json({ data: { jobCode } })
   } catch (e: any) {
     if (e?.code === 'ER_DUP_ENTRY') return res.status(409).json({ message: '该岗位编码已存在' })
@@ -3442,11 +3836,53 @@ app.patch('/api/admin/jobs/:jobCode', async (req, res) => {
       vals
     )
     if (!hdr.affectedRows) return res.status(404).json({ message: '未找到对应岗位' })
+    await saveFollowUpConfigForJob(jobCode, req.body?.followUpConfig)
     res.json({ ok: true })
   } catch (e: any) {
     if (e?.code === 'ER_NO_REFERENCED_ROW_2') {
       return res.status(400).json({ message: '所选项目不存在' })
     }
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
+  }
+})
+
+app.get('/api/admin/jobs/:jobCode/follow-up-config', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const jobCode = String(req.params.jobCode || '').trim().toUpperCase()
+  if (!jobCode) return res.status(400).json({ message: '请提供岗位编码' })
+  try {
+    const config = await loadFollowUpConfigByJobCode(jobCode)
+    res.json({ data: followUpConfigForJson(config) })
+  } catch {
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
+  }
+})
+
+app.patch('/api/admin/jobs/:jobCode/follow-up-config', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const jobCode = String(req.params.jobCode || '').trim().toUpperCase()
+  if (!jobCode) return res.status(400).json({ message: '请提供岗位编码' })
+  try {
+    await saveFollowUpConfigForJob(jobCode, req.body || {})
+    const config = await loadFollowUpConfigByJobCode(jobCode)
+    res.json({ data: followUpConfigForJson(config) })
+  } catch {
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
+  }
+})
+
+app.get('/api/admin/interview-followup-settings', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const config = await loadSystemFollowUpConfig()
+  res.json({ data: followUpConfigForJson(config) })
+})
+
+app.patch('/api/admin/interview-followup-settings', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  try {
+    const config = await saveSystemFollowUpConfig(req.body || {})
+    res.json({ data: followUpConfigForJson(config) })
+  } catch {
     res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
@@ -5696,6 +6132,7 @@ app.post('/api/admin/invitations', async (req, res) => {
   const days = Number.isFinite(rawDays) && rawDays > 0 ? Math.min(Math.floor(rawDays), 365) : 7
   const screeningIdRaw = Number(req.body?.screeningId)
   const screeningIdForPipeline = Number.isFinite(screeningIdRaw) && screeningIdRaw > 0 ? screeningIdRaw : 0
+  const followUpConfigRaw = req.body?.followUpConfig
   try {
     const [jobs] = await mysqlPool.query<any[]>('SELECT id FROM jobs WHERE job_code=? LIMIT 1', [jobCode])
     if (!jobs.length) return res.status(404).json({ message: '未找到对应岗位' })
@@ -5727,11 +6164,12 @@ app.post('/api/admin/invitations', async (req, res) => {
       )
       const screeningDbVal = screeningIdForPipeline > 0 ? screeningIdForPipeline : null
       const tryInsert = async (interviewer: string | number | null) => {
-        await mysqlPool.query(
+        const [hdr] = await mysqlPool.query<ResultSetHeader>(
           `INSERT INTO interview_invitations (invite_code, job_id, interviewer_user_id, resume_screening_id, status, expires_at)
            VALUES (?, ?, ?, ?, 'pending', DATE_ADD(NOW(), INTERVAL ? DAY))`,
           [inviteCode, jobId, interviewer, screeningDbVal, days]
         )
+        await saveFollowUpConfigForInvitation(hdr.insertId, followUpConfigRaw)
       }
       try {
         await tryInsert(interviewerUserId)
@@ -6281,6 +6719,18 @@ app.get('/api/candidate/interview-questions', async (req, res) => {
   }
 })
 
+app.get('/api/candidate/interview-followup-config', async (req, res) => {
+  const jobId = String(req.query.jobId || req.query.jobCode || '').trim().toUpperCase()
+  const sessionId = String(req.query.sessionId || '').trim()
+  if (!jobId && !sessionId) return res.status(400).json({ message: '请提供岗位 ID（jobId）或会话 ID（sessionId）' })
+  try {
+    const config = sessionId ? await loadFollowUpConfigBySessionId(sessionId) : await loadFollowUpConfigByJobCode(jobId)
+    res.json({ data: followUpConfigForJson(config) })
+  } catch {
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
+  }
+})
+
 /** 首题已展示后拉取 Q2～Q6（POST 避免首题题干过长超出 GET URL 限制） */
 app.post('/api/candidate/interview-questions-rest', async (req, res) => {
   const jobId = String(req.body?.jobId || '').trim().toUpperCase()
@@ -6644,6 +7094,8 @@ app.post('/api/live/session/accept-video', async (req, res) => {
 app.post('/api/live/session/transcript', async (req, res) => {
   const sessionId = String(req.body?.sessionId || '').trim()
   const text = String(req.body?.text || '').trim()
+  const questionId = String(req.body?.questionId || '').trim()
+  const question = String(req.body?.question || '').trim()
   if (!sessionId || !text) return res.status(400).json({ message: '请求参数无效' })
   try {
     const sid = await getSessionInternalId(sessionId)
@@ -6652,8 +7104,68 @@ app.post('/api/live/session/transcript', async (req, res) => {
       "INSERT INTO interview_messages(session_id, message_type, question_id, sender_role, content) VALUES (?, 'transcript', NULL, 'candidate', ?)",
       [sid, text]
     )
+    if (questionId && question) {
+      void prepareInterviewFollowUp({ sessionId, questionId, question, answer: text })
+    }
     res.json({ ok: true })
   } catch (e) {
+    res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
+  }
+})
+
+app.get('/api/live/session/follow-up', async (req, res) => {
+  const sessionId = String(req.query.sessionId || '').trim()
+  const questionId = String(req.query.questionId || '').trim()
+  const waitMs = Math.max(0, Math.min(10000, Number(req.query.waitMs) || 0))
+  const requireModel = ['1', 'true', 'yes'].includes(String(req.query.requireModel || '').toLowerCase())
+  if (!sessionId || !questionId) return res.status(400).json({ message: '请求参数无效' })
+  try {
+    const sid = await getSessionInternalId(sessionId)
+    if (!sid) return res.status(404).json({ message: '未找到会话' })
+    const config = await loadFollowUpConfigBySessionId(sessionId)
+    if (!config.enabled || config.maxPerInterview <= 0 || config.maxPerQuestion <= 0) {
+      return res.json({ data: { status: 'skipped' } })
+    }
+    cleanupFollowUpCache()
+    const key = followUpCacheKey(sessionId, questionId)
+    const startedAt = Date.now()
+    let value = followUpCache.get(key)
+    while (value?.status === 'pending' && waitMs > 0 && Date.now() - startedAt < waitMs) {
+      await sleepMs(120)
+      value = followUpCache.get(key)
+    }
+    if (!value) return res.json({ data: { status: 'none' } })
+    if (value.status === 'ready' && value.question) {
+      return res.json({
+        data: {
+          status: 'ready',
+          question: {
+            id: `FU-${questionId}`,
+            text: value.question,
+            type: 'follow_up',
+            parentQuestionId: questionId
+          }
+        }
+      })
+    }
+    if (value.status === 'pending' && !requireModel && config.fallbackEnabled) {
+      const instant = buildInstantFollowUpQuestion(value.parentQuestion || '', value.answer || '')
+      if (instant) {
+        return res.json({
+          data: {
+            status: 'ready',
+            question: {
+              id: `FU-${questionId}-instant`,
+              text: instant,
+              type: 'follow_up',
+              parentQuestionId: questionId
+            }
+          }
+        })
+      }
+    }
+    return res.json({ data: { status: value.status } })
+  } catch {
     res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
@@ -6697,6 +7209,9 @@ app.post('/api/live/session/qa', async (req, res) => {
       "INSERT INTO interview_messages(session_id, message_type, question_id, sender_role, content) VALUES (?, 'qa_answer', NULL, 'candidate', ?)",
       [sid, payload]
     )
+    if (questionId && question && answer) {
+      void prepareInterviewFollowUp({ sessionId, questionId, question, answer })
+    }
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })

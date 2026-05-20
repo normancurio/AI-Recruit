@@ -90,6 +90,149 @@ function normalizeRecruitersForDb(raw: unknown): string {
 
 type GenerateJdPayload = { title: string; level: string; location?: string; salary?: string };
 
+type InterviewFollowUpConfig = {
+  enabled: boolean;
+  maxPerInterview: number;
+  maxPerQuestion: number;
+  modelWaitMs: number;
+  shortAnswerThreshold: number;
+  fallbackEnabled: boolean;
+  model: string;
+  prompt: string;
+};
+
+const DEFAULT_FOLLOW_UP_PROMPT = [
+  '你是结构化技术面试里的追问面试官。你的任务不是评价答案是否充分，而是从候选人的回答里继续追深一层，验证真实性、深度和个人贡献。',
+  '只要候选人回答了有效内容，默认 should_follow_up=true，并生成 1 个具体追问。',
+  '优先围绕回答中出现的项目、技术方案、难点、指标结果、个人职责、协作取舍、失败复盘来追问；追问要锚定候选人刚才说过的具体信息。',
+  '只有以下情况才返回 should_follow_up=false：回答为空；明显只是复述题目或读题回声；只说“不知道/没有/不会”且无法继续追；回答完全无法理解。',
+  '不要问泛泛的“能否展开说说”；不要重复原题；不要一次问多个问题；不要输出解释。',
+  '只返回 JSON：{"should_follow_up": boolean, "question": string}。question 控制在 15-45 个中文字符。'
+].join('\n');
+
+const DEFAULT_FOLLOW_UP_CONFIG: InterviewFollowUpConfig = {
+  enabled: true,
+  maxPerInterview: 3,
+  maxPerQuestion: 1,
+  modelWaitMs: 700,
+  shortAnswerThreshold: 18,
+  fallbackEnabled: true,
+  model: '',
+  prompt: DEFAULT_FOLLOW_UP_PROMPT
+};
+
+function sanitizeFollowUpConfig(raw: Partial<InterviewFollowUpConfig> = {}): InterviewFollowUpConfig {
+  const clampInt = (v: unknown, fallback: number, min: number, max: number) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fallback;
+  };
+  return {
+    enabled: raw.enabled !== undefined ? Boolean(raw.enabled) : DEFAULT_FOLLOW_UP_CONFIG.enabled,
+    maxPerInterview: clampInt(raw.maxPerInterview, DEFAULT_FOLLOW_UP_CONFIG.maxPerInterview, 0, 10),
+    maxPerQuestion: clampInt(raw.maxPerQuestion, DEFAULT_FOLLOW_UP_CONFIG.maxPerQuestion, 0, 1),
+    modelWaitMs: clampInt(raw.modelWaitMs, DEFAULT_FOLLOW_UP_CONFIG.modelWaitMs, 0, 5000),
+    shortAnswerThreshold: clampInt(raw.shortAnswerThreshold, DEFAULT_FOLLOW_UP_CONFIG.shortAnswerThreshold, 2, 80),
+    fallbackEnabled:
+      raw.fallbackEnabled !== undefined ? Boolean(raw.fallbackEnabled) : DEFAULT_FOLLOW_UP_CONFIG.fallbackEnabled,
+    model: String(raw.model || '').trim().slice(0, 80),
+    prompt: String(raw.prompt || DEFAULT_FOLLOW_UP_PROMPT).trim().slice(0, 4000) || DEFAULT_FOLLOW_UP_PROMPT
+  };
+}
+
+function followUpConfigForJson(config: InterviewFollowUpConfig) {
+  return { ...config };
+}
+
+function followUpConfigFromRow(row: Record<string, unknown> | null | undefined): InterviewFollowUpConfig {
+  if (!row) return { ...DEFAULT_FOLLOW_UP_CONFIG };
+  return sanitizeFollowUpConfig({
+    enabled: Number(row.enabled) !== 0,
+    maxPerInterview: Number(row.max_per_interview),
+    maxPerQuestion: Number(row.max_per_question),
+    modelWaitMs: Number(row.model_wait_ms),
+    shortAnswerThreshold: Number(row.short_answer_threshold),
+    fallbackEnabled: Number(row.fallback_enabled) !== 0,
+    model: String(row.model || ''),
+    prompt: String(row.prompt || '')
+  });
+}
+
+async function loadSystemFollowUpConfig(): Promise<InterviewFollowUpConfig> {
+  try {
+    const [rows] = await bizPool.query<any[]>(
+      `SELECT enabled, max_per_interview, max_per_question, model_wait_ms,
+              short_answer_threshold, fallback_enabled, model, prompt
+       FROM interview_followup_settings WHERE id=1 LIMIT 1`
+    );
+    return followUpConfigFromRow(rows[0]);
+  } catch {
+    return { ...DEFAULT_FOLLOW_UP_CONFIG };
+  }
+}
+
+async function saveSystemFollowUpConfig(raw: unknown): Promise<InterviewFollowUpConfig> {
+  const config = sanitizeFollowUpConfig((raw || {}) as Partial<InterviewFollowUpConfig>);
+  await bizPool.query(
+    `INSERT INTO interview_followup_settings
+       (id, enabled, max_per_interview, max_per_question, model_wait_ms,
+        short_answer_threshold, fallback_enabled, model, prompt)
+     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       enabled=VALUES(enabled),
+       max_per_interview=VALUES(max_per_interview),
+       max_per_question=VALUES(max_per_question),
+       model_wait_ms=VALUES(model_wait_ms),
+       short_answer_threshold=VALUES(short_answer_threshold),
+       fallback_enabled=VALUES(fallback_enabled),
+       model=VALUES(model),
+       prompt=VALUES(prompt)`,
+    [
+      config.enabled ? 1 : 0,
+      config.maxPerInterview,
+      config.maxPerQuestion,
+      config.modelWaitMs,
+      config.shortAnswerThreshold,
+      config.fallbackEnabled ? 1 : 0,
+      config.model || null,
+      config.prompt
+    ]
+  );
+  return config;
+}
+
+async function saveFollowUpConfigForJob(jobCode: string, raw: unknown): Promise<void> {
+  if (raw === undefined) return;
+  const jc = String(jobCode || '').trim().toUpperCase();
+  if (!jc) return;
+  const config = sanitizeFollowUpConfig((raw || {}) as Partial<InterviewFollowUpConfig>);
+  await bizPool.query(
+    `INSERT INTO interview_followup_configs
+       (job_code, enabled, max_per_interview, max_per_question, model_wait_ms,
+        short_answer_threshold, fallback_enabled, model, prompt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       enabled=VALUES(enabled),
+       max_per_interview=VALUES(max_per_interview),
+       max_per_question=VALUES(max_per_question),
+       model_wait_ms=VALUES(model_wait_ms),
+       short_answer_threshold=VALUES(short_answer_threshold),
+       fallback_enabled=VALUES(fallback_enabled),
+       model=VALUES(model),
+       prompt=VALUES(prompt)`,
+    [
+      jc,
+      config.enabled ? 1 : 0,
+      config.maxPerInterview,
+      config.maxPerQuestion,
+      config.modelWaitMs,
+      config.shortAnswerThreshold,
+      config.fallbackEnabled ? 1 : 0,
+      config.model || null,
+      config.prompt
+    ]
+  );
+}
+
 async function generateJobJdDashScope(payload: GenerateJdPayload): Promise<string> {
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim();
   const base = (
@@ -397,10 +540,20 @@ async function startServer() {
       const [projects] = await bizPool.query<any[]>(projSql);
       const hasClaim = await jobsHaveClaimedBy(bizPool);
       const jobsSql = hasClaim
-        ? `SELECT project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters, claimed_by, updated_at
-           FROM jobs ORDER BY updated_at DESC, id DESC`
-        : `SELECT project_id, job_code, title, department, jd_text, demand, location, skills, level, salary, recruiters, updated_at
-           FROM jobs ORDER BY updated_at DESC, id DESC`;
+        ? `SELECT j.project_id, j.job_code, j.title, j.department, j.jd_text, j.demand, j.location,
+                  j.skills, j.level, j.salary, j.recruiters, j.claimed_by, j.updated_at,
+                  f.enabled, f.max_per_interview, f.max_per_question, f.model_wait_ms,
+                  f.short_answer_threshold, f.fallback_enabled, f.model, f.prompt
+           FROM jobs j
+           LEFT JOIN interview_followup_configs f ON f.job_code = j.job_code
+           ORDER BY j.updated_at DESC, j.id DESC`
+        : `SELECT j.project_id, j.job_code, j.title, j.department, j.jd_text, j.demand, j.location,
+                  j.skills, j.level, j.salary, j.recruiters, j.updated_at,
+                  f.enabled, f.max_per_interview, f.max_per_question, f.model_wait_ms,
+                  f.short_answer_threshold, f.fallback_enabled, f.model, f.prompt
+           FROM jobs j
+           LEFT JOIN interview_followup_configs f ON f.job_code = j.job_code
+           ORDER BY j.updated_at DESC, j.id DESC`;
       const [jobs] = await bizPool.query<any[]>(jobsSql);
       const screeningByJob = await screeningCountsByJobCode(bizPool);
       const mappedProjects = (projects || []).map((p) => {
@@ -420,6 +573,7 @@ async function startServer() {
               salary: String(j.salary || '面议'),
               jdText: String(j.jd_text || '').trim(),
               recruiters: parseRecruiters(j.recruiters),
+              followUpConfig: followUpConfigForJson(followUpConfigFromRow(j)),
               updatedAt: fmtSqlDateTime(j.updated_at),
               screeningCount: screeningByJob.get(jc) ?? 0,
               ...(hasClaim ? { claimedBy: String(j.claimed_by || '').trim() } : {})
@@ -460,6 +614,7 @@ async function startServer() {
             salary: String(j.salary || '面议'),
             jdText: String(j.jd_text || '').trim(),
             recruiters: parseRecruiters(j.recruiters),
+            followUpConfig: followUpConfigForJson(followUpConfigFromRow(j)),
             updatedAt: fmtSqlDateTime(j.updated_at),
             screeningCount: screeningByJob.get(jc) ?? 0,
             ...(hasClaim ? { claimedBy: String(j.claimed_by || '').trim() } : {})
@@ -828,6 +983,7 @@ async function startServer() {
           ]
         );
       }
+      await saveFollowUpConfigForJob(jobCode, body?.followUpConfig);
       res.status(201).json({ ok: true, jobCode });
     } catch (e) {
       const code = (e as { code?: string })?.code;
@@ -941,6 +1097,7 @@ async function startServer() {
         res.status(404).json({ message: '岗位不存在' });
         return;
       }
+      await saveFollowUpConfigForJob(jobCode, body?.followUpConfig);
       res.json({ ok: true });
     } catch (e) {
       const code = (e as { code?: string })?.code;
@@ -1684,6 +1841,20 @@ async function startServer() {
         return;
       }
       res.json({ ok: true });
+    } catch {
+      res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
+    }
+  });
+
+  app.get('/api/admin/interview-followup-settings', async (_req, res) => {
+    const config = await loadSystemFollowUpConfig();
+    res.json({ data: followUpConfigForJson(config) });
+  });
+
+  app.patch('/api/admin/interview-followup-settings', async (req, res) => {
+    try {
+      const config = await saveSystemFollowUpConfig(req.body || {});
+      res.json({ data: followUpConfigForJson(config) });
     } catch {
       res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' });
     }

@@ -17,6 +17,8 @@ export interface JobInfo {
 export interface InterviewQuestion {
   id: string
   text: string
+  type?: 'main' | 'follow_up'
+  parentQuestionId?: string
 }
 
 export interface InterviewAnswer {

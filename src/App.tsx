@@ -122,6 +122,7 @@ const ADMIN_ROLE_MENU_OPTIONS: { group: string; items: { id: string; label: stri
       { id: 'sys-user', label: '用户管理' },
       { id: 'sys-role', label: '角色管理' },
       { id: 'sys-menu', label: '菜单管理' },
+      { id: 'sys-ai-interview-settings', label: 'AI面试设置' },
       { id: 'sys-job-role-bases', label: '标准岗位' }
     ]
   }
@@ -272,6 +273,7 @@ const NAV_TEMPLATE: NavItem[] = [
       { id: 'sys-user', title: '用户管理', icon: <UserCog className="w-4 h-4" /> },
       { id: 'sys-role', title: '角色管理', icon: <Shield className="w-4 h-4" /> },
       { id: 'sys-menu', title: '菜单管理', icon: <MenuIcon className="w-4 h-4" /> },
+      { id: 'sys-ai-interview-settings', title: 'AI面试设置', icon: <Sparkles className="w-4 h-4" /> },
       { id: 'sys-job-role-bases', title: '标准岗位', icon: <Tags className="w-4 h-4" /> }
     ]
   }
@@ -296,6 +298,63 @@ export interface Job {
   updatedAt?: string;
   /** resume_screenings 表中该 job_code 的记录条数 */
   screeningCount?: number;
+  followUpConfig?: InterviewFollowUpConfig;
+}
+
+type InterviewFollowUpConfig = {
+  enabled: boolean;
+  maxPerInterview: number;
+  maxPerQuestion: number;
+  modelWaitMs: number;
+  shortAnswerThreshold: number;
+  fallbackEnabled: boolean;
+  model?: string;
+  prompt?: string;
+};
+
+const DEFAULT_INTERVIEW_FOLLOW_UP_PROMPT = [
+  '你是结构化技术面试里的追问面试官。你的任务不是评价答案是否充分，而是从候选人的回答里继续追深一层，验证真实性、深度和个人贡献。',
+  '只要候选人回答了有效内容，默认 should_follow_up=true，并生成 1 个具体追问。',
+  '优先围绕回答中出现的项目、技术方案、难点、指标结果、个人职责、协作取舍、失败复盘来追问；追问要锚定候选人刚才说过的具体信息。',
+  '只有以下情况才返回 should_follow_up=false：回答为空；明显只是复述题目或读题回声；只说“不知道/没有/不会”且无法继续追；回答完全无法理解。',
+  '不要问泛泛的“能否展开说说”；不要重复原题；不要一次问多个问题；不要输出解释。',
+  '只返回 JSON：{"should_follow_up": boolean, "question": string}。question 控制在 15-45 个中文字符。'
+].join('\n');
+
+const DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG: InterviewFollowUpConfig = {
+  enabled: true,
+  maxPerInterview: 3,
+  maxPerQuestion: 1,
+  modelWaitMs: 700,
+  shortAnswerThreshold: 18,
+  fallbackEnabled: true,
+  model: '',
+  prompt: DEFAULT_INTERVIEW_FOLLOW_UP_PROMPT
+};
+
+function normalizeInterviewFollowUpConfig(raw?: Partial<InterviewFollowUpConfig> | null): InterviewFollowUpConfig {
+  const clamp = (v: unknown, fallback: number, min: number, max: number) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fallback;
+  };
+  return {
+    enabled: raw?.enabled !== undefined ? Boolean(raw.enabled) : DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.enabled,
+    maxPerInterview: clamp(raw?.maxPerInterview, DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.maxPerInterview, 0, 10),
+    maxPerQuestion: clamp(raw?.maxPerQuestion, DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.maxPerQuestion, 0, 1),
+    modelWaitMs: clamp(raw?.modelWaitMs, DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.modelWaitMs, 0, 5000),
+    shortAnswerThreshold: clamp(
+      raw?.shortAnswerThreshold,
+      DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.shortAnswerThreshold,
+      2,
+      80
+    ),
+    fallbackEnabled:
+      raw?.fallbackEnabled !== undefined
+        ? Boolean(raw.fallbackEnabled)
+        : DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.fallbackEnabled,
+    model: String(raw?.model || '').trim(),
+    prompt: String(raw?.prompt || DEFAULT_INTERVIEW_FOLLOW_UP_PROMPT).trim() || DEFAULT_INTERVIEW_FOLLOW_UP_PROMPT
+  };
 }
 export interface Project {
   id: string;
@@ -1055,6 +1114,7 @@ export default function App() {
       case 'sys-user': return <SystemUserView currentRole={currentRole} authProfile={authProfile} />;
       case 'sys-role': return <SystemRoleView />;
       case 'sys-menu': return <SystemMenuView />;
+      case 'sys-ai-interview-settings': return <SystemAiInterviewSettingsView />;
       case 'sys-job-role-bases': return <SystemJobRoleBasesView />;
       default: return <div className="p-8 text-slate-500">模块开发中...</div>;
     }
@@ -2132,7 +2192,8 @@ function ProjectManagementView({
       level: '',
       salary: '',
       recruiters: '',
-      jdText: ''
+      jdText: '',
+      followUpConfig: normalizeInterviewFollowUpConfig()
     });
   };
 
@@ -2174,7 +2235,8 @@ function ProjectManagementView({
       level: normalizeJobLevel(job.level) ?? '',
       salary: job.salary && job.salary !== '面议' ? job.salary : '',
       recruiters: recruitersForForm,
-      jdText: job.jdText || ''
+      jdText: job.jdText || '',
+      followUpConfig: normalizeInterviewFollowUpConfig(job.followUpConfig)
     });
   };
 
@@ -2227,7 +2289,8 @@ function ProjectManagementView({
       skills: projectJobForm.skills.trim() || null,
       level: levelNorm,
       salary: projectJobForm.salary.trim() || null,
-      jdText: projectJobForm.jdText.trim() || null
+      jdText: projectJobForm.jdText.trim() || null,
+      followUpConfig: normalizeInterviewFollowUpConfig(projectJobForm.followUpConfig)
     };
     if (role === 'recruiting_manager' && projectJobForm.mode === 'edit') {
       let prevJob: Job | null = null;
@@ -3657,6 +3720,7 @@ type JobFormState = {
   salary: string;
   recruiters: string;
   jdText: string;
+  followUpConfig: InterviewFollowUpConfig;
 };
 
 function JobEditorModal({
@@ -4155,6 +4219,177 @@ function JobEditorModal({
                   </div>
                 </div>
               ) : null}
+              {false ? (
+              <div className="rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-3 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700">AI 面试追问策略</label>
+                    <p className="mt-0.5 text-[11px] text-slate-500">
+                      按岗位控制候选人小程序中的追问次数、等待时长和提示词。
+                    </p>
+                  </div>
+                  <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={jobForm.followUpConfig.enabled}
+                      disabled={jobForm.submitting}
+                      onChange={(e) =>
+                        setJobForm((f) =>
+                          f
+                            ? {
+                                ...f,
+                                followUpConfig: { ...f.followUpConfig, enabled: e.target.checked }
+                              }
+                            : f
+                        )
+                      }
+                      className="rounded border-slate-300"
+                    />
+                    启用追问
+                  </label>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1">每场最多</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={10}
+                      value={jobForm.followUpConfig.maxPerInterview}
+                      onChange={(e) =>
+                        setJobForm((f) =>
+                          f
+                            ? {
+                                ...f,
+                                followUpConfig: { ...f.followUpConfig, maxPerInterview: Number(e.target.value) }
+                              }
+                            : f
+                        )
+                      }
+                      className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1">每题最多</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={1}
+                      value={jobForm.followUpConfig.maxPerQuestion}
+                      onChange={(e) =>
+                        setJobForm((f) =>
+                          f
+                            ? {
+                                ...f,
+                                followUpConfig: { ...f.followUpConfig, maxPerQuestion: Number(e.target.value) }
+                              }
+                            : f
+                        )
+                      }
+                      className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1">等待模型 ms</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={5000}
+                      step={100}
+                      value={jobForm.followUpConfig.modelWaitMs}
+                      onChange={(e) =>
+                        setJobForm((f) =>
+                          f
+                            ? {
+                                ...f,
+                                followUpConfig: { ...f.followUpConfig, modelWaitMs: Number(e.target.value) }
+                              }
+                            : f
+                        )
+                      }
+                      className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1">短回答阈值</label>
+                    <input
+                      type="number"
+                      min={2}
+                      max={80}
+                      value={jobForm.followUpConfig.shortAnswerThreshold}
+                      onChange={(e) =>
+                        setJobForm((f) =>
+                          f
+                            ? {
+                                ...f,
+                                followUpConfig: { ...f.followUpConfig, shortAnswerThreshold: Number(e.target.value) }
+                              }
+                            : f
+                        )
+                      }
+                      className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-[1fr_2fr] gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1">追问模型</label>
+                    <input
+                      value={jobForm.followUpConfig.model || ''}
+                      onChange={(e) =>
+                        setJobForm((f) =>
+                          f
+                            ? {
+                                ...f,
+                                followUpConfig: { ...f.followUpConfig, model: e.target.value }
+                              }
+                            : f
+                        )
+                      }
+                      className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
+                      placeholder="默认 qwen-turbo"
+                    />
+                  </div>
+                  <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 self-end pb-2">
+                    <input
+                      type="checkbox"
+                      checked={jobForm.followUpConfig.fallbackEnabled}
+                      disabled={jobForm.submitting}
+                      onChange={(e) =>
+                        setJobForm((f) =>
+                          f
+                            ? {
+                                ...f,
+                                followUpConfig: { ...f.followUpConfig, fallbackEnabled: e.target.checked }
+                              }
+                            : f
+                        )
+                      }
+                      className="rounded border-slate-300"
+                    />
+                    模型未就绪时使用内容相关兜底追问
+                  </label>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">追问提示词</label>
+                  <textarea
+                    value={jobForm.followUpConfig.prompt || ''}
+                    onChange={(e) =>
+                      setJobForm((f) =>
+                        f
+                          ? {
+                              ...f,
+                              followUpConfig: { ...f.followUpConfig, prompt: e.target.value }
+                            }
+                          : f
+                      )
+                    }
+                    rows={5}
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm resize-y"
+                  />
+                </div>
+              </div>
+              ) : null}
               <div className="flex flex-col flex-1 min-h-[min(52vh,400px)] gap-2 pt-1 border-t border-slate-100 mt-0.5">
                 <div className="flex flex-wrap items-center justify-between gap-2 shrink-0">
                   <label className="text-xs font-medium text-slate-500">职位描述（JD）</label>
@@ -4503,7 +4738,8 @@ function JobQueryView({
       level: '',
       salary: '',
       recruiters: '',
-      jdText: ''
+      jdText: '',
+      followUpConfig: normalizeInterviewFollowUpConfig()
     });
   };
 
@@ -4558,7 +4794,8 @@ function JobQueryView({
       level: normalizeJobLevel(job.level) ?? '',
       salary: job.salary && job.salary !== '面议' ? job.salary : '',
       recruiters: recruitersForForm,
-      jdText: job.jdText || ''
+      jdText: job.jdText || '',
+      followUpConfig: normalizeInterviewFollowUpConfig(job.followUpConfig)
     });
   };
 
@@ -4630,7 +4867,8 @@ function JobQueryView({
       skills: jobForm.skills.trim() || null,
       level: levelNorm,
       salary: jobForm.salary.trim() || null,
-      jdText: jobForm.jdText.trim() || null
+      jdText: jobForm.jdText.trim() || null,
+      followUpConfig: normalizeInterviewFollowUpConfig(jobForm.followUpConfig)
     };
     try {
       if (jobForm.mode === 'create') {
@@ -6569,7 +6807,7 @@ function ResumeLibraryView({
   const [listPage, setListPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [inviteJobs, setInviteJobs] = useState<
-    { job_code: string; title: string; department: string; project_id?: string | null }[]
+    { job_code: string; title: string; department: string; project_id?: string | null; followUpConfig?: InterviewFollowUpConfig }[]
   >([]);
   const [inviteJobsLoading, setInviteJobsLoading] = useState(false);
   const [screeningProjects, setScreeningProjects] = useState<
@@ -6654,7 +6892,13 @@ function ResumeLibraryView({
     miniappApiFetch('/api/admin/jobs')
       .then(async (r) => {
         const j = (await r.json().catch(() => ({}))) as {
-          data?: { job_code: string; title: string; department: string; project_id?: string | null }[];
+          data?: {
+            job_code: string;
+            title: string;
+            department: string;
+            project_id?: string | null;
+            followUpConfig?: InterviewFollowUpConfig;
+          }[];
           message?: string;
         };
         if (!r.ok) {
@@ -10820,6 +11064,188 @@ function recruitmentDeptOptionsForProjectLeads(depts: Dept[], userDeptName: stri
 }
 
 type JobRoleBaseAdminRow = { id: string; name: string; sort_order: number; enabled: 0 | 1 };
+
+function SystemAiInterviewSettingsView() {
+  const [config, setConfig] = useState<InterviewFollowUpConfig>(() => normalizeInterviewFollowUpConfig({}));
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setErr('');
+    setMsg('');
+    try {
+      const r = await miniappApiFetch('/api/admin/interview-followup-settings');
+      const j = (await r.json().catch(() => ({}))) as { data?: Partial<InterviewFollowUpConfig>; message?: string };
+      if (!r.ok) throw adminJsonFailError(r, j, '加载 AI 面试设置失败');
+      setConfig(normalizeInterviewFollowUpConfig(j.data || {}));
+    } catch (e) {
+      setErr(userFacingApiError(e, '加载 AI 面试设置失败'));
+      setConfig(normalizeInterviewFollowUpConfig({}));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const updateConfig = (patch: Partial<InterviewFollowUpConfig>) => {
+    setConfig((prev) => normalizeInterviewFollowUpConfig({ ...prev, ...patch }));
+    setMsg('');
+    setErr('');
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setMsg('');
+    setErr('');
+    try {
+      const r = await miniappApiFetch('/api/admin/interview-followup-settings', {
+        method: 'PATCH',
+        body: JSON.stringify(config)
+      });
+      const j = (await r.json().catch(() => ({}))) as { data?: Partial<InterviewFollowUpConfig>; message?: string };
+      if (!r.ok) throw adminJsonFailError(r, j, '保存 AI 面试设置失败');
+      setConfig(normalizeInterviewFollowUpConfig(j.data || config));
+      setMsg('已保存，后续新发起的小程序 AI 面试会使用这套默认追问策略。');
+    } catch (e) {
+      setErr(userFacingApiError(e, '保存 AI 面试设置失败'));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const numericFields: Array<{
+    key: keyof Pick<
+      InterviewFollowUpConfig,
+      'maxPerInterview' | 'maxPerQuestion' | 'modelWaitMs' | 'shortAnswerThreshold'
+    >;
+    label: string;
+    min: number;
+    max: number;
+    step: number;
+    hint: string;
+  }> = [
+    { key: 'maxPerInterview', label: '每场最多追问', min: 0, max: 10, step: 1, hint: '控制一场面试里最多插入几次追问。' },
+    { key: 'maxPerQuestion', label: '每题最多追问', min: 0, max: 1, step: 1, hint: '第一版建议保持 1，避免连续追问打断节奏。' },
+    { key: 'modelWaitMs', label: '等待模型 ms', min: 0, max: 5000, step: 100, hint: '超过该时间未返回时直接进入下一题或走兜底。' },
+    { key: 'shortAnswerThreshold', label: '短回答阈值', min: 2, max: 80, step: 1, hint: '低于该字数时更倾向生成补充型追问。' }
+  ];
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">AI面试设置</h1>
+          <p className="mt-2 text-sm text-slate-500">
+            管理员维护小程序 AI 面试的默认追问策略，招聘人员发起面试时无需单独配置。
+          </p>
+        </div>
+        <button type="button" onClick={save} disabled={loading || saving} className={btnPrimarySmFlex}>
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+          保存设置
+        </button>
+      </div>
+
+      {err ? <div className="rounded-lg border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-700">{err}</div> : null}
+      {msg ? <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{msg}</div> : null}
+
+      <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-6 py-4">
+          <div>
+            <h2 className="text-base font-semibold text-slate-900">默认追问策略</h2>
+            <p className="mt-1 text-xs text-slate-500">适用于所有小程序 AI 面试，会话开始后按这套规则判断是否追问。</p>
+          </div>
+          <label className="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
+            <input
+              type="checkbox"
+              checked={config.enabled}
+              disabled={loading || saving}
+              onChange={(e) => updateConfig({ enabled: e.target.checked })}
+              className="rounded border-slate-300"
+            />
+            启用追问
+          </label>
+        </div>
+
+        <div className="space-y-5 px-6 py-5">
+          {loading ? (
+            <div className="flex items-center gap-2 py-12 text-sm text-slate-500">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              正在加载设置…
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+                {numericFields.map((f) => (
+                  <div key={f.key} className="rounded-lg border border-slate-200 bg-slate-50/70 p-4">
+                    <label className="block text-sm font-semibold text-slate-800">{f.label}</label>
+                    <input
+                      type="number"
+                      min={f.min}
+                      max={f.max}
+                      step={f.step}
+                      value={Number(config[f.key]) || 0}
+                      disabled={saving}
+                      onChange={(e) => updateConfig({ [f.key]: Number(e.target.value) })}
+                      className="mt-3 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                    <p className="mt-2 text-xs leading-relaxed text-slate-500">{f.hint}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(220px,320px)_1fr]">
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-800">追问模型</label>
+                    <input
+                      value={config.model || ''}
+                      disabled={saving}
+                      onChange={(e) => updateConfig({ model: e.target.value })}
+                      className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                      placeholder="默认 qwen-turbo"
+                    />
+                  </div>
+                  <label className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm font-medium text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={config.fallbackEnabled}
+                      disabled={saving}
+                      onChange={(e) => updateConfig({ fallbackEnabled: e.target.checked })}
+                      className="mt-0.5 rounded border-slate-300"
+                    />
+                    <span>
+                      模型未就绪时使用兜底追问
+                      <span className="mt-1 block text-xs font-normal leading-relaxed text-slate-500">
+                        兜底会基于候选人回答提取关键词，避免等待过久导致面试卡顿。
+                      </span>
+                    </span>
+                  </label>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-slate-800">追问提示词</label>
+                  <textarea
+                    rows={12}
+                    value={config.prompt || ''}
+                    disabled={saving}
+                    onChange={(e) => updateConfig({ prompt: e.target.value })}
+                    className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm leading-relaxed outline-none resize-y focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function SystemJobRoleBasesView() {
   const refreshGlobal = useRefreshJobRoleBases();
