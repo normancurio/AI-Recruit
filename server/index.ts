@@ -3229,6 +3229,28 @@ async function generateShenpuResumeForScreening(params: {
   }
 }
 
+function resumeScreeningAiResultFromRow(row: Record<string, unknown>): ResumeScreeningAiResult {
+  const evaluationJsonRaw = row.evaluation_json
+  const evaluationJson =
+    evaluationJsonRaw == null
+      ? undefined
+      : typeof evaluationJsonRaw === 'string'
+        ? evaluationJsonRaw
+        : JSON.stringify(evaluationJsonRaw)
+  return {
+    candidateName: String(row.candidate_name || '').trim(),
+    candidatePhone: String(row.candidate_phone || '').trim() || undefined,
+    matchScore: clampResumeScore(Number(row.match_score) || 0),
+    status: String(row.status || '').trim() || '待定',
+    summary: String(row.report_summary || '').trim(),
+    skillScore: clampResumeScore(Number(row.skill_score) || 0),
+    experienceScore: clampResumeScore(Number(row.experience_score) || 0),
+    educationScore: clampResumeScore(Number(row.education_score) || 0),
+    stabilityScore: clampResumeScore(Number(row.stability_score) || 0),
+    ...(evaluationJson ? { evaluationJson } : {})
+  }
+}
+
 function fallbackInterviewScore(profile: { name?: string }, answers: Array<{ answer?: string }>): AiInterviewScore {
   const score = Math.min(
     100,
@@ -6887,6 +6909,69 @@ app.get('/api/admin/resume-screenings/:id/shenpu-resume', async (req, res) => {
   }
 })
 
+app.post('/api/admin/resume-screenings/:id/shenpu-resume', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const idNum = Number(String(req.params.id || '').trim())
+  if (!Number.isFinite(idNum) || idNum <= 0) return res.status(400).json({ message: 'invalid id' })
+  const screeningId = Math.floor(idNum)
+  try {
+    await ensureShenpuResumeTable()
+    const [existingRows] = await mysqlPool.query<RowDataPacket[]>(
+      `SELECT status FROM resume_screening_shenpu_resumes WHERE screening_id=? LIMIT 1`,
+      [screeningId]
+    )
+    const existingStatus = String((existingRows?.[0] as { status?: unknown } | undefined)?.status || '')
+    if (existingStatus === 'generating') {
+      return res.status(202).json({
+        data: { screeningId: String(screeningId), status: 'generating', progress: 10, stage: '准备画像数据' }
+      })
+    }
+    const shenpuJobJoin = resumeScreeningsJobCodeMatchSql('j', 's')
+    const [rows] = await mysqlPool.query<RowDataPacket[]>(
+      `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
+              s.skill_score, s.experience_score, s.education_score, s.stability_score,
+              s.status, s.report_summary, s.evaluation_json, s.resume_plaintext,
+              j.title AS job_title, j.department, j.jd_text
+       FROM resume_screenings s
+       LEFT JOIN jobs j ON ${shenpuJobJoin}
+       WHERE s.id=? LIMIT 1`,
+      [screeningId]
+    )
+    if (!rows.length) return res.status(404).json({ message: '简历筛查记录不存在' })
+    const row = rows[0] as Record<string, unknown>
+    const resumeText = String(row.resume_plaintext || '').trim()
+    if (!resumeText) {
+      return res.status(422).json({ message: '该记录缺少原始简历正文，无法生成申朴标准简历，请重新上传可解析的简历。' })
+    }
+    await mysqlPool.query(
+      `INSERT INTO resume_screening_shenpu_resumes (screening_id, status, progress_percent, progress_stage)
+       VALUES (?, 'generating', 10, '准备画像数据')
+       ON DUPLICATE KEY UPDATE status='generating', progress_percent=10, progress_stage='准备画像数据', error_message=NULL, updated_at=NOW()`,
+      [screeningId]
+    )
+    const result = resumeScreeningAiResultFromRow(row)
+    void generateShenpuResumeForScreening({
+      screeningId,
+      candidateName: result.candidateName || '候选人',
+      candidatePhone: result.candidatePhone,
+      jobTitle: String(row.job_title || row.matched_job_title || row.job_code || ''),
+      department: row.department == null ? null : String(row.department || ''),
+      jdText: String(row.jd_text || ''),
+      resumeText: resumeText.slice(0, RESUME_PLAINTEXT_MAX_SAVE),
+      result
+    })
+    return res.status(202).json({
+      data: { screeningId: String(screeningId), status: 'generating', progress: 10, stage: '准备画像数据' }
+    })
+  } catch (e: unknown) {
+    const ex = e as { code?: string }
+    if (ex.code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({ message: '缺少申朴简历表，请执行 server/migration_resume_screening_shenpu_resumes.sql' })
+    }
+    return res.status(500).json({ message: '申朴简历生成任务启动失败，请稍后重试' })
+  }
+})
+
 /** 工作台：聚合 resume_screenings + interview_reports，不读管理库演示表 */
 app.get('/api/admin/workbench-stats', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
@@ -7686,21 +7771,11 @@ async function processResumeScreenTask(params: {
       })()
       await Promise.all([saveScreeningFileTask, saveScreeningProfileTask])
       patchResumeScreenTask(taskId, {
-        uploadProgress: 92,
-        uploadStage: '原始简历提取完成，开始生成申朴标准简历',
-        shenpuStatus: 'generating',
-        shenpuProgress: 10,
-        shenpuStage: '准备画像数据'
-      })
-      void generateShenpuResumeForScreening({
-        screeningId,
-        candidateName,
-        candidatePhone,
-        jobTitle: String(job.title || ''),
-        department: job.department,
-        jdText: String(job.jd_text || ''),
-        resumeText: plainStore,
-        result
+        uploadProgress: 96,
+        uploadStage: '原始简历提取与筛查已完成',
+        shenpuStatus: 'missing',
+        shenpuProgress: 0,
+        shenpuStage: '未生成，可在列表点击生成'
       })
       flowLog('resume-screen', true, `job=${jobCode} score=${result.matchScore}`)
       patchResumeScreenTask(taskId, {
@@ -7709,7 +7784,10 @@ async function processResumeScreenTask(params: {
         uploadStage: '原始简历提取与筛查已完成',
         screeningId,
         candidateName,
-        message: '原始简历提取完成，申朴标准简历正在后台生成'
+        shenpuStatus: 'missing',
+        shenpuProgress: 0,
+        shenpuStage: '未生成，可在列表点击生成',
+        message: '原始简历提取与筛查已完成，可在列表点击生成申朴标准简历'
       })
     } catch (e: unknown) {
       const code = (e as { code?: string })?.code

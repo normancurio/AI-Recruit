@@ -6,9 +6,9 @@
   "scripts": {
     "build:weapp": "npm run build:weapp --prefix miniapp-candidate",
     "build:weapp:clean": "npm run build:weapp:clean --prefix miniapp-candidate",
-    "dev:api": "tsx server/index.ts",
-    "dev:full": "concurrently -k -n ui,api -c blue,magenta \"npm run dev\" \"npm run dev:api\"",
-    "dev": "tsx server.ts",
+    "dev:api": "tsx watch server/index.ts",
+    "dev:full": "concurrently -k -n ui,api -c blue,magenta \"tsx watch server.ts\" \"tsx watch server/index.ts\"",
+    "dev": "tsx watch server.ts",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",

@@ -38,3 +38,17 @@ input:disabled,
 [aria-disabled="true"] {
   cursor: not-allowed;
 }
+
+button[aria-label^="关闭"]:not(:disabled),
+button[title^="关闭"]:not(:disabled) {
+  cursor: pointer;
+}
+
+button[aria-label^="关闭"] svg,
+button[title^="关闭"] svg {
+  pointer-events: none;
+}
+
+.admin-login-masked-password {
+  -webkit-text-security: disc;
+}

@@ -1393,6 +1393,7 @@ export default function App() {
               </div>
               <form
                 onSubmit={submitHrLogin}
+                autoComplete="off"
                 className="rounded-2xl border border-white/10 bg-white/[0.97] p-7 shadow-2xl shadow-black/25 backdrop-blur-md sm:p-8 space-y-5 ring-1 ring-black/5"
               >
                 <div className="border-b border-slate-100 pb-4">
@@ -1411,7 +1412,7 @@ export default function App() {
                       id="hr-login-username"
                       value={loginUser}
                       onChange={(e) => setLoginUser(e.target.value)}
-                      autoComplete="username"
+                      autoComplete="off"
                       inputMode="text"
                       required
                       className="w-full rounded-xl border border-slate-200 bg-white py-3 pl-10 pr-3 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/20"
@@ -1430,12 +1431,15 @@ export default function App() {
                     />
                     <input
                       id="hr-login-password"
-                      type="password"
+                      type="text"
                       value={loginPass}
                       onChange={(e) => setLoginPass(e.target.value)}
-                      autoComplete="current-password"
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
                       required
-                      className="w-full rounded-xl border border-slate-200 bg-white py-3 pl-10 pr-3 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/20"
+                      className="admin-login-masked-password w-full rounded-xl border border-slate-200 bg-white py-3 pl-10 pr-3 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/20"
                       placeholder="请输入密码"
                     />
                   </div>
@@ -6366,6 +6370,28 @@ const PROFILE_EDUCATION_OPTIONS = ['高中', '大专', '本科', '研究生'] as
 /** 到岗时间（必填）：常用选项，与业务表单一致 */
 const PROFILE_ARRIVAL_TIME_OPTIONS = ['随时', '一周内', '两周内', '一个月内', '三个月内', '面议'] as const;
 
+const GENDER_FILTER_OPTIONS: PickerOption[] = [
+  { value: 'all', label: '所有' },
+  { value: '男', label: '男' },
+  { value: '女', label: '女' }
+];
+
+const EDUCATION_FILTER_OPTIONS: PickerOption[] = [
+  { value: '', label: '所有' },
+  ...PROFILE_EDUCATION_OPTIONS.map((opt) => ({ value: opt, label: opt }))
+];
+
+const TRI_FILTER_OPTIONS: PickerOption[] = [
+  { value: 'all', label: '所有' },
+  { value: '1', label: '是' },
+  { value: '0', label: '否' }
+];
+
+const CHANNEL_FILTER_OPTIONS: PickerOption[] = [
+  { value: '', label: '所有' },
+  ...RECRUITMENT_CHANNEL_OPTIONS.map((opt) => ({ value: opt, label: opt }))
+];
+
 function isStandardRecruitmentChannel(v: string): boolean {
   return (RECRUITMENT_CHANNEL_OPTIONS as readonly string[]).includes(v);
 }
@@ -6848,6 +6874,7 @@ function ResumeProfileEditDialog({
             type="button"
             onClick={handleProfileClose}
             className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+            aria-label="关闭"
           >
             <XCircle className="w-5 h-5" />
           </button>
@@ -7613,31 +7640,25 @@ function ResumeLibraryView({
           </div>
           <div className="min-w-0">
             <label className={libFilterLabel}>性别</label>
-            <select
+            <SearchableSelect
               value={libFilterDraft.gender}
-              onChange={(e) =>
-                setLibFilterDraft((d) => ({ ...d, gender: e.target.value as ResumeLibraryFilters['gender'] }))
+              onChange={(gender) =>
+                setLibFilterDraft((d) => ({ ...d, gender: gender as ResumeLibraryFilters['gender'] }))
               }
-              className={libFilterCtrl}
-            >
-              <option value="all">所有</option>
-              <option value="男">男</option>
-              <option value="女">女</option>
-            </select>
+              placeholder="所有"
+              searchPlaceholder="搜索性别…"
+              options={GENDER_FILTER_OPTIONS}
+            />
           </div>
           <div className="min-w-0">
             <label className={libFilterLabel}>学历</label>
-            <select
+            <SearchableSelect
               value={libFilterDraft.education}
-              onChange={(e) => setLibFilterDraft((d) => ({ ...d, education: e.target.value }))}
-              className={libFilterCtrl}
-            >
-              <option value="">所有</option>
-              <option value="高中">高中</option>
-              <option value="大专">大专</option>
-              <option value="本科">本科</option>
-              <option value="研究生">研究生</option>
-            </select>
+              onChange={(education) => setLibFilterDraft((d) => ({ ...d, education }))}
+              placeholder="所有"
+              searchPlaceholder="搜索学历…"
+              options={EDUCATION_FILTER_OPTIONS}
+            />
           </div>
           <div className="min-w-0">
             <label className={libFilterLabel}>职位</label>
@@ -7682,31 +7703,27 @@ function ResumeLibraryView({
             <div className="mt-2 grid grid-cols-1 gap-x-3 gap-y-2 sm:grid-cols-3 lg:grid-cols-5">
               <div className="min-w-0">
                 <label className={libFilterLabel}>是否有学位</label>
-                <select
+                <SearchableSelect
                   value={libFilterDraft.hasDegree}
-                  onChange={(e) =>
-                    setLibFilterDraft((d) => ({ ...d, hasDegree: e.target.value as ResumeLibraryFilters['hasDegree'] }))
+                  onChange={(hasDegree) =>
+                    setLibFilterDraft((d) => ({ ...d, hasDegree: hasDegree as ResumeLibraryFilters['hasDegree'] }))
                   }
-                  className={libFilterCtrl}
-                >
-                  <option value="all">所有</option>
-                  <option value="1">是</option>
-                  <option value="0">否</option>
-                </select>
+                  placeholder="所有"
+                  searchPlaceholder="搜索…"
+                  options={TRI_FILTER_OPTIONS}
+                />
               </div>
               <div className="min-w-0">
                 <label className={libFilterLabel}>是否统招</label>
-                <select
+                <SearchableSelect
                   value={libFilterDraft.unified}
-                  onChange={(e) =>
-                    setLibFilterDraft((d) => ({ ...d, unified: e.target.value as ResumeLibraryFilters['unified'] }))
+                  onChange={(unified) =>
+                    setLibFilterDraft((d) => ({ ...d, unified: unified as ResumeLibraryFilters['unified'] }))
                   }
-                  className={libFilterCtrl}
-                >
-                  <option value="all">所有</option>
-                  <option value="1">是</option>
-                  <option value="0">否</option>
-                </select>
+                  placeholder="所有"
+                  searchPlaceholder="搜索…"
+                  options={TRI_FILTER_OPTIONS}
+                />
               </div>
               <div className="min-w-0">
                 <label className={libFilterLabel}>期望薪资</label>
@@ -7719,35 +7736,28 @@ function ResumeLibraryView({
               </div>
               <div className="min-w-0">
                 <label className={libFilterLabel}>是否可查</label>
-                <select
+                <SearchableSelect
                   value={libFilterDraft.verifiable}
-                  onChange={(e) =>
+                  onChange={(verifiable) =>
                     setLibFilterDraft((d) => ({
                       ...d,
-                      verifiable: e.target.value as ResumeLibraryFilters['verifiable']
+                      verifiable: verifiable as ResumeLibraryFilters['verifiable']
                     }))
                   }
-                  className={libFilterCtrl}
-                >
-                  <option value="all">所有</option>
-                  <option value="1">是</option>
-                  <option value="0">否</option>
-                </select>
+                  placeholder="所有"
+                  searchPlaceholder="搜索…"
+                  options={TRI_FILTER_OPTIONS}
+                />
               </div>
               <div className="min-w-0 sm:col-span-2 lg:col-span-1">
                 <label className={libFilterLabel}>招聘渠道</label>
-                <select
+                <SearchableSelect
                   value={libFilterDraft.channel}
-                  onChange={(e) => setLibFilterDraft((d) => ({ ...d, channel: e.target.value }))}
-                  className={libFilterCtrl}
-                >
-                  <option value="">所有</option>
-                  {RECRUITMENT_CHANNEL_OPTIONS.map((opt) => (
-                    <option key={opt} value={opt}>
-                      {opt}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(channel) => setLibFilterDraft((d) => ({ ...d, channel }))}
+                  placeholder="所有"
+                  searchPlaceholder="搜索渠道…"
+                  options={CHANNEL_FILTER_OPTIONS}
+                />
               </div>
             </div>
           ) : null}
@@ -8134,6 +8144,8 @@ function ResumeScreeningView({
   const [selectedJobCode, setSelectedJobCode] = useState('');
   const [uploading, setUploading] = useState(false);
   const [uploadHint, setUploadHint] = useState('');
+  const [uploadProjectFilter, setUploadProjectFilter] = useState('');
+  const [uploadJobCode, setUploadJobCode] = useState('');
   const [uploadTask, setUploadTask] = useState<ResumeUploadTask | null>(null);
   const [uploadTaskJobLabel, setUploadTaskJobLabel] = useState('');
   const [uploadTaskProjectLabel, setUploadTaskProjectLabel] = useState('');
@@ -8167,15 +8179,12 @@ function ResumeScreeningView({
   const [screeningAdminMsg, setScreeningAdminMsg] = useState<null | { title: string; message: string }>(null);
   const [bulkDeleteIds, setBulkDeleteIds] = useState<string[] | null>(null);
 
-  const uploadingRef = useRef(false);
-  uploadingRef.current = uploading;
+  const closeUploadModal = useCallback(() => {
+    setUploadModalOpen(false);
+    setUploadHint('');
+  }, []);
   useAdminOverlayLockAndEscape(Boolean(inviteModal), () => setInviteModal(null));
-  useAdminOverlayLockAndEscape(uploadModalOpen, () => {
-    if (!uploadingRef.current) {
-      setUploadModalOpen(false);
-      setUploadHint('');
-    }
-  });
+  useAdminOverlayLockAndEscape(uploadModalOpen, closeUploadModal);
   useAdminOverlayLockAndEscape(Boolean(reportResume), () => setReportResume(null));
 
   const screenAdvancedFilterCount = useMemo(() => {
@@ -8231,8 +8240,17 @@ function ResumeScreeningView({
     });
   }, [projectFilterOptions]);
 
-  /** 上传区「目标匹配岗位」下拉：随项目筛选展示该项目下岗位，首项为「全部岗位」（仅筛列表；上传须选具体岗位） */
-  const jobsForUploadSelect = useMemo(() => {
+  useEffect(() => {
+    setUploadProjectFilter((prev) => {
+      if (prev === '_null') return '';
+      if (!prev) return prev;
+      if (projectFilterOptions.some((p) => p.id === prev)) return prev;
+      return '';
+    });
+  }, [projectFilterOptions]);
+
+  /** 列表筛选岗位：随列表项目筛选展示岗位；上传弹框使用独立状态，避免互相改筛选条件 */
+  const jobsForScreeningFilter = useMemo(() => {
     const pid = resumeProjectFilter.trim();
     if (!pid) return inviteJobs;
     if (pid === '_null') {
@@ -8240,6 +8258,15 @@ function ResumeScreeningView({
     }
     return inviteJobs.filter((j) => String(j.project_id ?? '').trim() === pid);
   }, [inviteJobs, resumeProjectFilter]);
+
+  const jobsForResumeUpload = useMemo(() => {
+    const pid = uploadProjectFilter.trim();
+    if (!pid) return inviteJobs;
+    if (pid === '_null') {
+      return inviteJobs.filter((j) => !String(j.project_id ?? '').trim());
+    }
+    return inviteJobs.filter((j) => String(j.project_id ?? '').trim() === pid);
+  }, [inviteJobs, uploadProjectFilter]);
 
   const loadScreenings = useCallback(() => {
     if (!apiBase || !hasToken) {
@@ -8335,6 +8362,43 @@ function ResumeScreeningView({
     isRecruitingManager
   ]);
 
+  const generateShenpuResume = useCallback(
+    async (resume: Resume) => {
+      if (!apiBase || !hasToken || resume.uploadTaskStatus) return;
+      setFileBusyId(resume.id);
+      setResumes((prev) =>
+        prev.map((r) =>
+          String(r.id) === String(resume.id)
+            ? {
+                ...r,
+                shenpuResumeStatus: 'generating',
+                shenpuResumeProgress: Math.max(10, r.shenpuResumeProgress || 0),
+                shenpuResumeStage: '准备画像数据'
+              }
+            : r
+        )
+      );
+      try {
+        const r = await miniappApiFetch(
+          `/api/admin/resume-screenings/${encodeURIComponent(resume.id)}/shenpu-resume`,
+          { method: 'POST' }
+        );
+        const j = (await r.json().catch(() => ({}))) as { message?: string };
+        if (!r.ok) throw adminJsonFailError(r, j, '申朴简历生成任务启动失败');
+        loadScreenings();
+      } catch (e) {
+        setScreeningAdminMsg({
+          title: '无法生成申朴简历',
+          message: userFacingApiError(e, '申朴简历生成任务启动失败')
+        });
+        loadScreenings();
+      } finally {
+        setFileBusyId(null);
+      }
+    },
+    [apiBase, hasToken, loadScreenings]
+  );
+
   useEffect(() => {
     loadScreenings();
   }, [loadScreenings]);
@@ -8348,11 +8412,7 @@ function ResumeScreeningView({
   useEffect(() => {
     if (!apiBase || !hasToken || !uploadTask?.taskId) return;
     if (uploadTask.status === 'failed') return;
-    const shouldPoll =
-      uploadTask.status !== 'done' ||
-      uploadTask.shenpuStatus === 'generating' ||
-      uploadTask.shenpuStatus === 'missing';
-    if (!shouldPoll) return;
+    if (uploadTask.status === 'done') return;
     let stopped = false;
     const poll = () => {
       void miniappApiFetch(`/api/admin/resume-screen/tasks/${encodeURIComponent(uploadTask.taskId)}`)
@@ -8378,7 +8438,7 @@ function ResumeScreeningView({
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [apiBase, hasToken, loadScreenings, uploadTask?.taskId, uploadTask?.status, uploadTask?.shenpuStatus]);
+  }, [apiBase, hasToken, loadScreenings, uploadTask?.taskId, uploadTask?.status]);
 
   useEffect(() => {
     if (!apiBase || !hasToken) {
@@ -8740,17 +8800,24 @@ function ResumeScreeningView({
   }, [apiBase, hasToken, sessRev]);
 
   useEffect(() => {
-    if (jobsForUploadSelect.length === 0) {
+    if (jobsForScreeningFilter.length === 0) {
       setSelectedJobCode('');
       return;
     }
     setSelectedJobCode((prev) => {
-      if (prev && jobsForUploadSelect.some((j) => j.job_code === prev)) return prev;
+      if (prev && jobsForScreeningFilter.some((j) => j.job_code === prev)) return prev;
       // 空字符串表示「全部岗位」，用于列表筛选；有可选岗位时保留该选择，不再强制选中第一项
       if (!prev) return '';
-      return jobsForUploadSelect[0].job_code;
+      return jobsForScreeningFilter[0].job_code;
     });
-  }, [jobsForUploadSelect]);
+  }, [jobsForScreeningFilter]);
+
+  useEffect(() => {
+    setUploadJobCode((prev) => {
+      if (prev && jobsForResumeUpload.some((j) => j.job_code === prev)) return prev;
+      return '';
+    });
+  }, [jobsForResumeUpload]);
 
   const handleMiniappInvite = async (jobCode: string, screeningId?: string, promptTemplateId?: string) => {
     setInviteModal(null);
@@ -8852,24 +8919,24 @@ function ResumeScreeningView({
 
   const runUpload = (file: File | null) => {
     if (!file || !apiBase || !hasToken) return;
-    if (!selectedJobCode) {
+    if (!uploadJobCode) {
       setUploadHint(
-        jobsForUploadSelect.length === 0 && resumeProjectFilter.trim()
+        jobsForResumeUpload.length === 0 && uploadProjectFilter.trim()
           ? '当前项目下没有可选岗位，请更换项目或为岗位绑定项目后再试。'
-          : '上传需绑定具体岗位。请先在「目标匹配岗位」中选择某一岗位（当前为「全部岗位」时无法上传）。'
+          : '上传需绑定具体岗位。请先在「目标岗位」中选择某一岗位。'
       );
       return;
     }
-    const selectedJob = jobsForUploadSelect.find((j) => j.job_code === selectedJobCode);
-    const selectedProject = projectFilterOptions.find((p) => p.id === resumeProjectFilter.trim());
+    const selectedJob = jobsForResumeUpload.find((j) => j.job_code === uploadJobCode);
+    const selectedProject = projectFilterOptions.find((p) => p.id === uploadProjectFilter.trim());
     setUploadHint('');
     setUploadTask(null);
-    setUploadTaskJobLabel(selectedJob ? `${selectedJob.title} (${selectedJob.job_code})` : selectedJobCode);
+    setUploadTaskJobLabel(selectedJob ? `${selectedJob.title} (${selectedJob.job_code})` : uploadJobCode);
     setUploadTaskProjectLabel(selectedProject?.name || '');
     setUploading(true);
     const fd = new FormData();
     fd.append('file', file);
-    fd.append('jobCode', selectedJobCode);
+    fd.append('jobCode', uploadJobCode);
     void miniappApiFetch('/api/admin/resume-screen', { method: 'POST', body: fd })
       .then(async (r) => {
         const j = (await r.json()) as { data?: ResumeUploadTask; message?: string }
@@ -8888,9 +8955,9 @@ function ResumeScreeningView({
   const uploadTaskActive =
     Boolean(uploadTask) &&
     uploadTask?.status !== 'failed' &&
-    (uploadTask?.status !== 'done' || uploadTask?.shenpuStatus === 'generating' || uploadTask?.shenpuStatus === 'missing');
+    uploadTask?.status !== 'done';
   const uploadTaskFailed = uploadTask?.status === 'failed';
-  const uploadTaskAllDone = uploadTask?.status === 'done' && uploadTask.shenpuStatus === 'ready';
+  const uploadTaskAllDone = uploadTask?.status === 'done';
   const displayResumes = useMemo(() => {
     if (!uploadTask) return resumes;
     const decorated = resumes.map((r) =>
@@ -8900,22 +8967,14 @@ function ResumeScreeningView({
             uploadTaskStatus: uploadTask.status === 'done' ? undefined : uploadTask.status,
             uploadTaskProgress: uploadTask.uploadProgress,
             uploadTaskStage: uploadTask.error || uploadTask.uploadStage,
-            uploadTaskFileName: uploadTask.fileName,
-            shenpuResumeStatus:
-              uploadTask.shenpuStatus === 'ready' ||
-              uploadTask.shenpuStatus === 'failed' ||
-              uploadTask.shenpuStatus === 'generating'
-                ? uploadTask.shenpuStatus
-                : r.shenpuResumeStatus,
-            shenpuResumeProgress: Math.max(r.shenpuResumeProgress || 0, uploadTask.shenpuProgress || 0),
-            shenpuResumeStage: uploadTask.shenpuStage || r.shenpuResumeStage
+            uploadTaskFileName: uploadTask.fileName
           } as Resume
         : r
     );
     const hasRealRow = Boolean(uploadTask.screeningId && decorated.some((r) => String(r.id) === String(uploadTask.screeningId)));
     const stillVisible =
       (!uploadTask.screeningId || !hasRealRow) &&
-      (uploadTask.status !== 'done' || uploadTask.shenpuStatus === 'generating' || uploadTask.shenpuStatus === 'missing');
+      uploadTask.status !== 'done';
     if (!stillVisible) return decorated;
     const placeholder: Resume = {
       id: `upload-task:${uploadTask.taskId}`,
@@ -8932,9 +8991,9 @@ function ResumeScreeningView({
       uploadTimeFull: uploadTask.fileName || '简历上传中',
       fileName: uploadTask.fileName,
       hasOriginalFile: false,
-      shenpuResumeStatus: uploadTask.shenpuStatus === 'generating' ? 'generating' : 'missing',
-      shenpuResumeProgress: uploadTask.shenpuProgress || 0,
-      shenpuResumeStage: uploadTask.shenpuStage || '等待原始简历提取完成',
+      shenpuResumeStatus: 'missing',
+      shenpuResumeProgress: 0,
+      shenpuResumeStage: '未生成，可在列表点击生成',
       uploadTaskStatus: uploadTask.status,
       uploadTaskProgress: uploadTask.uploadProgress,
       uploadTaskStage: uploadTask.error || uploadTask.uploadStage,
@@ -9052,21 +9111,21 @@ function ResumeScreeningView({
                   value={selectedJobCode}
                   onChange={setSelectedJobCode}
                   disabled={
-                    !jobsForUploadSelect.length || inviteJobsLoading || recruiterScopeLoading || !inviteJobs.length
+                    !jobsForScreeningFilter.length || inviteJobsLoading || recruiterScopeLoading || !inviteJobs.length
                   }
                   placeholder={
                     !inviteJobs.length
                       ? '暂无岗位'
-                      : jobsForUploadSelect.length === 0
+                      : jobsForScreeningFilter.length === 0
                         ? '当前项目无岗位'
                         : '全部'
                   }
                   searchPlaceholder="搜索岗位…"
                   options={
-                    jobsForUploadSelect.length
+                    jobsForScreeningFilter.length
                       ? [
                           { value: '', label: '全部' },
-                          ...jobsForUploadSelect.map((j) => ({
+                          ...jobsForScreeningFilter.map((j) => ({
                             value: j.job_code,
                             label: `${j.title} (${j.job_code})`
                           }))
@@ -9087,47 +9146,38 @@ function ResumeScreeningView({
               {isRecruitingManager ? (
                 <div className="min-w-0">
                   <label className={screeningFilterLabel}>上传人</label>
-                  <select
+                  <SearchableSelect
                     value={sfUploader}
-                    onChange={(e) => setSfUploader(e.target.value)}
+                    onChange={setSfUploader}
                     disabled={!screeningUploaderOptions.length}
-                    className={screeningFilterCtrl}
-                    title="仅本招聘部门（含下级部门）内账号"
-                  >
-                    <option value="">全部</option>
-                    {screeningUploaderOptions.map((o) => (
-                      <option key={o.username} value={o.username}>
-                        {o.label}
-                      </option>
-                    ))}
-                  </select>
+                    placeholder="全部"
+                    searchPlaceholder="搜索上传人…"
+                    options={[
+                      { value: '', label: '全部' },
+                      ...screeningUploaderOptions.map((o) => ({ value: o.username, label: o.label }))
+                    ]}
+                  />
                 </div>
               ) : null}
               <div className="min-w-0">
                 <label className={screeningFilterLabel}>性别</label>
-                <select
+                <SearchableSelect
                   value={sfGender}
-                  onChange={(e) => setSfGender(e.target.value as 'all' | '男' | '女')}
-                  className={screeningFilterCtrl}
-                >
-                  <option value="all">所有</option>
-                  <option value="男">男</option>
-                  <option value="女">女</option>
-                </select>
+                  onChange={(gender) => setSfGender(gender as 'all' | '男' | '女')}
+                  placeholder="所有"
+                  searchPlaceholder="搜索性别…"
+                  options={GENDER_FILTER_OPTIONS}
+                />
               </div>
               <div className="min-w-0">
                 <label className={screeningFilterLabel}>学历</label>
-                <select
+                <SearchableSelect
                   value={sfEdu}
-                  onChange={(e) => setSfEdu(e.target.value)}
-                  className={screeningFilterCtrl}
-                >
-                  <option value="">所有</option>
-                  <option value="高中">高中</option>
-                  <option value="大专">大专</option>
-                  <option value="本科">本科</option>
-                  <option value="研究生">研究生</option>
-                </select>
+                  onChange={setSfEdu}
+                  placeholder="所有"
+                  searchPlaceholder="搜索学历…"
+                  options={EDUCATION_FILTER_OPTIONS}
+                />
               </div>
               <div className="min-w-0 sm:col-span-2 lg:col-span-1">
                 <label className={screeningFilterLabel}>关键词</label>
@@ -9162,54 +9212,43 @@ function ResumeScreeningView({
                 <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-3 lg:grid-cols-5">
                   <div className="min-w-0">
                     <label className={screeningFilterLabel}>是否有学位</label>
-                    <select
+                    <SearchableSelect
                       value={sfHasDegree}
-                      onChange={(e) => setSfHasDegree(e.target.value as 'all' | '1' | '0')}
-                      className={screeningFilterCtrl}
-                    >
-                      <option value="all">所有</option>
-                      <option value="1">是</option>
-                      <option value="0">否</option>
-                    </select>
+                      onChange={(hasDegree) => setSfHasDegree(hasDegree as 'all' | '1' | '0')}
+                      placeholder="所有"
+                      searchPlaceholder="搜索…"
+                      options={TRI_FILTER_OPTIONS}
+                    />
                   </div>
                   <div className="min-w-0">
                     <label className={screeningFilterLabel}>是否统招</label>
-                    <select
+                    <SearchableSelect
                       value={sfUnified}
-                      onChange={(e) => setSfUnified(e.target.value as 'all' | '1' | '0')}
-                      className={screeningFilterCtrl}
-                    >
-                      <option value="all">所有</option>
-                      <option value="1">是</option>
-                      <option value="0">否</option>
-                    </select>
+                      onChange={(unified) => setSfUnified(unified as 'all' | '1' | '0')}
+                      placeholder="所有"
+                      searchPlaceholder="搜索…"
+                      options={TRI_FILTER_OPTIONS}
+                    />
                   </div>
                   <div className="min-w-0">
                     <label className={screeningFilterLabel}>是否可查</label>
-                    <select
+                    <SearchableSelect
                       value={sfVerifiable}
-                      onChange={(e) => setSfVerifiable(e.target.value as 'all' | '1' | '0')}
-                      className={screeningFilterCtrl}
-                    >
-                      <option value="all">所有</option>
-                      <option value="1">是</option>
-                      <option value="0">否</option>
-                    </select>
+                      onChange={(verifiable) => setSfVerifiable(verifiable as 'all' | '1' | '0')}
+                      placeholder="所有"
+                      searchPlaceholder="搜索…"
+                      options={TRI_FILTER_OPTIONS}
+                    />
                   </div>
                   <div className="min-w-0">
                     <label className={screeningFilterLabel}>招聘渠道</label>
-                    <select
+                    <SearchableSelect
                       value={sfChannel}
-                      onChange={(e) => setSfChannel(e.target.value)}
-                      className={screeningFilterCtrl}
-                    >
-                      <option value="">所有</option>
-                      {RECRUITMENT_CHANNEL_OPTIONS.map((opt) => (
-                        <option key={opt} value={opt}>
-                          {opt}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={setSfChannel}
+                      placeholder="所有"
+                      searchPlaceholder="搜索渠道…"
+                      options={CHANNEL_FILTER_OPTIONS}
+                    />
                   </div>
                   <div className="min-w-0 sm:col-span-2 lg:col-span-1">
                     <label className={screeningFilterLabel}>期望薪资</label>
@@ -9228,6 +9267,8 @@ function ResumeScreeningView({
             <button
               type="button"
               onClick={() => {
+                setUploadProjectFilter('');
+                setUploadJobCode('');
                 setUploadModalOpen(true);
                 setUploadHint('');
                 setUploadTask(null);
@@ -9475,32 +9516,13 @@ function ResumeScreeningView({
                                 </span>
                               </td>
                               <td className="px-2 py-3 text-xs">
-                                {uploadTaskRowFailed ? (
+                                {resume.uploadTaskStatus ? (
                                   <span
-                                    className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 font-semibold text-rose-700"
-                                    title={resume.uploadTaskStage || '简历处理失败'}
+                                    className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 font-medium text-slate-500"
+                                    title="原始简历处理完成后可生成申朴简历"
                                   >
-                                    处理失败
+                                    未生成
                                   </span>
-                                ) : isResumeUploading && resume.uploadTaskStatus !== 'done' ? (
-                                  <div
-                                    className="min-w-[7.25rem] rounded-lg border border-indigo-200 bg-indigo-50 px-2 py-1.5 text-indigo-800"
-                                    title={resume.uploadTaskStage || '原始简历上传提取中'}
-                                  >
-                                    <div className="flex items-center justify-between gap-1.5 font-semibold">
-                                      <span className="inline-flex items-center gap-1">
-                                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                                        提取中
-                                      </span>
-                                      <span className="tabular-nums">{uploadPct}%</span>
-                                    </div>
-                                    <div className="mt-1 h-1 overflow-hidden rounded-full bg-indigo-100">
-                                      <span
-                                        className="block h-full rounded-full bg-indigo-500 transition-all"
-                                        style={{ width: `${uploadPct}%` }}
-                                      />
-                                    </div>
-                                  </div>
                                 ) : resume.shenpuResumeStatus === 'ready' ? (
                                   <button
                                     type="button"
@@ -9532,16 +9554,27 @@ function ResumeScreeningView({
                                     </div>
                                   </div>
                                 ) : resume.shenpuResumeStatus === 'failed' ? (
-                                  <span
-                                    className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 font-semibold text-rose-700"
-                                    title="申朴简历生成失败"
+                                  <button
+                                    type="button"
+                                    disabled={fileBusyId === resume.id}
+                                    onClick={() => void generateShenpuResume(resume)}
+                                    className="inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 font-semibold text-rose-700 shadow-sm transition hover:border-rose-300 hover:bg-rose-100 disabled:opacity-60"
+                                    title={resume.shenpuResumeStage || '申朴简历生成失败，点击重新生成'}
                                   >
-                                    生成失败
-                                  </span>
+                                    <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+                                    重新生成
+                                  </button>
                                 ) : (
-                                  <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 font-medium text-slate-500">
-                                    未生成
-                                  </span>
+                                  <button
+                                    type="button"
+                                    disabled={fileBusyId === resume.id}
+                                    onClick={() => void generateShenpuResume(resume)}
+                                    className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 font-semibold text-emerald-700 shadow-sm transition hover:border-emerald-300 hover:bg-emerald-100 disabled:opacity-60"
+                                    title="点击异步生成申朴标准简历"
+                                  >
+                                    <Sparkles className="h-3.5 w-3.5" aria-hidden />
+                                    生成
+                                  </button>
                                 )}
                               </td>
                               <td
@@ -9672,12 +9705,7 @@ function ResumeScreeningView({
             role="dialog"
             aria-modal="true"
             aria-labelledby="resume-upload-modal-title"
-            onClick={() => {
-              if (!uploading) {
-                setUploadModalOpen(false);
-                setUploadHint('');
-              }
-            }}
+            onPointerDown={closeUploadModal}
           >
             <motion.div
               initial={{ opacity: 0, scale: 0.96, y: 8 }}
@@ -9685,6 +9713,7 @@ function ResumeScreeningView({
               exit={{ opacity: 0, scale: 0.96, y: 8 }}
               transition={{ duration: 0.2 }}
               className="flex max-h-[90vh] min-h-[min(560px,85vh)] w-full max-w-xl flex-col overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl"
+              onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-4">
@@ -9696,14 +9725,9 @@ function ResumeScreeningView({
                 </div>
                 <button
                   type="button"
-                  onClick={() => {
-                    if (uploading) return;
-                    setUploadModalOpen(false);
-                    setUploadHint('');
-                  }}
+                  onClick={closeUploadModal}
                   className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
                   aria-label="关闭"
-                  disabled={uploading}
                 >
                   <XCircle className="h-5 w-5" />
                 </button>
@@ -9713,8 +9737,11 @@ function ResumeScreeningView({
                   <div>
                     <label className="mb-0.5 block text-xs font-medium text-slate-600">项目</label>
                     <SearchableSelect
-                      value={resumeProjectFilter}
-                      onChange={setResumeProjectFilter}
+                      value={uploadProjectFilter}
+                      onChange={(value) => {
+                        setUploadProjectFilter(value);
+                        setUploadJobCode('');
+                      }}
                       disabled={
                         !apiBase ||
                         !hasToken ||
@@ -9752,22 +9779,22 @@ function ResumeScreeningView({
                   <div>
                     <label className="mb-0.5 block text-xs font-medium text-slate-600">目标岗位</label>
                     <SearchableSelect
-                      value={selectedJobCode}
-                      onChange={setSelectedJobCode}
+                      value={uploadJobCode}
+                      onChange={setUploadJobCode}
                       disabled={
-                        !jobsForUploadSelect.length || inviteJobsLoading || recruiterScopeLoading || !inviteJobs.length
+                        !jobsForResumeUpload.length || inviteJobsLoading || recruiterScopeLoading || !inviteJobs.length
                       }
                       placeholder={
                         !inviteJobs.length
                           ? '暂无岗位'
-                          : jobsForUploadSelect.length === 0
+                          : jobsForResumeUpload.length === 0
                             ? '当前项目无岗位'
                             : '请选择具体岗位'
                       }
                       searchPlaceholder="搜索岗位…"
                       options={
-                        jobsForUploadSelect.length
-                          ? jobsForUploadSelect.map((j) => ({
+                        jobsForResumeUpload.length
+                          ? jobsForResumeUpload.map((j) => ({
                               value: j.job_code,
                               label: `${j.title} (${j.job_code})`
                             }))
@@ -9821,28 +9848,11 @@ function ResumeScreeningView({
                           />
                         </div>
                       </div>
-                      <div>
-                        <div className="mb-1 flex items-center justify-between gap-2 text-xs">
-                          <span className="truncate text-slate-600" title={uploadTask.shenpuStage || ''}>
-                            申朴标准简历：{uploadTask.shenpuStage || '等待原始简历提取完成'}
-                          </span>
-                          <span className="shrink-0 tabular-nums text-slate-500">
-                            {Math.max(0, Math.min(100, Math.round(uploadTask.shenpuProgress || 0)))}%
-                          </span>
+                      {uploadTask.status === 'done' ? (
+                        <div className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-600">
+                          申朴标准简历不会自动生成，可在列表「申朴简历」列点击生成。
                         </div>
-                        <div className="h-2 overflow-hidden rounded-full bg-white">
-                          <div
-                            className={`h-full rounded-full transition-all ${
-                              uploadTask.shenpuStatus === 'failed'
-                                ? 'bg-amber-500'
-                                : uploadTask.shenpuStatus === 'ready'
-                                  ? 'bg-emerald-500'
-                                  : 'bg-sky-500'
-                            }`}
-                            style={{ width: `${Math.max(0, Math.min(100, Math.round(uploadTask.shenpuProgress || 0)))}%` }}
-                          />
-                        </div>
-                      </div>
+                      ) : null}
                     </div>
                     {uploadTask.message ? <div className="text-xs text-slate-500">{uploadTask.message}</div> : null}
                   </div>

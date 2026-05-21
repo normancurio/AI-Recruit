@@ -1,4 +1,5 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Check, ChevronDown, Search } from 'lucide-react'
 
 export type PickerOption = {
@@ -27,16 +28,37 @@ function filterOptions<T extends PickerOption>(options: T[], query: string) {
   )
 }
 
-function useDropdownClose(open: boolean, onClose: () => void) {
+type DropdownPanelRect = {
+  top: number
+  left: number
+  width: number
+  maxHeight: number
+}
+
+function useDropdownClose(
+  open: boolean,
+  onClose: () => void,
+  panelRef?: React.RefObject<HTMLDivElement | null>
+) {
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!open) return
     const onMouseDown = (event: MouseEvent) => {
-      if (!ref.current?.contains(event.target as Node)) onClose()
+      const target = event.target as Node
+      if (ref.current?.contains(target)) return
+      if (panelRef?.current?.contains(target)) return
+      onClose()
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
     }
     document.addEventListener('mousedown', onMouseDown)
-    return () => document.removeEventListener('mousedown', onMouseDown)
-  }, [open, onClose])
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open, onClose, panelRef])
   return ref
 }
 
@@ -47,7 +69,7 @@ export function SearchableSelect({
   placeholder = '请选择',
   searchPlaceholder = '搜索…',
   disabled = false,
-  pageSize: _pageSize,
+  pageSize = 80,
   invalidValueLabel,
   filterer = filterOptions
 }: {
@@ -61,80 +83,193 @@ export function SearchableSelect({
   invalidValueLabel?: string
   filterer?: (options: PickerOption[], query: string) => PickerOption[]
 }) {
-  void _pageSize
+  const batchSize = Math.max(20, Math.round(pageSize || 80))
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
-  const ref = useDropdownClose(open, () => setOpen(false))
+  const deferredQuery = useDeferredValue(query)
+  const [visibleCount, setVisibleCount] = useState(batchSize)
+  const [panelRect, setPanelRect] = useState<DropdownPanelRect | null>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const closeDropdown = useCallback(() => {
+    setOpen(false)
+    setQuery('')
+  }, [])
+  const ref = useDropdownClose(open, closeDropdown, panelRef)
   const listRef = useRef<HTMLDivElement>(null)
   const selected = options.find((o) => o.value === value)
-  const filtered = useMemo(() => filterer(options, query), [filterer, options, query])
+  const filtered = useMemo(() => filterer(options, deferredQuery), [filterer, options, deferredQuery])
+  const selectedIndex = useMemo(() => filtered.findIndex((o) => o.value === value), [filtered, value])
+  const requiredVisibleCount =
+    !deferredQuery && selectedIndex >= 0 ? Math.min(filtered.length, selectedIndex + batchSize) : batchSize
+  const effectiveVisibleCount = Math.min(filtered.length, Math.max(visibleCount, requiredVisibleCount))
+  const visibleOptions = useMemo(
+    () => filtered.slice(0, effectiveVisibleCount),
+    [filtered, effectiveVisibleCount]
+  )
+
+  const updatePanelRect = useCallback(() => {
+    if (typeof window === 'undefined') return
+    const el = ref.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const gap = 8
+    const minHeight = 180
+    const preferredHeight = 360
+    const below = window.innerHeight - rect.bottom - gap - 12
+    const above = rect.top - gap - 12
+    const openUp = below < minHeight && above > below
+    const maxHeight = Math.max(minHeight, Math.min(preferredHeight, openUp ? above : below))
+    const next = {
+      top: openUp ? Math.max(12, rect.top - gap - maxHeight) : rect.bottom + gap,
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - rect.width - 8)),
+      width: rect.width,
+      maxHeight
+    }
+    setPanelRect((prev) => {
+      if (
+        prev &&
+        Math.abs(prev.top - next.top) < 0.5 &&
+        Math.abs(prev.left - next.left) < 0.5 &&
+        Math.abs(prev.width - next.width) < 0.5 &&
+        Math.abs(prev.maxHeight - next.maxHeight) < 0.5
+      ) {
+        return prev
+      }
+      return next
+    })
+  }, [ref])
 
   useLayoutEffect(() => {
-    if (!open || query || !value) return
+    if (!open) {
+      setPanelRect(null)
+      return
+    }
+    updatePanelRect()
+  }, [open, updatePanelRect])
+
+  useEffect(() => {
+    if (!open) return
+    let raf = 0
+    const onLayout = () => {
+      window.cancelAnimationFrame(raf)
+      raf = window.requestAnimationFrame(updatePanelRect)
+    }
+    window.addEventListener('resize', onLayout)
+    window.addEventListener('scroll', onLayout, true)
+    return () => {
+      window.cancelAnimationFrame(raf)
+      window.removeEventListener('resize', onLayout)
+      window.removeEventListener('scroll', onLayout, true)
+    }
+  }, [open, updatePanelRect])
+
+  useEffect(() => {
+    if (!open) return
+    setVisibleCount(batchSize)
+  }, [open, deferredQuery, batchSize])
+
+  useLayoutEffect(() => {
+    if (!open || deferredQuery || !value) return
     const list = listRef.current
     const target = list?.querySelector<HTMLElement>(`[data-picker-value="${CSS.escape(value)}"]`)
     if (!list || !target) return
     list.scrollTop = Math.max(0, target.offsetTop - list.clientHeight / 2 + target.offsetHeight / 2)
-  }, [open, query, value, filtered])
+  }, [open, deferredQuery, value, visibleOptions])
+
+  const panel =
+    open && panelRect && typeof document !== 'undefined'
+      ? createPortal(
+          <div
+            ref={panelRef}
+            className="fixed z-[300] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl"
+            style={{
+              top: panelRect.top,
+              left: panelRect.left,
+              width: panelRect.width,
+              maxHeight: panelRect.maxHeight
+            }}
+          >
+            <div className="border-b border-slate-100 p-2">
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  autoFocus
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder={searchPlaceholder}
+                  className="w-full rounded-lg border border-slate-200 py-2 pl-8 pr-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+            </div>
+            <div
+              ref={listRef}
+              className="overflow-y-auto p-1"
+              style={{ maxHeight: Math.max(96, panelRect.maxHeight - 96) }}
+            >
+              {visibleOptions.length ? (
+                visibleOptions.map((o) => (
+                  <button
+                    key={o.value}
+                    data-picker-value={o.value}
+                    type="button"
+                    disabled={o.disabled}
+                    onClick={() => {
+                      onChange(o.value)
+                      closeDropdown()
+                    }}
+                    className="flex w-full items-start justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm hover:bg-slate-50 disabled:pointer-events-none disabled:opacity-50"
+                  >
+                    <span>
+                      <span className="block text-slate-800">{o.label}</span>
+                      {o.description ? <span className="mt-0.5 block text-xs text-slate-400">{o.description}</span> : null}
+                    </span>
+                    {o.value === value ? <Check className="mt-0.5 h-4 w-4 shrink-0 text-indigo-600" /> : null}
+                  </button>
+                ))
+              ) : (
+                <div className="px-3 py-8 text-center text-sm text-slate-400">无匹配结果</div>
+              )}
+            </div>
+            <div className="border-t border-slate-100 px-3 py-2 text-xs text-slate-500">
+              {effectiveVisibleCount < filtered.length ? (
+                <button
+                  type="button"
+                  onClick={() => setVisibleCount((n) => Math.min(filtered.length, n + batchSize))}
+                  className="mr-2 rounded-md px-2 py-1 font-medium text-indigo-600 hover:bg-indigo-50"
+                >
+                  加载更多
+                </button>
+              ) : null}
+              已显示 {effectiveVisibleCount} / 共 {filtered.length} 项
+            </div>
+          </div>,
+          document.body
+        )
+      : null
 
   return (
     <div ref={ref} className="relative">
       <button
         type="button"
         disabled={disabled}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          if (disabled) return
+          setOpen((v) => {
+            const next = !v
+            if (!next) setQuery('')
+            return next
+          })
+        }}
         className="flex w-full min-w-0 items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left text-sm text-slate-800 outline-none transition hover:border-slate-300 focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-50 disabled:text-slate-500"
+        aria-haspopup="listbox"
+        aria-expanded={open}
       >
         <span className={`min-w-0 flex-1 truncate ${selected || value ? '' : 'text-slate-400'}`}>
           {selected?.selectedLabel || selected?.label || (value ? invalidValueLabel || value : placeholder)}
         </span>
         <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition ${open ? 'rotate-180' : ''}`} />
       </button>
-      {open ? (
-        <div className="absolute z-40 mt-2 w-full overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl">
-          <div className="border-b border-slate-100 p-2">
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-              <input
-                autoFocus
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder={searchPlaceholder}
-                className="w-full rounded-lg border border-slate-200 py-2 pl-8 pr-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-            </div>
-          </div>
-          <div ref={listRef} className="max-h-72 overflow-y-auto p-1">
-            {filtered.length ? (
-              filtered.map((o) => (
-                <button
-                  key={o.value}
-                  data-picker-value={o.value}
-                  type="button"
-                  disabled={o.disabled}
-                  onClick={() => {
-                    onChange(o.value)
-                    setOpen(false)
-                    setQuery('')
-                  }}
-                  className="flex w-full items-start justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm hover:bg-slate-50 disabled:pointer-events-none disabled:opacity-50"
-                >
-                  <span>
-                    <span className="block text-slate-800">{o.label}</span>
-                    {o.description ? <span className="mt-0.5 block text-xs text-slate-400">{o.description}</span> : null}
-                  </span>
-                  {o.value === value ? <Check className="mt-0.5 h-4 w-4 shrink-0 text-indigo-600" /> : null}
-                </button>
-              ))
-            ) : (
-              <div className="px-3 py-8 text-center text-sm text-slate-400">无匹配结果</div>
-            )}
-          </div>
-          <div className="border-t border-slate-100 px-3 py-2 text-xs text-slate-500">
-            共 {filtered.length} 项
-          </div>
-        </div>
-      ) : null}
+      {panel}
     </div>
   )
 }
