@@ -1,0 +1,37 @@
+本地启动方式
+
+1. 进入项目目录：
+
+cd /Users/jsonhe/shenpu-project/AI-Recruit
+
+2. 确认当前本地配置使用的是本地环境数据库，不是线上库：
+
+.env 中应保持：
+MYSQL_HOST="100.79.134.17"
+REDIS_HOST="100.79.134.17"
+PORT="3011"
+ADMIN_UI_PORT="3010"
+ADMIN_API_UPSTREAM="http://127.0.0.1:3011"
+MINIAPP_API_PUBLIC_URL=http://127.0.0.1:3011
+
+3. 推荐只用这一条命令启动后台本地项目：
+
+npm run dev:full
+
+这会同时启动：
+- API: http://127.0.0.1:3011
+- 后台: http://localhost:3010
+
+4. 启动后检查：
+
+curl http://127.0.0.1:3011/api/health
+打开 http://localhost:3010/#menu=resume-screening
+
+5. 停止：
+
+在运行 npm run dev:full 的终端按 Ctrl+C。
+
+备注：
+- 本地测试不要连接线上数据库。
+- 不建议再用 screen/nohup 启动这个项目，避免前端拿到旧进程或旧代码。
+- 如果 3010 或 3011 被占用，先关闭占用端口的旧进程，再重新执行 npm run dev:full。

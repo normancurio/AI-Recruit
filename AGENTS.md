@@ -10,6 +10,12 @@ Use this file as the project-level source of truth for Codex work in this reposi
 
 Keep answers and edits scoped to the named module unless the user explicitly asks to cross module boundaries.
 
+## Environment Definitions
+
+For this project, "local environment" means the developer/admin app running from the local checkout while using the development database on host `100.79.134.17`. That database host is reachable through the `company-mac-ssh` MCP target when remote inspection or repair is needed. Do not reinterpret "local environment" as `127.0.0.1` MySQL unless the user explicitly says to use a truly localhost database.
+
+"Production" or "online environment" means the target service reachable through the `server-doctor-ssh` MCP target. The production project path is `/opt/AI-Recruit`.
+
 ## Style-Only Requests
 
 When the user asks to fix backend/admin styles:
