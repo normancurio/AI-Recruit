@@ -2684,7 +2684,20 @@ function clampPortraitScore(v: unknown): number {
 
 function safeTextArray(v: unknown, max = 8): string[] {
   return Array.isArray(v)
-    ? v.map((x) => String(x || '').trim()).filter(Boolean).slice(0, max)
+    ? v
+        .map((x) => {
+          if (typeof x === 'string' || typeof x === 'number') return String(x).trim()
+          if (x && typeof x === 'object') {
+            const o = x as Record<string, unknown>
+            for (const k of ['risk', 'text', 'value', 'label', 'title', 'name', 'interview_question']) {
+              const s = String(o[k] || '').trim()
+              if (s) return s
+            }
+          }
+          return ''
+        })
+        .filter(Boolean)
+        .slice(0, max)
     : []
 }
 

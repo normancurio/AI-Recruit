@@ -1522,15 +1522,15 @@ export default function App() {
       <div className="flex h-screen h-[100dvh] overflow-hidden bg-slate-50">
       {mobileNavOpen ? (
         <div
-          className="fixed inset-0 z-20 bg-slate-900/50 md:hidden"
+          className="fixed inset-0 z-40 bg-slate-900/50 md:hidden"
           role="presentation"
           onClick={() => setMobileNavOpen(false)}
         />
       ) : null}
       <aside
-        className={`fixed inset-y-0 left-0 z-30 flex h-[100dvh] shrink-0 flex-col border-r border-slate-800/80 bg-slate-900 text-slate-300 shadow-xl transition-[width,transform] duration-200 ease-out md:static md:inset-auto md:z-30 md:h-screen md:min-h-[100dvh] md:shadow-xl ${
+        className={`fixed inset-y-0 left-0 z-50 flex h-[100dvh] shrink-0 flex-col border-r border-slate-800/80 bg-slate-900 text-slate-300 shadow-xl transition-[width,transform] duration-200 ease-out md:static md:inset-auto md:z-30 md:h-screen md:min-h-[100dvh] md:shadow-xl ${
           desktopSidebarCollapsed ? 'w-64 max-w-[min(100vw,16rem)] md:w-[4.5rem] md:min-w-[4.5rem] md:max-w-[4.5rem]' : 'w-64 max-w-[min(100vw,16rem)] md:w-64'
-        } ${mobileNavOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 relative`}
+        } ${mobileNavOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 md:relative`}
       >
         <div
           className={`h-14 shrink-0 border-b border-slate-800 bg-slate-950 md:h-16 ${
@@ -1707,7 +1707,7 @@ export default function App() {
                 '招聘管理'}
             </h2>
           </div>
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 sm:gap-x-3 md:gap-x-4 lg:gap-6">
+          <div className="flex w-full flex-wrap items-center justify-between gap-x-2 gap-y-1.5 sm:gap-x-3 md:w-auto md:justify-end md:gap-x-4 lg:gap-6">
             {authProfile ? (
               <span className="max-w-[11rem] truncate text-xs text-slate-500 sm:max-w-none sm:text-sm">
                 当前身份：<span className="font-medium text-slate-700">{roleFallbackLabel(currentRole)}</span>
@@ -1743,7 +1743,7 @@ export default function App() {
               <Bell className="h-5 w-5" />
               <span className="absolute right-0.5 top-0.5 h-2 w-2 rounded-full border-2 border-white bg-red-500" />
             </button>
-            <div className="flex min-w-0 max-w-[40%] cursor-pointer items-center gap-1.5 sm:max-w-none sm:gap-2">
+            <div className="flex min-w-0 max-w-[52%] cursor-pointer items-center gap-1.5 sm:max-w-none sm:gap-2">
               <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-sm font-bold text-indigo-600">
                 {currentRole === 'admin'
                   ? 'A'
@@ -1760,13 +1760,13 @@ export default function App() {
           </div>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-slate-50/50 p-2 sm:p-6 lg:p-8">
+        <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain bg-slate-50/50 p-2 sm:p-6 lg:p-8">
           <motion.div
             key={activeMenu}
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.2 }}
-            className="w-full"
+            className="min-h-full w-full"
           >
             {renderContent()}
           </motion.div>
@@ -7601,7 +7601,7 @@ function ResumeLibraryView({
             </button>
           </div>
         </div>
-        <div className="grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-3 lg:grid-cols-5">
+        <div className="grid grid-cols-1 gap-x-3 gap-y-2 sm:grid-cols-3 lg:grid-cols-5">
           <div className="min-w-0">
             <label className={libFilterLabel}>候选人</label>
             <input
@@ -7679,7 +7679,7 @@ function ResumeLibraryView({
             ) : null}
           </button>
           {libFilterMoreOpen ? (
-            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-3 lg:grid-cols-5">
+            <div className="mt-2 grid grid-cols-1 gap-x-3 gap-y-2 sm:grid-cols-3 lg:grid-cols-5">
               <div className="min-w-0">
                 <label className={libFilterLabel}>是否有学位</label>
                 <select
@@ -7755,7 +7755,7 @@ function ResumeLibraryView({
       </form>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex shrink-0 flex-row flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-3 py-2 sm:px-4">
+        <div className="flex shrink-0 flex-col items-start justify-between gap-2 border-b border-slate-100 px-3 py-2 sm:flex-row sm:items-center sm:px-4">
           <div className="min-w-0">
             <h3 className="text-sm font-bold text-slate-900">简历库</h3>
             <p className="mt-0.5 text-[11px] leading-snug text-slate-500 sm:text-xs">
@@ -7792,13 +7792,13 @@ function ResumeLibraryView({
             <p className="text-sm text-slate-500">当前筛选条件下暂无记录，可调整条件后点击「搜索」。</p>
           ) : null}
           {pagedRows.length > 0 ? (
-            <div className="max-w-full overflow-x-auto rounded-lg border border-slate-200">
+            <div className="max-w-full overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
               <table
-                className="table-fixed border-collapse text-center text-[11px] text-slate-800 [&_th]:px-0.5 [&_th]:py-2 [&_td]:px-0.5 [&_td]:py-1.5"
+                className="table-fixed border-collapse text-left text-sm text-slate-800 [&_th]:px-3 [&_th]:py-3 [&_td]:px-3 [&_td]:py-2.5"
                 ref={cols.tableRef} style={cols.tableStyle}
               >
                 <colgroup>{cols.colNodes}</colgroup>
-                <thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50/95 text-[10px] font-medium text-slate-600">
+                <thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50/95 text-xs text-slate-600">
                   <tr>
                     <ResizableTh col={cols.byId.name}>姓名</ResizableTh>
                     <ResizableTh col={cols.byId.gender}>性别</ResizableTh>
@@ -7836,7 +7836,7 @@ function ResumeLibraryView({
                             <span className="min-w-0 truncate">{stub.name}</span>
                             {(libClusterSizeByRepId.get(rid) ?? 1) > 1 ? (
                               <span
-                                className="shrink-0 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-semibold tabular-nums text-amber-900"
+                                className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-amber-900"
                                 title="该候选人有多条岗位投递，已合并展示；点「投递历史」查看全部岗位"
                               >
                                 多岗×{libClusterSizeByRepId.get(rid)}
@@ -7855,7 +7855,7 @@ function ResumeLibraryView({
                             <span className={libTableEmpty}>—</span>
                           )}
                         </td>
-                        <td className="max-w-[6.5rem] truncate font-mono text-[10px] text-slate-700" title={stub.phone || ''}>
+                        <td className="max-w-[6.5rem] truncate font-mono text-xs text-slate-700" title={stub.phone || ''}>
                           {stub.phone || <span className={libTableEmpty}>—</span>}
                         </td>
                         <td className="max-w-[4.5rem] truncate text-slate-700" title={String(row.major || '')}>
@@ -7864,7 +7864,7 @@ function ResumeLibraryView({
                         <td className="max-w-[3.5rem] truncate text-slate-700" title={String(row.education || '')}>
                           {row.education?.trim() ? row.education : <span className={libTableEmpty}>—</span>}
                         </td>
-                        <td className="max-w-[6rem] text-left text-[10px] leading-snug text-slate-700">
+                        <td className="max-w-[6rem] text-left text-xs leading-snug text-slate-700">
                           <span className="line-clamp-2 break-words">
                             {String(row.profile_job_title || row.matched_job_title || '').trim() || (
                               <span className={libTableEmpty}>—</span>
@@ -7885,7 +7885,7 @@ function ResumeLibraryView({
                         </td>
                         <td className="max-w-[5rem]">
                           {row.recruitment_channel?.trim() ? (
-                            <span className="inline-flex max-w-full truncate rounded-full border border-teal-200 bg-teal-50 px-1.5 py-0.5 text-[10px] font-medium text-teal-800">
+                            <span className="inline-flex max-w-full truncate rounded-full border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-medium text-teal-800">
                               {row.recruitment_channel.trim()}
                             </span>
                           ) : (
@@ -7894,7 +7894,7 @@ function ResumeLibraryView({
                         </td>
                         <td>
                           {uploaded === true ? (
-                            <span className="inline-flex rounded-full border border-teal-200 bg-teal-50 px-1.5 py-0.5 text-[10px] font-medium text-teal-800">
+                            <span className="inline-flex rounded-full border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-medium text-teal-800">
                               已上传简历
                             </span>
                           ) : uploaded === false ? (
@@ -7904,7 +7904,7 @@ function ResumeLibraryView({
                           )}
                         </td>
                         <td
-                          className="whitespace-nowrap font-mono tabular-nums text-[10px] text-slate-600"
+                          className="whitespace-nowrap font-mono tabular-nums text-xs text-slate-600"
                           title={stub.uploadTimeFull || stub.uploadTime}
                         >
                           {stub.uploadTime}
@@ -7917,7 +7917,7 @@ function ResumeLibraryView({
                               onClick={() => void openResumeOriginalFile(stub, 'preview')}
                               title={hasFile ? '预览简历' : '暂无原件'}
                               aria-label="预览简历"
-                              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-teal-200 bg-white text-teal-800 hover:bg-teal-50 disabled:cursor-not-allowed disabled:border-slate-100 disabled:text-slate-300 disabled:hover:bg-white"
+                              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-teal-200 bg-white text-teal-800 shadow-sm hover:bg-teal-50 disabled:cursor-not-allowed disabled:border-slate-100 disabled:text-slate-300 disabled:hover:bg-white"
                             >
                               <Eye className="h-3.5 w-3.5" aria-hidden />
                             </button>
@@ -7927,7 +7927,7 @@ function ResumeLibraryView({
                               onClick={() => void openResumeOriginalFile(stub, 'download')}
                               title={hasFile ? '下载原件' : '暂无原件'}
                               aria-label="下载原件"
-                              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-teal-200 bg-white text-teal-800 hover:bg-teal-50 disabled:cursor-not-allowed disabled:border-slate-100 disabled:text-slate-300 disabled:hover:bg-white"
+                              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-teal-200 bg-white text-teal-800 shadow-sm hover:bg-teal-50 disabled:cursor-not-allowed disabled:border-slate-100 disabled:text-slate-300 disabled:hover:bg-white"
                             >
                               <Download className="h-3.5 w-3.5" aria-hidden />
                             </button>
@@ -7936,7 +7936,7 @@ function ResumeLibraryView({
                               onClick={() => setProfileEditResume(stub)}
                               title="编辑详情"
                               aria-label="编辑详情"
-                              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900"
                             >
                               <UserPen className="h-3.5 w-3.5" aria-hidden />
                             </button>
@@ -7945,7 +7945,7 @@ function ResumeLibraryView({
                               onClick={() => openDeliveryHistory(row)}
                               title="投递历史"
                               aria-label="投递历史"
-                              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-indigo-200 bg-white text-indigo-800 hover:bg-indigo-50"
+                              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-indigo-200 bg-white text-indigo-800 shadow-sm hover:bg-indigo-50"
                             >
                               <History className="h-3.5 w-3.5" aria-hidden />
                             </button>
