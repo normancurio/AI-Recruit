@@ -6,8 +6,11 @@
   "scripts": {
     "build:weapp": "npm run build:weapp --prefix miniapp-candidate",
     "build:weapp:clean": "npm run build:weapp:clean --prefix miniapp-candidate",
+    "predev:api": "node scripts/ensure-dev-ports-free.mjs --api",
     "dev:api": "tsx watch server/index.ts",
+    "predev:full": "node scripts/ensure-dev-ports-free.mjs --all",
     "dev:full": "concurrently -k -n ui,api -c blue,magenta \"tsx watch server.ts\" \"tsx watch server/index.ts\"",
+    "predev": "node scripts/ensure-dev-ports-free.mjs --ui",
     "dev": "tsx watch server.ts",
     "build": "vite build",
     "preview": "vite preview",
@@ -23,6 +26,7 @@
     "@google/genai": "^1.29.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
+    "docx": "^9.7.0",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "ioredis": "^5.10.1",
@@ -40,11 +44,11 @@
     "vite": "^6.2.0"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2",
     "@types/express": "^4.17.25",
     "@types/multer": "^2.1.0",
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
+    "concurrently": "^9.1.2",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",

@@ -76,7 +76,7 @@ const uploadResumeMemory = multer({
   limits: { fileSize: 12 * 1024 * 1024 }
 })
 
-type ResumeScreenTaskStatus = 'queued' | 'running' | 'done' | 'failed'
+type ResumeScreenTaskStatus = 'queued' | 'running' | 'done' | 'failed' | 'duplicate'
 
 type ResumeScreenTask = {
   taskId: string
@@ -595,16 +595,18 @@ function saveResumeOriginalFile(file: { buffer: Buffer; originalname?: string; m
   }
 }
 
-function saveGeneratedResumePdf(buffer: Buffer, preferredName: string): {
+function saveGeneratedResumeFile(buffer: Buffer, preferredName: string, ext: '.pdf' | '.docx'): {
   storageKey: string
   absPath: string
   sizeBytes: number
   originalName: string
 } {
   ensureResumeStorageDir()
+  const safeExt = ext === '.docx' ? '.docx' : '.pdf'
   const originalName =
-    normalizeMultipartFilename(preferredName || 'shenpu-resume.pdf').replace(/\.[^.]+$/, '').slice(0, 220) + '.pdf'
-  const key = `shenpu-${Date.now()}-${crypto.randomUUID()}.pdf`
+    normalizeMultipartFilename(preferredName || `shenpu-resume${safeExt}`).replace(/\.[^.]+$/, '').slice(0, 220) +
+    safeExt
+  const key = `shenpu-${Date.now()}-${crypto.randomUUID()}${safeExt}`
   const absPath = path.join(RESUME_STORAGE_DIR, key)
   fs.writeFileSync(absPath, buffer)
   return { storageKey: key, absPath, sizeBytes: buffer.length, originalName }
@@ -2664,6 +2666,19 @@ type ShenpuResumeDocument = {
   headline: string
   professionalSummary: string
   targetMatchSummary: string
+  personalInfo: {
+    birthDate: string
+    ethnicity: string
+    politicalStatus: string
+    householdRegistration: string
+    address: string
+    email: string
+    graduationDate: string
+    targetPosition: string
+    itYears: string
+    insuranceYears: string
+    piccProjectYears: string
+  }
   coreSkills: string[]
   workExperiences: Array<{ company: string; title: string; period: string; highlights: string[] }>
   projectExperiences: Array<{ name: string; role: string; period: string; highlights: string[] }>
@@ -2706,6 +2721,12 @@ function sanitizeShenpuResumeDocument(raw: unknown, fallback: ShenpuResumeDocume
   const arr = (v: unknown) => (Array.isArray(v) ? v : [])
   const portraitObj =
     obj.portrait && typeof obj.portrait === 'object' ? (obj.portrait as Record<string, unknown>) : {}
+  const personalObj =
+    obj.personalInfo && typeof obj.personalInfo === 'object' ? (obj.personalInfo as Record<string, unknown>) : {}
+  const personal = (key: string, max = 120) =>
+    String(personalObj[key] || (fallback.personalInfo as Record<string, string>)[key] || '')
+      .trim()
+      .slice(0, max)
   const dimensions = arr(portraitObj.dimensions)
     .map((x) => {
       const d = x && typeof x === 'object' ? (x as Record<string, unknown>) : {}
@@ -2727,6 +2748,19 @@ function sanitizeShenpuResumeDocument(raw: unknown, fallback: ShenpuResumeDocume
     targetMatchSummary:
       String(obj.targetMatchSummary || fallback.targetMatchSummary).trim().slice(0, 500) ||
       fallback.targetMatchSummary,
+    personalInfo: {
+      birthDate: personal('birthDate', 40),
+      ethnicity: personal('ethnicity', 40),
+      politicalStatus: personal('politicalStatus', 60),
+      householdRegistration: personal('householdRegistration', 100),
+      address: personal('address', 160),
+      email: personal('email', 120),
+      graduationDate: personal('graduationDate', 40),
+      targetPosition: personal('targetPosition', 120),
+      itYears: personal('itYears', 40),
+      insuranceYears: personal('insuranceYears', 40),
+      piccProjectYears: personal('piccProjectYears', 40)
+    },
     coreSkills: safeTextArray(obj.coreSkills, 12).length ? safeTextArray(obj.coreSkills, 12) : fallback.coreSkills,
     workExperiences:
       arr(obj.workExperiences)
@@ -2837,6 +2871,19 @@ function fallbackShenpuResumeDocument(params: {
     headline: `${params.jobTitle || '目标岗位'}候选人`,
     professionalSummary: params.result.summary || '候选人信息已完成结构化整理，建议结合原始简历进一步复核。',
     targetMatchSummary: params.result.summary || '已根据岗位 JD 与简历完成匹配评估。',
+    personalInfo: {
+      birthDate: '',
+      ethnicity: '',
+      politicalStatus: '',
+      householdRegistration: '',
+      address: '',
+      email: '',
+      graduationDate: '',
+      targetPosition: params.jobTitle || '',
+      itYears: '',
+      insuranceYears: '',
+      piccProjectYears: ''
+    },
     coreSkills: strengths.slice(0, 6),
     workExperiences: [],
     projectExperiences: [],
@@ -2865,6 +2912,7 @@ async function runShenpuResumeWithAi(params: {
   jdText: string
   resumeText: string
   result: ResumeScreeningAiResult
+  templateText?: string
 }): Promise<ShenpuResumeDocument> {
   let parsedEval: Record<string, unknown> = {}
   try {
@@ -2897,9 +2945,13 @@ async function runShenpuResumeWithAi(params: {
           `目标岗位：${params.jobTitle}`,
           `部门：${params.department || '未知'}`,
           `岗位JD：${String(params.jdText || '').replace(/\\s+/g, ' ').slice(0, 12000)}`,
+          params.templateText
+            ? `项目简历模板文本（用于判断需要填充的字段和章节，必须忠于原始简历，不得为了填满模板而编造）：${String(params.templateText || '').replace(/\\s+/g, ' ').slice(0, 8000)}`
+            : '',
           `简历全文：${String(params.resumeText || '').replace(/\\s+/g, ' ').slice(0, 20000)}`,
           `已有评估JSON：${JSON.stringify(parsedEval).slice(0, 12000)}`,
-          '请输出字段：headline, professionalSummary, targetMatchSummary, coreSkills[], workExperiences[{company,title,period,highlights[]}], projectExperiences[{name,role,period,highlights[]}], educationExperiences[{school,major,degree,period}], strengths[], risks[], clientRequirements[], responsibilities[], portrait{dimensions[{label,candidate,requirement}], conclusion}。',
+          '请输出字段：headline, professionalSummary, targetMatchSummary, personalInfo{birthDate,ethnicity,politicalStatus,householdRegistration,address,email,graduationDate,targetPosition,itYears,insuranceYears,piccProjectYears}, coreSkills[], workExperiences[{company,title,period,highlights[]}], projectExperiences[{name,role,period,highlights[]}], educationExperiences[{school,major,degree,period}], strengths[], risks[], clientRequirements[], responsibilities[], portrait{dimensions[{label,candidate,requirement}], conclusion}。',
+          'personalInfo 中只填原始简历能支持的信息；民族、政治面貌、户籍、保险行业年数、PICC项目年数若原文没有就留空。',
           'portrait.dimensions 请优先给 5~6 个岗位可读的具体能力项，能细到技术栈时不要只写“技能匹配”，例如 Java、Git、MySQL、SpringBoot、沟通能力；candidate/requirement 为 0~100；缺失信息用空数组，不要臆造。',
           'clientRequirements 是从岗位 JD 中提炼出的“客户要求 / 任职要求”要点列表（每条 8~60 字，使用陈述句，不要带项目符号）；responsibilities 是岗位职责描述要点列表，每条 12~80 字。两组都严格忠于 JD 原文，不要重复也不要凑数；若 JD 中没有明确信息，则返回空数组。'
         ].join('\\n')
@@ -3162,6 +3214,280 @@ async function renderHtmlToPdfBuffer(html: string): Promise<Buffer> {
   }
 }
 
+type ProjectShenpuResumeTemplate = {
+  fileName: string
+  mimeType: string
+  storagePath: string
+  absPath: string
+  text: string
+}
+
+async function readProjectTemplateText(absPath: string, mimeType: string, fileName: string): Promise<string> {
+  try {
+    const lower = String(fileName || absPath).toLowerCase()
+    if (lower.endsWith('.docx') || mimeType.includes('wordprocessingml')) {
+      const result = await mammoth.extractRawText({ path: absPath })
+      return String(result.value || '').trim().slice(0, 12000)
+    }
+    return ''
+  } catch (e) {
+    console.warn('[shenpu-resume] template text extract skipped:', e instanceof Error ? e.message : e)
+    return ''
+  }
+}
+
+async function loadProjectShenpuResumeTemplate(row: Record<string, unknown>): Promise<ProjectShenpuResumeTemplate | null> {
+  const storagePath = String(row.shenpu_resume_template_storage_path || '').trim()
+  if (!storagePath) return null
+  const absPath = resolveResumeStorageAbsPath(storagePath)
+  if (!absPath) return null
+  const fileName = normalizeMultipartFilename(String(row.shenpu_resume_template_file_name || '项目简历模板.docx')).slice(0, 255)
+  const mimeType = String(row.shenpu_resume_template_mime_type || 'application/octet-stream')
+  return {
+    fileName,
+    mimeType,
+    storagePath,
+    absPath,
+    text: await readProjectTemplateText(absPath, mimeType, fileName)
+  }
+}
+
+function isWordResumeTemplate(template?: ProjectShenpuResumeTemplate | null): boolean {
+  if (!template) return false
+  const lower = String(template.fileName || '').toLowerCase()
+  const mime = String(template.mimeType || '').toLowerCase()
+  return lower.endsWith('.docx') || lower.endsWith('.doc') || mime.includes('wordprocessingml') || mime.includes('msword')
+}
+
+async function renderProjectTemplateResumeDocxBuffer(params: {
+  candidateName: string
+  candidatePhone?: string | null
+  jobTitle: string
+  doc: ShenpuResumeDocument
+  templateFileName: string
+}): Promise<Buffer> {
+  const {
+    Document,
+    Packer,
+    Paragraph,
+    TextRun,
+    Table,
+    TableRow,
+    TableCell,
+    AlignmentType,
+    BorderStyle,
+    WidthType,
+    ShadingType
+  } = requireCjs('docx') as Record<string, any>
+  const info = params.doc.personalInfo
+  const text = (v: unknown) => String(v ?? '').trim() || ' '
+  const border = { style: BorderStyle.SINGLE, size: 1, color: '111827' }
+  const borders = { top: border, bottom: border, left: border, right: border }
+  const cellMargins = { top: 90, bottom: 90, left: 120, right: 120 }
+  const para = (value: unknown, opts: Record<string, unknown> = {}) =>
+    new Paragraph({
+      alignment: opts.align || AlignmentType.LEFT,
+      spacing: { after: 40 },
+      children: [
+        new TextRun({
+          text: text(value),
+          bold: Boolean(opts.bold),
+          size: Number(opts.size || 20),
+          font: 'Arial'
+        })
+      ]
+    })
+  const cell = (value: unknown, opts: Record<string, any> = {}) =>
+    new TableCell({
+      borders,
+      width: { size: Number(opts.width || 1800), type: WidthType.DXA },
+      columnSpan: opts.columnSpan,
+      rowSpan: opts.rowSpan,
+      shading: opts.fill ? { fill: opts.fill, type: ShadingType.CLEAR } : undefined,
+      margins: cellMargins,
+      verticalAlign: opts.verticalAlign,
+      children: Array.isArray(value) ? value : [para(value, opts)]
+    })
+  const label = (value: string) => cell(value, { width: 1300, bold: true, align: AlignmentType.CENTER, fill: 'F8FAFC' })
+  const value = (v: unknown) => cell(v, { width: 2450 })
+  const section = (title: string) =>
+    new TableRow({
+      children: [cell(title, { columnSpan: 5, bold: true, fill: 'E5E7EB', width: 9360 })]
+    })
+  const listParas = (items: string[]) =>
+    (items.length ? items : [' ']).map((x) => para(x, { size: 20 }))
+  const firstEdu = params.doc.educationExperiences[0]
+  const rows = [
+    new TableRow({
+      children: [label('姓名'), value(params.candidateName), label('出生年月'), value(info.birthDate), cell('照片', { rowSpan: 4, width: 1500, align: AlignmentType.CENTER })]
+    }),
+    new TableRow({ children: [label('民族'), value(info.ethnicity), label('政治面貌'), value(info.politicalStatus)] }),
+    new TableRow({ children: [label('电话'), value(params.candidatePhone || ''), label('户籍'), value(info.householdRegistration)] }),
+    new TableRow({ children: [label('邮箱'), value(info.email), label('住址'), value(info.address)] }),
+    new TableRow({
+      children: [label('（全日制）毕业院校'), value(firstEdu?.school || ''), label('（全日制）最高学历'), value(firstEdu?.degree || ''), cell(' ', { width: 1500 })]
+    }),
+    new TableRow({ children: [label('毕业时间'), value(info.graduationDate || firstEdu?.period || ''), label('专业'), value(firstEdu?.major || ''), cell(' ', { width: 1500 })] }),
+    new TableRow({ children: [label('岗位意向'), value(info.targetPosition || params.jobTitle), label('IT工作年数'), value(info.itYears), cell(' ', { width: 1500 })] }),
+    new TableRow({ children: [label('保险行业工作年数'), value(info.insuranceYears), label('PICC项目工作年数'), value(info.piccProjectYears), cell(' ', { width: 1500 })] }),
+    section('教育背景'),
+    new TableRow({
+      children: [
+        cell('起止时间', { bold: true, fill: 'F3F4F6', align: AlignmentType.CENTER }),
+        cell('学校名称', { columnSpan: 2, bold: true, fill: 'F3F4F6', align: AlignmentType.CENTER }),
+        cell('专业（大专/本科/研究生）', { columnSpan: 2, bold: true, fill: 'F3F4F6', align: AlignmentType.CENTER })
+      ]
+    }),
+    ...(params.doc.educationExperiences.length
+      ? params.doc.educationExperiences.map((x) => {
+          const majorDegree = [x.major, x.degree].filter(Boolean).join(x.major && x.degree ? '（' : '')
+          const display = majorDegree && x.major && x.degree ? `${majorDegree}）` : majorDegree
+          return new TableRow({ children: [cell(x.period), cell(x.school, { columnSpan: 2 }), cell(display, { columnSpan: 2 })] })
+        })
+      : [new TableRow({ children: [cell(' '), cell(' ', { columnSpan: 2 }), cell(' ', { columnSpan: 2 })] })]),
+    section('个人技能'),
+    new TableRow({
+      children: [cell(listParas(params.doc.coreSkills.length ? params.doc.coreSkills : params.doc.strengths), { columnSpan: 5 })]
+    }),
+    section('工作经历'),
+    new TableRow({
+      children: [
+        cell('起止时间', { bold: true, fill: 'F3F4F6', align: AlignmentType.CENTER }),
+        cell('公司名称', { columnSpan: 2, bold: true, fill: 'F3F4F6', align: AlignmentType.CENTER }),
+        cell('岗位（职务）', { columnSpan: 2, bold: true, fill: 'F3F4F6', align: AlignmentType.CENTER })
+      ]
+    }),
+    ...(params.doc.workExperiences.length
+      ? params.doc.workExperiences.flatMap((x) => [
+          new TableRow({ children: [cell(x.period), cell(x.company, { columnSpan: 2 }), cell(x.title, { columnSpan: 2 })] }),
+          new TableRow({ children: [cell(listParas(x.highlights), { columnSpan: 5 })] })
+        ])
+      : [new TableRow({ children: [cell(' '), cell(' ', { columnSpan: 2 }), cell(' ', { columnSpan: 2 })] })]),
+    section('项目经历'),
+    new TableRow({
+      children: [
+        cell('起止时间', { bold: true, fill: 'F3F4F6', align: AlignmentType.CENTER }),
+        cell('项目名称', { columnSpan: 2, bold: true, fill: 'F3F4F6', align: AlignmentType.CENTER }),
+        cell('岗位（职务）', { columnSpan: 2, bold: true, fill: 'F3F4F6', align: AlignmentType.CENTER })
+      ]
+    }),
+    ...(params.doc.projectExperiences.length
+      ? params.doc.projectExperiences.flatMap((x) => [
+          new TableRow({ children: [cell(x.period), cell(x.name, { columnSpan: 2 }), cell(x.role, { columnSpan: 2 })] }),
+          new TableRow({ children: [cell(listParas(x.highlights), { columnSpan: 5 })] })
+        ])
+      : [new TableRow({ children: [cell(' '), cell(' ', { columnSpan: 2 }), cell(' ', { columnSpan: 2 })] })]),
+    section('自我评价'),
+    new TableRow({
+      children: [cell(listParas(params.doc.strengths.length ? params.doc.strengths : [params.doc.professionalSummary]), { columnSpan: 5 })]
+    })
+  ]
+  const table = new Table({
+    width: { size: 9360, type: WidthType.DXA },
+    columnWidths: [1450, 2450, 1450, 2450, 1560],
+    rows
+  })
+  const document = new Document({
+    styles: { default: { document: { run: { font: 'Arial', size: 20 } } } },
+    sections: [
+      {
+        properties: {
+          page: { size: { width: 11906, height: 16838 }, margin: { top: 850, right: 850, bottom: 850, left: 850 } }
+        },
+        children: [
+          para('个人简历', { bold: true, size: 34, align: AlignmentType.CENTER }),
+          table,
+          para(`基于项目模板「${params.templateFileName}」生成`, { size: 16, align: AlignmentType.RIGHT })
+        ]
+      }
+    ]
+  })
+  return Buffer.from(await Packer.toBuffer(document))
+}
+
+function renderProjectTemplateResumeHtml(params: {
+  candidateName: string
+  candidatePhone?: string | null
+  jobTitle: string
+  doc: ShenpuResumeDocument
+  templateFileName: string
+}): string {
+  const info = params.doc.personalInfo
+  const esc = escapeHtml
+  const firstEdu = params.doc.educationExperiences[0]
+  const td = (label: string, value?: unknown) =>
+    `<td class="label">${esc(label)}</td><td class="value">${esc(String(value || '').trim() || '—')}</td>`
+  const sectionRows = (items: string[]) =>
+    items.length ? items.map((x) => `<p>${esc(x)}</p>`).join('') : '<p class="muted">—</p>'
+  const eduRows = params.doc.educationExperiences.length
+    ? params.doc.educationExperiences
+        .map((x) => {
+          const majorDegree = [x.major, x.degree].filter(Boolean).join(x.major && x.degree ? '（' : '')
+          const display = majorDegree && x.major && x.degree ? `${majorDegree}）` : majorDegree
+          return `<tr><td>${esc(x.period || '—')}</td><td colspan="2">${esc(x.school || '—')}</td><td colspan="2">${esc(display || '—')}</td></tr>`
+        })
+        .join('')
+    : '<tr><td>—</td><td colspan="2">—</td><td colspan="2">—</td></tr>'
+  const expRows = params.doc.workExperiences.length
+    ? params.doc.workExperiences
+        .map(
+          (x) =>
+            `<tr><td>${esc(x.period || '—')}</td><td colspan="2">${esc(x.company || '—')}</td><td colspan="2">${esc(x.title || '—')}</td></tr><tr><td colspan="5" class="detail">${sectionRows(x.highlights)}</td></tr>`
+        )
+        .join('')
+    : '<tr><td>—</td><td colspan="2">—</td><td colspan="2">—</td></tr>'
+  const projectRows = params.doc.projectExperiences.length
+    ? params.doc.projectExperiences
+        .map(
+          (x) =>
+            `<tr><td>${esc(x.period || '—')}</td><td colspan="2">${esc(x.name || '—')}</td><td colspan="2">${esc(x.role || '—')}</td></tr><tr><td colspan="5" class="detail">${sectionRows(x.highlights)}</td></tr>`
+        )
+        .join('')
+    : '<tr><td>—</td><td colspan="2">—</td><td colspan="2">—</td></tr>'
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+    @page { size: A4; margin: 12mm; }
+    * { box-sizing: border-box; } body { margin: 0; font-family: "Arial Unicode MS","PingFang SC","Hiragino Sans GB",sans-serif; color: #111827; font-size: 11px; line-height: 1.45; }
+    .title { text-align: center; font-size: 20px; font-weight: 800; letter-spacing: .28em; margin-bottom: 8px; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    td, th { border: 1px solid #111827; padding: 6px 7px; vertical-align: middle; word-break: break-word; }
+    th { background: #f3f4f6; font-weight: 700; text-align: center; }
+    .label { width: 14%; background: #f8fafc; font-weight: 700; text-align: center; }
+    .value { width: 24%; min-height: 28px; }
+    .photo { width: 18%; text-align: center; color: #6b7280; }
+    .section { background: #e5e7eb; font-weight: 800; text-align: left; }
+    .detail { min-height: 42px; }
+    .detail p, .skills p { margin: 0 0 3px; }
+    .muted { color: #9ca3af; }
+    .foot { margin-top: 6px; text-align: right; color: #6b7280; font-size: 9px; }
+  </style></head><body>
+    <div class="title">个人简历</div>
+    <table>
+      <tr>${td('姓名', params.candidateName)}${td('出生年月', info.birthDate)}<td class="photo" rowspan="4">照片</td></tr>
+      <tr>${td('民族', info.ethnicity)}${td('政治面貌', info.politicalStatus)}</tr>
+      <tr>${td('电话', params.candidatePhone || '')}${td('户籍', info.householdRegistration)}</tr>
+      <tr>${td('邮箱', info.email)}${td('住址', info.address)}</tr>
+      <tr>${td('（全日制）毕业院校', firstEdu?.school || '')}${td('（全日制）最高学历', firstEdu?.degree || '')}<td></td></tr>
+      <tr>${td('毕业时间', info.graduationDate || firstEdu?.period || '')}${td('专业', firstEdu?.major || '')}<td></td></tr>
+      <tr>${td('岗位意向', info.targetPosition || params.jobTitle)}${td('IT工作年数', info.itYears)}<td></td></tr>
+      <tr>${td('保险行业工作年数', info.insuranceYears)}${td('PICC项目工作年数', info.piccProjectYears)}<td></td></tr>
+      <tr><td colspan="5" class="section">教育背景</td></tr>
+      <tr><th>起止时间</th><th colspan="2">学校名称</th><th colspan="2">专业（大专/本科/研究生）</th></tr>
+      ${eduRows}
+      <tr><td colspan="5" class="section">个人技能</td></tr>
+      <tr><td colspan="5" class="skills">${sectionRows(params.doc.coreSkills.length ? params.doc.coreSkills : params.doc.strengths)}</td></tr>
+      <tr><td colspan="5" class="section">工作经历</td></tr>
+      <tr><th>起止时间</th><th colspan="2">公司名称</th><th colspan="2">岗位（职务）</th></tr>
+      ${expRows}
+      <tr><td colspan="5" class="section">项目经历</td></tr>
+      <tr><th>起止时间</th><th colspan="2">项目名称</th><th colspan="2">岗位（职务）</th></tr>
+      ${projectRows}
+      <tr><td colspan="5" class="section">自我评价</td></tr>
+      <tr><td colspan="5" class="detail">${sectionRows(params.doc.strengths.length ? params.doc.strengths : [params.doc.professionalSummary])}</td></tr>
+    </table>
+    <div class="foot">基于项目模板「${esc(params.templateFileName)}」生成</div>
+  </body></html>`
+}
+
 async function generateShenpuResumeForScreening(params: {
   screeningId: number
   candidateName: string
@@ -3171,6 +3497,7 @@ async function generateShenpuResumeForScreening(params: {
   jdText: string
   resumeText: string
   result: ResumeScreeningAiResult
+  template?: ProjectShenpuResumeTemplate | null
 }): Promise<void> {
   try {
     await ensureShenpuResumeTable()
@@ -3190,30 +3517,57 @@ async function generateShenpuResumeForScreening(params: {
       department: params.department || '',
       jdText: params.jdText,
       resumeText: params.resumeText,
-      result: params.result
+      result: params.result,
+      templateText: params.template?.text || ''
     })
     await mysqlPool.query(
       `UPDATE resume_screening_shenpu_resumes SET progress_percent=70, progress_stage='排版画像图表' WHERE screening_id=?`,
       [params.screeningId]
     )
-    const html = renderShenpuResumeHtml({
-      candidateName: params.candidateName,
-      candidatePhone: params.candidatePhone,
-      jobTitle: params.jobTitle,
-      department: params.department,
-      doc
-    })
-    const pdf = await renderHtmlToPdfBuffer(html)
+    const wordTemplate = isWordResumeTemplate(params.template)
+    const generatedBuffer = wordTemplate
+      ? await renderProjectTemplateResumeDocxBuffer({
+          candidateName: params.candidateName,
+          candidatePhone: params.candidatePhone,
+          jobTitle: params.jobTitle,
+          doc,
+          templateFileName: params.template?.fileName || '项目简历模板'
+        })
+      : await renderHtmlToPdfBuffer(
+          params.template
+            ? renderProjectTemplateResumeHtml({
+                candidateName: params.candidateName,
+                candidatePhone: params.candidatePhone,
+                jobTitle: params.jobTitle,
+                doc,
+                templateFileName: params.template.fileName
+              })
+            : renderShenpuResumeHtml({
+                candidateName: params.candidateName,
+                candidatePhone: params.candidatePhone,
+                jobTitle: params.jobTitle,
+                department: params.department,
+                doc
+              })
+        )
     await mysqlPool.query(
-      `UPDATE resume_screening_shenpu_resumes SET progress_percent=90, progress_stage='写入 PDF 文件' WHERE screening_id=?`,
-      [params.screeningId]
+      `UPDATE resume_screening_shenpu_resumes SET progress_percent=90, progress_stage=? WHERE screening_id=?`,
+      [wordTemplate ? '写入 Word 文件' : '写入 PDF 文件', params.screeningId]
     )
-    const saved = saveGeneratedResumePdf(pdf, `${params.candidateName || '候选人'}-申朴简历.pdf`)
+    const outputExt = wordTemplate ? '.docx' : '.pdf'
+    const outputMime = wordTemplate
+      ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      : 'application/pdf'
+    const saved = saveGeneratedResumeFile(
+      generatedBuffer,
+      `${params.candidateName || '候选人'}-${params.template ? '项目模板申朴简历' : '申朴简历'}${outputExt}`,
+      outputExt
+    )
     await mysqlPool.query(
       `UPDATE resume_screening_shenpu_resumes
-       SET status='ready', file_name=?, mime_type='application/pdf', file_size_bytes=?, storage_path=?, content_json=?, progress_percent=100, progress_stage='已完成', error_message=NULL, generated_at=NOW(), updated_at=NOW()
+       SET status='ready', file_name=?, mime_type=?, file_size_bytes=?, storage_path=?, content_json=?, progress_percent=100, progress_stage='已完成', error_message=NULL, generated_at=NOW(), updated_at=NOW()
        WHERE screening_id=?`,
-      [saved.originalName, saved.sizeBytes, saved.storageKey, JSON.stringify(doc), params.screeningId]
+      [saved.originalName, outputMime, saved.sizeBytes, saved.storageKey, JSON.stringify(doc), params.screeningId]
     )
   } catch (e) {
     const message = e instanceof Error ? e.message : 'generate failed'
@@ -5247,8 +5601,78 @@ function resumeScreeningsProjectJoinSql(): string {
       LEFT JOIN projects pn ON ${onPn}`
 }
 
+function shenpuResumeWordTemplateConditionSql(projectAlias: string): string {
+  return `(TRIM(COALESCE(${projectAlias}.shenpu_resume_template_storage_path, '')) <> ''
+              AND (
+                LOWER(COALESCE(${projectAlias}.shenpu_resume_template_file_name, '')) LIKE '%.docx'
+                OR LOWER(COALESCE(${projectAlias}.shenpu_resume_template_file_name, '')) LIKE '%.doc'
+                OR LOWER(COALESCE(${projectAlias}.shenpu_resume_template_mime_type, '')) LIKE '%wordprocessingml%'
+                OR LOWER(COALESCE(${projectAlias}.shenpu_resume_template_mime_type, '')) LIKE '%msword%'
+              ))`
+}
+
+function shenpuResumeStoredWordConditionSql(screeningAlias: string): string {
+  return `(
+    LOWER(COALESCE((SELECT sr.mime_type FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%wordprocessingml%'
+    OR LOWER(COALESCE((SELECT sr.file_name FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%.docx'
+    OR LOWER(COALESCE((SELECT sr.file_name FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%.doc'
+  )`
+}
+
+function shenpuResumeStatusSelectSql(screeningAlias: string, projectAlias: string): string {
+  const statusSub = `(SELECT sr.status FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1)`
+  return `CASE
+    WHEN ${shenpuResumeWordTemplateConditionSql(projectAlias)}
+      AND COALESCE(${statusSub}, 'missing') = 'ready'
+      AND NOT ${shenpuResumeStoredWordConditionSql(screeningAlias)}
+    THEN 'missing'
+    ELSE COALESCE(${statusSub}, 'missing')
+  END`
+}
+
+function shenpuResumeProgressSelectSql(screeningAlias: string, projectAlias: string): string {
+  return `CASE
+    WHEN ${shenpuResumeWordTemplateConditionSql(projectAlias)}
+      AND COALESCE((SELECT sr.status FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), 'missing') = 'ready'
+      AND NOT ${shenpuResumeStoredWordConditionSql(screeningAlias)}
+    THEN 0
+    ELSE COALESCE((SELECT sr.progress_percent FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), 0)
+  END`
+}
+
+function shenpuResumeStageSelectSql(screeningAlias: string, projectAlias: string): string {
+  return `CASE
+    WHEN ${shenpuResumeWordTemplateConditionSql(projectAlias)}
+      AND COALESCE((SELECT sr.status FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), 'missing') = 'ready'
+      AND NOT ${shenpuResumeStoredWordConditionSql(screeningAlias)}
+    THEN '项目模板已更新，请重新生成'
+    ELSE COALESCE((SELECT sr.progress_stage FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')
+  END`
+}
+
 const RESUME_SCREENING_PROFILE_JOIN = `LEFT JOIN resume_screening_profiles prof ON prof.screening_id = s.id`
 let shenpuResumeTableReady = false
+let projectsShenpuTemplateColumnsReady = false
+
+async function ensureProjectsShenpuTemplateColumns(): Promise<void> {
+  if (projectsShenpuTemplateColumnsReady) return
+  const alters = [
+    `ALTER TABLE projects ADD COLUMN shenpu_resume_template_file_name VARCHAR(255) NULL AFTER member_count`,
+    `ALTER TABLE projects ADD COLUMN shenpu_resume_template_mime_type VARCHAR(128) NULL AFTER shenpu_resume_template_file_name`,
+    `ALTER TABLE projects ADD COLUMN shenpu_resume_template_size_bytes BIGINT UNSIGNED NULL AFTER shenpu_resume_template_mime_type`,
+    `ALTER TABLE projects ADD COLUMN shenpu_resume_template_storage_path VARCHAR(512) NULL AFTER shenpu_resume_template_size_bytes`,
+    `ALTER TABLE projects ADD COLUMN shenpu_resume_template_uploaded_at TIMESTAMP NULL DEFAULT NULL AFTER shenpu_resume_template_storage_path`
+  ]
+  for (const sql of alters) {
+    try {
+      await mysqlPool.query(sql)
+    } catch (e: unknown) {
+      const code = (e as { code?: string })?.code
+      if (code !== 'ER_DUP_FIELDNAME') throw e
+    }
+  }
+  projectsShenpuTemplateColumnsReady = true
+}
 
 async function ensureShenpuResumeTable(): Promise<void> {
   if (shenpuResumeTableReady) return
@@ -5334,9 +5758,9 @@ function resumeScreeningsJoinSql(
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username,
               CAST(DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS CHAR(32)) AS created_at,
               EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
-              COALESCE((SELECT sr.status FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), 'missing') AS shenpu_resume_status,
-              COALESCE((SELECT sr.progress_percent FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), 0) AS shenpu_resume_progress,
-              COALESCE((SELECT sr.progress_stage FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), '') AS shenpu_resume_stage,
+              ${shenpuResumeStatusSelectSql('s', 'pn')} AS shenpu_resume_status,
+              ${shenpuResumeProgressSelectSql('s', 'pn')} AS shenpu_resume_progress,
+              ${shenpuResumeStageSelectSql('s', 'pn')} AS shenpu_resume_stage,
               ${plainCol},
               lr.overall_score AS interview_overall_score,
               lr.passed AS interview_passed,
@@ -5452,9 +5876,9 @@ function resumeScreeningsPlainSql(
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username,
               CAST(DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS CHAR(32)) AS created_at,
               EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
-              COALESCE((SELECT sr.status FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), 'missing') AS shenpu_resume_status,
-              COALESCE((SELECT sr.progress_percent FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), 0) AS shenpu_resume_progress,
-              COALESCE((SELECT sr.progress_stage FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), '') AS shenpu_resume_stage,
+              ${shenpuResumeStatusSelectSql('s', 'pn')} AS shenpu_resume_status,
+              ${shenpuResumeProgressSelectSql('s', 'pn')} AS shenpu_resume_progress,
+              ${shenpuResumeStageSelectSql('s', 'pn')} AS shenpu_resume_stage,
               ${plainCol},
               TRIM(COALESCE(pn.name, '')) AS job_project_name
        FROM resume_screenings s
@@ -6881,10 +7305,17 @@ app.get('/api/admin/resume-screenings/:id/shenpu-resume', async (req, res) => {
   const idNum = Number(String(req.params.id || '').trim())
   if (!Number.isFinite(idNum) || idNum <= 0) return res.status(400).json({ message: 'invalid id' })
   try {
+    await ensureProjectsShenpuTemplateColumns()
+    const shenpuJobJoin = resumeScreeningsJobCodeMatchSql('j', 's')
     const [rows] = await mysqlPool.query<any[]>(
-      `SELECT status, file_name, mime_type, storage_path, error_message
-       FROM resume_screening_shenpu_resumes
-       WHERE screening_id=? LIMIT 1`,
+      `SELECT sr.status, sr.file_name, sr.mime_type, sr.storage_path, sr.error_message,
+              p.shenpu_resume_template_file_name, p.shenpu_resume_template_mime_type,
+              p.shenpu_resume_template_storage_path
+       FROM resume_screening_shenpu_resumes sr
+       LEFT JOIN resume_screenings s ON s.id = sr.screening_id
+       LEFT JOIN jobs j ON ${shenpuJobJoin}
+       LEFT JOIN projects p ON ${resumeScreeningsProjectIdMatchSql('p', 'j')}
+       WHERE sr.screening_id=? LIMIT 1`,
       [Math.floor(idNum)]
     )
     if (!rows.length) return res.status(404).json({ message: '申朴简历尚未生成' })
@@ -6893,6 +7324,15 @@ app.get('/api/admin/resume-screenings/:id/shenpu-resume', async (req, res) => {
     if (status === 'generating') return res.status(409).json({ message: '申朴简历生成中' })
     if (status !== 'ready') {
       return res.status(409).json({ message: String(r.error_message || '申朴简历生成失败') })
+    }
+    const projectTemplate = await loadProjectShenpuResumeTemplate(r)
+    const shouldBeWord = isWordResumeTemplate(projectTemplate)
+    const storedMime = String(r.mime_type || '').toLowerCase()
+    const storedName = String(r.file_name || '').toLowerCase()
+    const storedIsWord =
+      storedMime.includes('wordprocessingml') || storedName.endsWith('.docx') || storedName.endsWith('.doc')
+    if (shouldBeWord && !storedIsWord) {
+      return res.status(409).json({ message: '当前项目使用 Word 简历模板，请重新生成申朴简历。' })
     }
     const abs = resolveResumeStorageAbsPath(r.storage_path)
     if (!abs) return res.status(404).json({ message: '申朴简历文件不存在或已被移除' })
@@ -6916,29 +7356,36 @@ app.post('/api/admin/resume-screenings/:id/shenpu-resume', async (req, res) => {
   const screeningId = Math.floor(idNum)
   try {
     await ensureShenpuResumeTable()
-    const [existingRows] = await mysqlPool.query<RowDataPacket[]>(
-      `SELECT status FROM resume_screening_shenpu_resumes WHERE screening_id=? LIMIT 1`,
-      [screeningId]
-    )
-    const existingStatus = String((existingRows?.[0] as { status?: unknown } | undefined)?.status || '')
-    if (existingStatus === 'generating') {
-      return res.status(202).json({
-        data: { screeningId: String(screeningId), status: 'generating', progress: 10, stage: '准备画像数据' }
-      })
-    }
+    await ensureProjectsShenpuTemplateColumns()
     const shenpuJobJoin = resumeScreeningsJobCodeMatchSql('j', 's')
     const [rows] = await mysqlPool.query<RowDataPacket[]>(
       `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
               s.status, s.report_summary, s.evaluation_json, s.resume_plaintext,
-              j.title AS job_title, j.department, j.jd_text
+              j.title AS job_title, j.department, j.jd_text,
+              p.shenpu_resume_template_file_name, p.shenpu_resume_template_mime_type,
+              p.shenpu_resume_template_size_bytes, p.shenpu_resume_template_storage_path,
+              p.shenpu_resume_template_uploaded_at
        FROM resume_screenings s
        LEFT JOIN jobs j ON ${shenpuJobJoin}
+       LEFT JOIN projects p ON ${resumeScreeningsProjectIdMatchSql('p', 'j')}
        WHERE s.id=? LIMIT 1`,
       [screeningId]
     )
     if (!rows.length) return res.status(404).json({ message: '简历筛查记录不存在' })
     const row = rows[0] as Record<string, unknown>
+    const projectTemplate = await loadProjectShenpuResumeTemplate(row)
+    const [existingRows] = await mysqlPool.query<RowDataPacket[]>(
+      `SELECT status, file_name, mime_type FROM resume_screening_shenpu_resumes WHERE screening_id=? LIMIT 1`,
+      [screeningId]
+    )
+    const existing = existingRows?.[0] as { status?: unknown; file_name?: unknown; mime_type?: unknown } | undefined
+    const existingStatus = String(existing?.status || '')
+    if (existingStatus === 'generating') {
+      return res.status(202).json({
+        data: { screeningId: String(screeningId), status: 'generating', progress: 10, stage: '准备画像数据' }
+      })
+    }
     const resumeText = String(row.resume_plaintext || '').trim()
     if (!resumeText) {
       return res.status(422).json({ message: '该记录缺少原始简历正文，无法生成申朴标准简历，请重新上传可解析的简历。' })
@@ -6958,7 +7405,8 @@ app.post('/api/admin/resume-screenings/:id/shenpu-resume', async (req, res) => {
       department: row.department == null ? null : String(row.department || ''),
       jdText: String(row.jd_text || ''),
       resumeText: resumeText.slice(0, RESUME_PLAINTEXT_MAX_SAVE),
-      result
+      result,
+      template: projectTemplate
     })
     return res.status(202).json({
       data: { screeningId: String(screeningId), status: 'generating', progress: 10, stage: '准备画像数据' }
@@ -7791,6 +8239,7 @@ async function processResumeScreenTask(params: {
       })
     } catch (e: unknown) {
       const code = (e as { code?: string })?.code
+      const duplicate = e instanceof ResumeScreenTaskError && e.statusCode === 409
       const message =
         e instanceof ResumeScreenTaskError
           ? e.message
@@ -7799,9 +8248,10 @@ async function processResumeScreenTask(params: {
             : 'screening failed'
       flowLog('resume-screen', false, e instanceof Error ? e.message : 'failed')
       patchResumeScreenTask(taskId, {
-        status: 'failed',
-        uploadStage: '原始简历提取失败',
-        error: message,
+        status: duplicate ? 'duplicate' : 'failed',
+        uploadProgress: duplicate ? 100 : undefined,
+        uploadStage: duplicate ? '该简历已存在，无需重复上传' : '原始简历提取失败',
+        error: duplicate ? undefined : message,
         message,
         ...(e instanceof ResumeScreenTaskError && e.extra ? e.extra : {})
       })

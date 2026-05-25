@@ -61,6 +61,11 @@ CREATE TABLE IF NOT EXISTS projects (
   end_date DATE NULL,
   description TEXT NULL,
   member_count INT UNSIGNED NOT NULL DEFAULT 0,
+  shenpu_resume_template_file_name VARCHAR(255) NULL,
+  shenpu_resume_template_mime_type VARCHAR(128) NULL,
+  shenpu_resume_template_size_bytes BIGINT UNSIGNED NULL,
+  shenpu_resume_template_storage_path VARCHAR(512) NULL,
+  shenpu_resume_template_uploaded_at TIMESTAMP NULL DEFAULT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id)
