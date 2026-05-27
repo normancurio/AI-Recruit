@@ -4,7 +4,17 @@
 
 cd /Users/jsonhe/shenpu-project/AI-Recruit
 
-2. 确认当前本地配置使用的是本地环境数据库，不是线上库：
+2. 先确认 Node/npm 使用本项目可用的 Node 版本：
+
+推荐：
+
+export PATH="/Users/jsonhe/.nvm/versions/node/v26.1.0/bin:$PATH"
+node -v
+npm -v
+
+node -v 应显示 v26.1.0 左右。不要用 Node 24 启动 API；当前 pdf-parse 在 Node 24 下可能报 DOMMatrix 相关错误，导致 API 起不来。
+
+3. 确认当前本地配置使用的是本地环境数据库，不是线上库：
 
 .env 中应保持：
 MYSQL_HOST="100.79.134.17"
@@ -14,7 +24,7 @@ ADMIN_UI_PORT="3010"
 ADMIN_API_UPSTREAM="http://127.0.0.1:3011"
 MINIAPP_API_PUBLIC_URL=http://127.0.0.1:3011
 
-3. 推荐只用这一条命令启动后台本地项目：
+4. 推荐只用这一条命令启动完整后台本地项目：
 
 npm run dev:full
 
@@ -22,12 +32,31 @@ npm run dev:full
 - API: http://127.0.0.1:3011
 - 后台: http://localhost:3010
 
-4. 启动后检查：
+如果只改了服务端/API，也可以只启动 API watch：
+
+npm run dev:api
+
+这会以 tsx watch server/index.ts 启动后端。后续修改 server/index.ts 会自动重启 API，避免测试到旧进程。
+
+5. 启动后检查：
 
 curl http://127.0.0.1:3011/api/health
 打开 http://localhost:3010/#menu=resume-screening
 
-5. 停止：
+6. 每次改完后端代码后，必须确认 3011 当前进程是 watch 模式：
+
+lsof -iTCP:3011 -sTCP:LISTEN -n -P
+ps -p $(lsof -tiTCP:3011 -sTCP:LISTEN | head -1) -o pid,lstart,command
+
+command 里应该能看到：
+
+tsx watch server/index.ts
+
+如果不是 watch 模式，或者启动时间早于本次代码修改时间，就先重启 API：
+
+npm run dev:api
+
+7. 停止：
 
 在运行 npm run dev:full 的终端按 Ctrl+C。
 
@@ -35,3 +64,4 @@ curl http://127.0.0.1:3011/api/health
 - 本地测试不要连接线上数据库。
 - 不建议再用 screen/nohup 启动这个项目，避免前端拿到旧进程或旧代码。
 - 如果 3010 或 3011 被占用，先关闭占用端口的旧进程，再重新执行 npm run dev:full。
+- Codex/Cursor 改了 server/index.ts 后，如果没有确认 3011 进程已经重启，不要直接在页面验证结果；否则很可能测到旧逻辑。

@@ -8279,7 +8279,8 @@ function ResumeScreeningView({
   const [uploadHint, setUploadHint] = useState('');
   const [uploadProjectFilter, setUploadProjectFilter] = useState('');
   const [uploadJobCode, setUploadJobCode] = useState('');
-  const [uploadTask, setUploadTask] = useState<ResumeUploadTask | null>(null);
+  const [uploadTasks, setUploadTasks] = useState<ResumeUploadTask[]>([]);
+  const uploadTask = uploadTasks[0] || null;
   const [uploadTaskJobLabel, setUploadTaskJobLabel] = useState('');
   const [uploadTaskProjectLabel, setUploadTaskProjectLabel] = useState('');
   const duplicateUploadNotifiedTaskRef = useRef('');
@@ -8543,28 +8544,39 @@ function ResumeScreeningView({
     return () => window.clearInterval(timer);
   }, [loadScreenings, resumes]);
 
+  const activeUploadTaskIds = useMemo(
+    () =>
+      uploadTasks
+        .filter((task) => task.status !== 'failed' && task.status !== 'duplicate' && task.status !== 'done')
+        .map((task) => task.taskId)
+        .join('|'),
+    [uploadTasks]
+  );
+
   useEffect(() => {
-    if (!apiBase || !hasToken || !uploadTask?.taskId) return;
-    if (uploadTask.status === 'failed' || uploadTask.status === 'duplicate') return;
-    if (uploadTask.status === 'done') return;
+    if (!apiBase || !hasToken || !activeUploadTaskIds) return;
     let stopped = false;
     const poll = () => {
-      void miniappApiFetch(`/api/admin/resume-screen/tasks/${encodeURIComponent(uploadTask.taskId)}`)
-        .then(async (r) => {
-          const j = (await r.json().catch(() => ({}))) as { data?: ResumeUploadTask; message?: string };
-          if (!r.ok || !j.data) throw new Error(j.message || '任务进度加载失败');
-          if (stopped) return;
-          setUploadTask(j.data);
-          if (j.data.status === 'done') loadScreenings();
-        })
-        .catch((e: unknown) => {
-          if (stopped) return;
-          setUploadTask((prev) =>
-            prev && prev.taskId === uploadTask.taskId
-              ? { ...prev, status: 'failed', error: e instanceof Error ? e.message : '任务进度加载失败' }
-              : prev
-          );
-        });
+      for (const taskId of activeUploadTaskIds.split('|').filter(Boolean)) {
+        void miniappApiFetch(`/api/admin/resume-screen/tasks/${encodeURIComponent(taskId)}`)
+          .then(async (r) => {
+            const j = (await r.json().catch(() => ({}))) as { data?: ResumeUploadTask; message?: string };
+            if (!r.ok || !j.data) throw new Error(j.message || '任务进度加载失败');
+            if (stopped) return;
+            setUploadTasks((prev) => prev.map((task) => (task.taskId === taskId ? j.data! : task)));
+            if (j.data.status === 'done') loadScreenings();
+          })
+          .catch((e: unknown) => {
+            if (stopped) return;
+            setUploadTasks((prev) =>
+              prev.map((task) =>
+                task.taskId === taskId
+                  ? { ...task, status: 'failed', error: e instanceof Error ? e.message : '任务进度加载失败' }
+                  : task
+              )
+            );
+          });
+      }
     };
     poll();
     const timer = window.setInterval(poll, 1800);
@@ -8572,19 +8584,20 @@ function ResumeScreeningView({
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [apiBase, hasToken, loadScreenings, uploadTask?.taskId, uploadTask?.status]);
+  }, [apiBase, hasToken, loadScreenings, activeUploadTaskIds]);
 
   useEffect(() => {
-    if (!uploadTask || uploadTask.status !== 'duplicate') return;
-    if (duplicateUploadNotifiedTaskRef.current === uploadTask.taskId) return;
-    duplicateUploadNotifiedTaskRef.current = uploadTask.taskId;
+    const duplicate = uploadTasks.find((task) => task.status === 'duplicate');
+    if (!duplicate) return;
+    if (duplicateUploadNotifiedTaskRef.current === duplicate.taskId) return;
+    duplicateUploadNotifiedTaskRef.current = duplicate.taskId;
+    setUploadTasks((prev) => prev.filter((t) => t.taskId !== duplicate.taskId));
     setUploadModalOpen(false);
     setScreeningAdminMsg({
       title: '简历已存在',
-      message: uploadTask.message || '该岗位下已有这份简历，无需重复上传。'
+      message: duplicate.message || '该岗位下已有这份简历，无需重复上传。'
     });
-    setUploadTask(null);
-  }, [uploadTask]);
+  }, [uploadTasks]);
 
   useEffect(() => {
     if (!apiBase || !hasToken) {
@@ -9093,7 +9106,6 @@ function ResumeScreeningView({
     const selectedJob = jobsForResumeUpload.find((j) => j.job_code === uploadJobCode);
     const selectedProject = projectFilterOptions.find((p) => p.id === uploadProjectFilter.trim());
     setUploadHint('');
-    setUploadTask(null);
     setUploadTaskJobLabel(selectedJob ? `${selectedJob.title} (${selectedJob.job_code})` : uploadJobCode);
     setUploadTaskProjectLabel(selectedProject?.name || '');
     setUploading(true);
@@ -9105,7 +9117,7 @@ function ResumeScreeningView({
         const j = (await r.json()) as { data?: ResumeUploadTask; message?: string }
         if (!r.ok) throw new Error(j.message || 'upload failed');
         if (!j.data?.taskId) throw new Error('上传任务创建失败');
-        setUploadTask(j.data);
+        setUploadTasks((prev) => [j.data!, ...prev.filter((task) => task.taskId !== j.data!.taskId)]);
         setUploadHint('');
         setUploadModalOpen(false);
       })
@@ -9124,52 +9136,56 @@ function ResumeScreeningView({
   const uploadTaskDuplicate = uploadTask?.status === 'duplicate';
   const uploadTaskAllDone = uploadTask?.status === 'done';
   const displayResumes = useMemo(() => {
-    if (!uploadTask) return resumes;
-    const decorated = resumes.map((r) =>
-      uploadTask.screeningId && String(r.id) === String(uploadTask.screeningId)
-        ? {
-            ...r,
-            uploadTaskStatus: uploadTask.status === 'done' ? undefined : uploadTask.status,
-            uploadTaskProgress: uploadTask.uploadProgress,
-            uploadTaskStage: uploadTask.error || uploadTask.uploadStage,
-            uploadTaskFileName: uploadTask.fileName
-          } as Resume
-        : r
-    );
-    const hasRealRow = Boolean(uploadTask.screeningId && decorated.some((r) => String(r.id) === String(uploadTask.screeningId)));
-    const stillVisible =
-      (!uploadTask.screeningId || !hasRealRow) &&
-      uploadTask.status !== 'done' &&
-      uploadTask.status !== 'duplicate';
-    if (!stillVisible) return decorated;
-    const placeholder: Resume = {
-      id: `upload-task:${uploadTask.taskId}`,
-      name: uploadTask.status === 'duplicate' ? '简历已存在' : '简历上传中',
-      phone: undefined,
-      uploaderUsername: authProfile?.username || undefined,
-      job: uploadTaskJobLabel || uploadTask.jobCode,
-      jobCode: uploadTask.jobCode,
-      projectName: uploadTaskProjectLabel || undefined,
-      matchScore: 0,
-      status:
-        uploadTask.status === 'duplicate'
-          ? uploadTask.message || uploadTask.uploadStage || '该岗位下已存在该简历'
-          : uploadTask.error || uploadTask.uploadStage || '原始简历上传提取中',
-      flowStage: uploadTask.status === 'duplicate' ? '重复提示' : '简历上传中',
-      uploadTime: '刚刚',
-      uploadTimeFull: uploadTask.fileName || (uploadTask.status === 'duplicate' ? '重复上传' : '简历上传中'),
-      fileName: uploadTask.fileName,
-      hasOriginalFile: false,
-      shenpuResumeStatus: 'missing',
-      shenpuResumeProgress: 0,
-      shenpuResumeStage: '未生成，可在列表点击生成',
-      uploadTaskStatus: uploadTask.status,
-      uploadTaskProgress: uploadTask.uploadProgress,
-      uploadTaskStage: uploadTask.error || uploadTask.uploadStage,
-      uploadTaskFileName: uploadTask.fileName
-    };
-    return [placeholder, ...decorated];
-  }, [authProfile?.username, resumes, uploadTask, uploadTaskJobLabel, uploadTaskProjectLabel]);
+    if (uploadTasks.length === 0) return resumes;
+    let decorated = resumes;
+    const placeholders: Resume[] = [];
+    for (const task of uploadTasks) {
+      decorated = decorated.map((r) =>
+        task.screeningId && String(r.id) === String(task.screeningId)
+          ? {
+              ...r,
+              uploadTaskStatus: task.status === 'done' ? undefined : task.status,
+              uploadTaskProgress: task.uploadProgress,
+              uploadTaskStage: task.error || task.uploadStage,
+              uploadTaskFileName: task.fileName
+            } as Resume
+          : r
+      );
+      const hasRealRow = Boolean(task.screeningId && decorated.some((r) => String(r.id) === String(task.screeningId)));
+      const stillVisible =
+        (!task.screeningId || !hasRealRow) &&
+        task.status !== 'done' &&
+        task.status !== 'duplicate';
+      if (!stillVisible) continue;
+      placeholders.push({
+        id: `upload-task:${task.taskId}`,
+        name: task.status === 'duplicate' ? '简历已存在' : '简历上传中',
+        phone: undefined,
+        uploaderUsername: authProfile?.username || undefined,
+        job: task.jobCode === uploadTask?.jobCode && uploadTaskJobLabel ? uploadTaskJobLabel : task.jobCode,
+        jobCode: task.jobCode,
+        projectName: task.jobCode === uploadTask?.jobCode ? uploadTaskProjectLabel || undefined : undefined,
+        matchScore: 0,
+        status:
+          task.status === 'duplicate'
+            ? task.message || task.uploadStage || '该岗位下已存在该简历'
+            : task.error || task.uploadStage || '原始简历上传提取中',
+        flowStage: task.status === 'duplicate' ? '重复提示' : '简历上传中',
+        uploadTime: '刚刚',
+        uploadTimeFull: task.fileName || (task.status === 'duplicate' ? '重复上传' : '简历上传中'),
+        fileName: task.fileName,
+        hasOriginalFile: false,
+        shenpuResumeStatus: 'missing',
+        shenpuResumeProgress: 0,
+        shenpuResumeStage: '未生成，可在列表点击生成',
+        uploadTaskStatus: task.status,
+        uploadTaskProgress: task.uploadProgress,
+        uploadTaskStage: task.error || task.uploadStage,
+        uploadTaskFileName: task.fileName
+      });
+    }
+    return [...placeholders, ...decorated];
+  }, [authProfile?.username, resumes, uploadTasks, uploadTask, uploadTaskJobLabel, uploadTaskProjectLabel]);
   const hasDisplayResumes = displayResumes.length > 0;
 
   const screeningFilterCtrl =
@@ -9440,7 +9456,6 @@ function ResumeScreeningView({
                 setUploadJobCode('');
                 setUploadModalOpen(true);
                 setUploadHint('');
-                setUploadTask(null);
               }}
               disabled={
                 !apiBase ||
@@ -9719,16 +9734,28 @@ function ResumeScreeningView({
                                     未生成
                                   </span>
                                 ) : resume.shenpuResumeStatus === 'ready' ? (
-                                  <button
-                                    type="button"
-                                    disabled={fileBusyId === resume.id}
-                                    onClick={() => void downloadShenpuResume(resume)}
-                                    className="inline-flex items-center gap-1.5 rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 font-semibold text-blue-700 shadow-sm transition hover:border-blue-300 hover:bg-blue-100 disabled:opacity-60"
-                                    title="下载申朴简历"
-                                  >
-                                    <Download className="h-3.5 w-3.5" aria-hidden />
-                                    可下载
-                                  </button>
+                                  <div className="inline-flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      disabled={fileBusyId === resume.id}
+                                      onClick={() => void downloadShenpuResume(resume)}
+                                      className="inline-flex items-center gap-1.5 rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 font-semibold text-blue-700 shadow-sm transition hover:border-blue-300 hover:bg-blue-100 disabled:opacity-60"
+                                      title="下载申朴简历"
+                                    >
+                                      <Download className="h-3.5 w-3.5" aria-hidden />
+                                      可下载
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={fileBusyId === resume.id}
+                                      onClick={() => void generateShenpuResume(resume)}
+                                      className="inline-flex items-center rounded-full border border-slate-200 bg-white px-1.5 py-1 text-slate-500 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-60"
+                                      title="重新生成申朴简历（覆盖现有文件）"
+                                      aria-label="重新生成申朴简历"
+                                    >
+                                      <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+                                    </button>
+                                  </div>
                                 ) : resume.shenpuResumeStatus === 'generating' ? (
                                   <div
                                     className="min-w-[7.25rem] rounded-lg border border-amber-200 bg-amber-50 px-2 py-1.5 text-amber-800"
@@ -10088,18 +10115,18 @@ function ResumeScreeningView({
                   onChange={(e) => {
                     const f = e.target.files?.[0];
                     e.target.value = '';
-                    if (!uploadTaskActive) runUpload(f || null);
+                    runUpload(f || null);
                   }}
                 />
                 <div
                   role="button"
                   tabIndex={0}
                   onKeyDown={(e) => {
-                    if (!uploading && !uploadTaskActive && (e.key === 'Enter' || e.key === ' ')) {
+                    if (!uploading && (e.key === 'Enter' || e.key === ' ')) {
                       fileInputModalRef.current?.click();
                     }
                   }}
-                  onClick={() => !uploading && !uploadTaskActive && fileInputModalRef.current?.click()}
+                  onClick={() => !uploading && fileInputModalRef.current?.click()}
                   onDragOver={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
@@ -10107,12 +10134,12 @@ function ResumeScreeningView({
                   onDrop={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    if (uploading || uploadTaskActive) return;
+                    if (uploading) return;
                     const f = e.dataTransfer.files?.[0];
                     runUpload(f || null);
                   }}
                   className={`flex min-h-[280px] flex-1 flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 px-4 py-8 text-center transition-colors group ${
-                    uploading || uploadTaskActive
+                    uploading
                       ? 'cursor-wait opacity-60'
                       : 'cursor-pointer hover:border-indigo-400 hover:bg-slate-50'
                   }`}
@@ -10124,7 +10151,7 @@ function ResumeScreeningView({
                     {uploading
                       ? '正在提交任务…'
                       : uploadTaskActive
-                        ? '后台处理中，可关闭弹窗继续操作'
+                        ? '后台处理中，可继续上传下一份'
                         : '点击或拖拽简历到此处'}
                   </p>
                   <p className="mt-0.5 text-[11px] leading-snug text-slate-500">
