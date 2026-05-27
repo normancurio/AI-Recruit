@@ -62,11 +62,21 @@ Production server facts verified on 2026-05-21:
   - `adminrecruit.cisetech.com` -> `http://127.0.0.1:3010`.
 - Admin runtime env must keep `MINIAPP_API_PUBLIC_URL=https://mind.cisetech.com` and `ADMIN_API_UPSTREAM=http://api:3011`.
 
+The production server cannot reliably run `git pull` because outbound GitHub access may hang. Do not use `git pull` in production release steps. Sync code from the clean local `main` branch by uploading a Git bundle, then fast-forward the server repo:
+
+```bash
+cd /Users/jsonhe/shenpu-project/AI-Recruit
+bundle=/tmp/ai-recruit-main-$(git rev-parse --short HEAD).bundle
+rm -f "$bundle"
+git bundle create "$bundle" main
+scp -i /Users/jsonhe/.ssh/health "$bundle" root@47.102.85.156:/tmp/
+ssh -i /Users/jsonhe/.ssh/health root@47.102.85.156 "cd /opt/AI-Recruit && git fetch /tmp/$(basename "$bundle") main && git merge --ff-only FETCH_HEAD && rm -f /tmp/$(basename "$bundle")"
+```
+
 When the user asks to "发布 api":
 
 ```bash
 cd /opt/AI-Recruit
-git pull
 docker compose build api
 docker compose up -d --no-deps api
 curl -sS https://mind.cisetech.com/api/health
@@ -77,7 +87,6 @@ When the user asks to "发布后台" or "发布 admin":
 
 ```bash
 cd /opt/AI-Recruit
-git pull
 docker compose build admin
 docker compose up -d --no-deps admin
 curl -sS -I https://adminrecruit.cisetech.com/
@@ -88,7 +97,6 @@ When the user asks to publish both API and admin:
 
 ```bash
 cd /opt/AI-Recruit
-git pull
 docker compose build api admin
 docker compose up -d api admin
 curl -sS https://mind.cisetech.com/api/health
@@ -105,5 +113,5 @@ Release safety rules:
 - Do not run global Docker cleanup/stop/remove commands such as `docker system prune`, broad `docker stop`, or broad `docker rm`.
 - Do not touch other Docker compose projects or unrelated services on the server.
 - Do not reload Nginx unless domain, certificate, port, or `proxy_pass` config changed.
-- If `git pull` hangs because the server cannot reach GitHub, use a local Git bundle from the clean local `main` branch and fast-forward the server repo instead of copying loose files.
+- Never run `git pull` on the production server during release; use the local Git bundle upload flow above.
 - If `git status` on the server shows only untracked build-output fragments such as `=`, `CACHED`, `ERROR`, `[admin]`, `[api]`, `exporting`, `naming`, `reading`, `resolve`, `transferring`, or `unpacking`, those are safe to remove. Preserve `backups/`.
