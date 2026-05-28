@@ -595,14 +595,14 @@ function saveResumeOriginalFile(file: { buffer: Buffer; originalname?: string; m
   }
 }
 
-function saveGeneratedResumeFile(buffer: Buffer, preferredName: string, ext: '.pdf' | '.docx'): {
+function saveGeneratedResumeFile(buffer: Buffer, preferredName: string, ext: '.pdf' | '.docx' | '.xlsx'): {
   storageKey: string
   absPath: string
   sizeBytes: number
   originalName: string
 } {
   ensureResumeStorageDir()
-  const safeExt = ext === '.docx' ? '.docx' : '.pdf'
+  const safeExt = ext === '.docx' || ext === '.xlsx' ? ext : '.pdf'
   const originalName =
     normalizeMultipartFilename(preferredName || `shenpu-resume${safeExt}`).replace(/\.[^.]+$/, '').slice(0, 220) +
     safeExt
@@ -2900,8 +2900,8 @@ function sanitizeShenpuResumeDocument(raw: unknown, fallback: ShenpuResumeDocume
       piccProjectYears: personal('piccProjectYears', 40)
     },
     coreSkills: safeTextArray(obj.coreSkills, 12).length ? safeTextArray(obj.coreSkills, 12) : fallback.coreSkills,
-    workExperiences:
-      arr(obj.workExperiences)
+    workExperiences: (() => {
+      const parsed = arr(obj.workExperiences)
         .map((x) => {
           const r = x && typeof x === 'object' ? (x as Record<string, unknown>) : {}
           return {
@@ -2912,9 +2912,11 @@ function sanitizeShenpuResumeDocument(raw: unknown, fallback: ShenpuResumeDocume
           }
         })
         .filter((x) => x.company || x.title || x.highlights.length)
-        .slice(0, 20) || fallback.workExperiences,
-    projectExperiences:
-      arr(obj.projectExperiences)
+        .slice(0, 20)
+      return parsed.length ? parsed : fallback.workExperiences
+    })(),
+    projectExperiences: (() => {
+      const parsed = arr(obj.projectExperiences)
         .map((x) => {
           const r = x && typeof x === 'object' ? (x as Record<string, unknown>) : {}
           return {
@@ -2925,9 +2927,11 @@ function sanitizeShenpuResumeDocument(raw: unknown, fallback: ShenpuResumeDocume
           }
         })
         .filter((x) => x.name || x.role || x.highlights.length)
-        .slice(0, 20) || fallback.projectExperiences,
-    educationExperiences:
-      arr(obj.educationExperiences)
+        .slice(0, 20)
+      return parsed.length ? parsed : fallback.projectExperiences
+    })(),
+    educationExperiences: (() => {
+      const parsed = arr(obj.educationExperiences)
         .map((x) => {
           const r = x && typeof x === 'object' ? (x as Record<string, unknown>) : {}
           return {
@@ -2938,7 +2942,9 @@ function sanitizeShenpuResumeDocument(raw: unknown, fallback: ShenpuResumeDocume
           }
         })
         .filter((x) => x.school || x.major || x.degree)
-        .slice(0, 3) || fallback.educationExperiences,
+        .slice(0, 3)
+      return parsed.length ? parsed : fallback.educationExperiences
+    })(),
     strengths: safeTextArray(obj.strengths, 5).length ? safeTextArray(obj.strengths, 5) : fallback.strengths,
     risks: safeTextArray(obj.risks, 5).length ? safeTextArray(obj.risks, 5) : fallback.risks,
     clientRequirements: safeTextArray(obj.clientRequirements, 8).length
@@ -3136,14 +3142,49 @@ function splitJdSections(jdText: string): { clientRequirements: string[]; respon
   return { clientRequirements, responsibilities }
 }
 
+function extractProjectNamesFromResumeText(text: string, maxCount = 6): string[] {
+  const src = String(text || '').replace(/\r\n/g, '\n')
+  const out: string[] = []
+  const push = (v: string) => {
+    const t = v.replace(/\s+/g, ' ').trim()
+    if (!t) return
+    if (t.length < 2 || t.length > 80) return
+    if (out.some((x) => x === t)) return
+    out.push(t)
+  }
+  for (const m of src.matchAll(/(?:项目名称|项目)\s*[:：]\s*([^\n；;，,]{2,80})/g)) {
+    push(String(m[1] || ''))
+    if (out.length >= maxCount) break
+  }
+  if (out.length < maxCount) {
+    const lines = src
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+    for (const line of lines) {
+      if (!/项目/.test(line)) continue
+      if (/项目经历|项目经验|项目描述|个人承担|职责|技术栈|工作内容/.test(line)) continue
+      push(line.replace(/^[\d一二三四五六七八九十]+[、.）)]\s*/, '').replace(/^[-*●■]\s*/, ''))
+      if (out.length >= maxCount) break
+    }
+  }
+  return out.slice(0, maxCount)
+}
+
 function fallbackShenpuResumeDocument(params: {
   candidateName: string
   jobTitle: string
   jdText?: string
+  resumeText?: string
   result: ResumeScreeningAiResult
   evaluationJson?: Record<string, unknown>
 }): ShenpuResumeDocument {
   const e = params.evaluationJson || {}
+  const profile =
+    e.candidate_profile && typeof e.candidate_profile === 'object'
+      ? (e.candidate_profile as Record<string, unknown>)
+      : {}
+  const pText = (k: string, maxLen: number) => String(profile[k] || '').trim().slice(0, maxLen)
   const strengths = safeTextArray(e.strengths, 5)
   const riskRaw = Array.isArray(e.risks) ? e.risks : []
   const risks = riskRaw
@@ -3152,6 +3193,38 @@ function fallbackShenpuResumeDocument(params: {
     .filter(Boolean)
     .slice(0, 5)
   const jdSections = splitJdSections(params.jdText || '')
+  const projectNames = extractProjectNamesFromResumeText(params.resumeText || '', 6)
+  const fallbackWorkCompany = pText('current_company', 80)
+  const fallbackWorkTitle = pText('job_title', 80) || params.jobTitle || ''
+  const fallbackWorkYears = pText('work_experience_years', 20)
+  const workExperiences =
+    fallbackWorkCompany || fallbackWorkTitle
+      ? [
+          {
+            company: fallbackWorkCompany,
+            title: fallbackWorkTitle,
+            period: fallbackWorkYears ? `${fallbackWorkYears}年` : '',
+            highlights: []
+          }
+        ]
+      : []
+  const educationExperiences =
+    pText('school', 80) || pText('major', 80) || pText('education', 60)
+      ? [
+          {
+            school: pText('school', 80),
+            major: pText('major', 80),
+            degree: pText('education', 60),
+            period: ''
+          }
+        ]
+      : []
+  const projectExperiences = projectNames.map((name) => ({
+    name,
+    role: fallbackWorkTitle,
+    period: '',
+    highlights: []
+  }))
   return {
     headline: `${params.jobTitle || '目标岗位'}候选人`,
     professionalSummary: params.result.summary || '候选人信息已完成结构化整理，建议结合原始简历进一步复核。',
@@ -3161,18 +3234,18 @@ function fallbackShenpuResumeDocument(params: {
       ethnicity: '',
       politicalStatus: '',
       householdRegistration: '',
-      address: '',
-      email: '',
-      graduationDate: '',
+      address: pText('current_address', 160),
+      email: pText('email', 120),
+      graduationDate: pText('graduation_date', 40),
       targetPosition: params.jobTitle || '',
-      itYears: '',
+      itYears: fallbackWorkYears ? `${fallbackWorkYears}年` : '',
       insuranceYears: '',
       piccProjectYears: ''
     },
-    coreSkills: strengths.slice(0, 6),
-    workExperiences: [],
-    projectExperiences: [],
-    educationExperiences: [],
+    coreSkills: strengths.slice(0, 6).length ? strengths.slice(0, 6) : safeTextArray(e.skills, 8),
+    workExperiences,
+    projectExperiences,
+    educationExperiences,
     strengths,
     risks,
     clientRequirements: jdSections.clientRequirements,
@@ -3217,6 +3290,7 @@ async function runShenpuResumeWithAi(params: {
     candidateName: params.candidateName,
     jobTitle: params.jobTitle,
     jdText: params.jdText,
+    resumeText: params.resumeText,
     result: params.result,
     evaluationJson: parsedEval
   })
@@ -3641,12 +3715,74 @@ type ProjectShenpuResumeTemplate = {
   text: string
 }
 
+type ShenpuTemplateKind = 'word' | 'xlsx' | 'pdf'
+
+function templateKindFromFile(fileName: string, mimeType: string): ShenpuTemplateKind {
+  const lower = String(fileName || '').toLowerCase()
+  const mime = String(mimeType || '').toLowerCase()
+  if (
+    lower.endsWith('.docx') ||
+    lower.endsWith('.doc') ||
+    mime.includes('wordprocessingml') ||
+    mime.includes('msword')
+  ) {
+    return 'word'
+  }
+  if (
+    lower.endsWith('.xlsx') ||
+    lower.endsWith('.xls') ||
+    mime.includes('spreadsheetml') ||
+    mime.includes('ms-excel') ||
+    mime.includes('excel')
+  ) {
+    return 'xlsx'
+  }
+  return 'pdf'
+}
+
+function templateKindFromTemplate(template?: ProjectShenpuResumeTemplate | null): ShenpuTemplateKind {
+  if (!template) return 'pdf'
+  return templateKindFromFile(template.fileName, template.mimeType)
+}
+
 async function readProjectTemplateText(absPath: string, mimeType: string, fileName: string): Promise<string> {
   try {
-    const lower = String(fileName || absPath).toLowerCase()
-    if (lower.endsWith('.docx') || mimeType.includes('wordprocessingml')) {
+    const kind = templateKindFromFile(fileName || absPath, mimeType)
+    if (kind === 'word') {
       const result = await mammoth.extractRawText({ path: absPath })
       return String(result.value || '').trim().slice(0, 12000)
+    }
+    if (kind === 'xlsx') {
+      const ExcelJS = requireCjs('exceljs')
+      const wb = new ExcelJS.Workbook()
+      await wb.xlsx.readFile(absPath)
+      const lines: string[] = []
+      for (const ws of wb.worksheets) {
+        lines.push(`[工作表] ${ws.name}`)
+        for (let r = 1; r <= ws.rowCount; r += 1) {
+          const row = ws.getRow(r)
+          const cells: string[] = []
+          for (let c = 1; c <= ws.columnCount; c += 1) {
+            const raw = row.getCell(c).value
+            const text =
+              raw == null
+                ? ''
+                : typeof raw === 'object' && raw && 'richText' in raw
+                  ? String(
+                      Array.isArray((raw as { richText?: Array<{ text?: string }> }).richText)
+                        ? (raw as { richText?: Array<{ text?: string }> }).richText!.map((x) => x?.text || '').join('')
+                        : ''
+                    )
+                  : String(raw)
+            const compact = text.replace(/\s+/g, ' ').trim()
+            if (compact) cells.push(compact)
+          }
+          if (cells.length) lines.push(cells.join(' | '))
+          if (lines.join('\n').length > 14000) break
+        }
+        if (lines.join('\n').length > 14000) break
+      }
+      return lines.join('\n').slice(0, 12000)
     }
     return ''
   } catch (e) {
@@ -3772,10 +3908,7 @@ async function extractTemplateSectionSamples(
 }
 
 function isWordResumeTemplate(template?: ProjectShenpuResumeTemplate | null): boolean {
-  if (!template) return false
-  const lower = String(template.fileName || '').toLowerCase()
-  const mime = String(template.mimeType || '').toLowerCase()
-  return lower.endsWith('.docx') || lower.endsWith('.doc') || mime.includes('wordprocessingml') || mime.includes('msword')
+  return templateKindFromTemplate(template) === 'word'
 }
 
 async function renderProjectTemplateResumeDocxBuffer(params: {
@@ -4436,6 +4569,121 @@ function renderProjectTemplateResumeHtml(params: {
   </body></html>`
 }
 
+async function renderProjectTemplateResumeXlsxBuffer(params: {
+  candidateName: string
+  candidatePhone?: string | null
+  jobTitle: string
+  doc: ShenpuResumeDocument
+  templateAbsPath: string
+}): Promise<Buffer> {
+  const ExcelJS = requireCjs('exceljs')
+  const wb = new ExcelJS.Workbook()
+  await wb.xlsx.readFile(params.templateAbsPath)
+  const ws = wb.worksheets[0]
+  if (!ws) throw new Error('Excel 模板缺少工作表')
+  const info = params.doc.personalInfo
+  const firstEdu = params.doc.educationExperiences[0]
+  const cellText = (cell: unknown): string => {
+    const v = (cell as { value?: unknown })?.value
+    if (v == null) return ''
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v)
+    if (v instanceof Date) return v.toISOString().slice(0, 10)
+    if (typeof v === 'object') {
+      const obj = v as Record<string, unknown>
+      if (Array.isArray(obj.richText)) {
+        return obj.richText
+          .map((x) => (x && typeof x === 'object' ? String((x as Record<string, unknown>).text || '') : ''))
+          .join('')
+      }
+      if (typeof obj.text === 'string') return obj.text
+      if (typeof obj.result === 'string') return obj.result
+      if (typeof obj.hyperlink === 'string' && typeof obj.text === 'string') return obj.text
+    }
+    return ''
+  }
+  const normalizeLabel = (v: unknown) =>
+    String(v ?? '')
+      .replace(/[：:\s\u3000【】\[\]（）()\/／\-—_]/g, '')
+      .toLowerCase()
+  const compact = (v: unknown) => String(v ?? '').replace(/\s+/g, ' ').trim()
+  const fieldValues = new Map<string, string>([
+    ['姓名', params.candidateName],
+    ['性别', ''],
+    ['出生年月', info.birthDate],
+    ['身份证号码', ''],
+    ['现工作职位', params.jobTitle || info.targetPosition || ''],
+    ['email', info.email],
+    ['联系电话', params.candidatePhone || ''],
+    ['工作年限', info.itYears],
+    ['金融相关工作年限', info.insuranceYears],
+    ['推荐级别', ''],
+    ['技能', (params.doc.coreSkills[0] || params.doc.strengths[0] || '').trim()],
+    ['学历', firstEdu?.degree || ''],
+    ['毕业学校', firstEdu?.school || ''],
+    ['毕业时间', info.graduationDate || firstEdu?.period || '']
+  ])
+  const workRows = params.doc.workExperiences.length ? params.doc.workExperiences : [{ company: '', period: '', title: '', highlights: [] }]
+  const projectRows = params.doc.projectExperiences.length
+    ? params.doc.projectExperiences
+    : [{ name: '', role: '', period: '', highlights: [] }]
+  let workIdx = 0
+  let projectHeaderIdx = 0
+  let projectDetailIdx = 0
+  let projectRoleIdx = 0
+  for (let r = 1; r <= ws.rowCount; r += 1) {
+    const row = ws.getRow(r)
+    const texts: string[] = []
+    for (let c = 1; c <= ws.columnCount; c += 1) texts.push(compact(cellText(row.getCell(c))))
+    const first = normalizeLabel(texts[0])
+    if (!first) continue
+    for (let c = 1; c < ws.columnCount; c += 1) {
+      const label = normalizeLabel(texts[c - 1])
+      const next = row.getCell(c + 1)
+      const value = fieldValues.get(label)
+      if (value !== undefined && compact(cellText(next)) !== label) {
+        next.value = value
+      }
+    }
+    if (first === '工作经历') {
+      const rowData = workRows[Math.min(workIdx, workRows.length - 1)]
+      if (normalizeLabel(texts[1]) !== '工作单位') {
+        if (ws.columnCount >= 2) row.getCell(2).value = rowData.company || ''
+        if (ws.columnCount >= 3) row.getCell(3).value = rowData.period || ''
+        if (ws.columnCount >= 4) row.getCell(4).value = rowData.period || ''
+        if (ws.columnCount >= 5) row.getCell(5).value = rowData.title || ''
+        workIdx += 1
+      }
+      continue
+    }
+    if (first === '项目经验') {
+      const rowData = projectRows[Math.min(projectHeaderIdx, projectRows.length - 1)]
+      const second = normalizeLabel(texts[1])
+      if (second === '项目名称') {
+        if (ws.columnCount >= 2) row.getCell(2).value = rowData.name || ''
+        if (ws.columnCount >= 3) row.getCell(3).value = rowData.period || ''
+        if (ws.columnCount >= 4) row.getCell(4).value = rowData.period || ''
+        if (ws.columnCount >= 5) row.getCell(5).value = rowData.role || ''
+        projectHeaderIdx += 1
+      } else if (second === '项目描述') {
+        const d = projectRows[Math.min(projectDetailIdx, projectRows.length - 1)]
+        const desc = d.highlights.length ? d.highlights.join('；') : d.name || ''
+        if (ws.columnCount >= 3) row.getCell(3).value = desc
+        if (ws.columnCount >= 4) row.getCell(4).value = desc
+        if (ws.columnCount >= 5) row.getCell(5).value = desc
+        projectDetailIdx += 1
+      } else if (second.includes('个人承担的角色及工作')) {
+        const d = projectRows[Math.min(projectRoleIdx, projectRows.length - 1)]
+        const roleDesc = [d.role, ...(d.highlights || []).slice(0, 2)].filter(Boolean).join('；')
+        if (ws.columnCount >= 3) row.getCell(3).value = roleDesc
+        if (ws.columnCount >= 4) row.getCell(4).value = roleDesc
+        if (ws.columnCount >= 5) row.getCell(5).value = roleDesc
+        projectRoleIdx += 1
+      }
+    }
+  }
+  return Buffer.from(await wb.xlsx.writeBuffer())
+}
+
 async function generateShenpuResumeForScreening(params: {
   screeningId: number
   candidateName: string
@@ -4476,8 +4724,9 @@ async function generateShenpuResumeForScreening(params: {
       `UPDATE resume_screening_shenpu_resumes SET progress_percent=70, progress_stage='排版画像图表' WHERE screening_id=?`,
       [params.screeningId]
     )
-    const wordTemplate = isWordResumeTemplate(params.template)
-    const generatedBuffer = wordTemplate
+    const templateKind = templateKindFromTemplate(params.template)
+    const generatedBuffer =
+      templateKind === 'word'
       ? await renderProjectTemplateResumeDocxBuffer({
           candidateName: params.candidateName,
           candidatePhone: params.candidatePhone,
@@ -4486,31 +4735,42 @@ async function generateShenpuResumeForScreening(params: {
           templateFileName: params.template?.fileName || '项目简历模板',
           templateAbsPath: params.template!.absPath
         })
-      : await renderHtmlToPdfBuffer(
-          params.template
-            ? renderProjectTemplateResumeHtml({
-                candidateName: params.candidateName,
-                candidatePhone: params.candidatePhone,
-                jobTitle: params.jobTitle,
-                doc,
-                templateFileName: params.template.fileName
-              })
-            : renderShenpuResumeHtml({
-                candidateName: params.candidateName,
-                candidatePhone: params.candidatePhone,
-                jobTitle: params.jobTitle,
-                department: params.department,
-                doc
-              })
-        )
+      : templateKind === 'xlsx'
+        ? await renderProjectTemplateResumeXlsxBuffer({
+            candidateName: params.candidateName,
+            candidatePhone: params.candidatePhone,
+            jobTitle: params.jobTitle,
+            doc,
+            templateAbsPath: params.template!.absPath
+          })
+        : await renderHtmlToPdfBuffer(
+            params.template
+              ? renderProjectTemplateResumeHtml({
+                  candidateName: params.candidateName,
+                  candidatePhone: params.candidatePhone,
+                  jobTitle: params.jobTitle,
+                  doc,
+                  templateFileName: params.template.fileName
+                })
+              : renderShenpuResumeHtml({
+                  candidateName: params.candidateName,
+                  candidatePhone: params.candidatePhone,
+                  jobTitle: params.jobTitle,
+                  department: params.department,
+                  doc
+                })
+          )
     await mysqlPool.query(
       `UPDATE resume_screening_shenpu_resumes SET progress_percent=90, progress_stage=? WHERE screening_id=?`,
-      [wordTemplate ? '写入 Word 文件' : '写入 PDF 文件', params.screeningId]
+      [templateKind === 'word' ? '写入 Word 文件' : templateKind === 'xlsx' ? '写入 Excel 文件' : '写入 PDF 文件', params.screeningId]
     )
-    const outputExt = wordTemplate ? '.docx' : '.pdf'
-    const outputMime = wordTemplate
-      ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-      : 'application/pdf'
+    const outputExt = templateKind === 'word' ? '.docx' : templateKind === 'xlsx' ? '.xlsx' : '.pdf'
+    const outputMime =
+      templateKind === 'word'
+        ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        : templateKind === 'xlsx'
+          ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          : 'application/pdf'
     const saved = saveGeneratedResumeFile(
       generatedBuffer,
       `${params.candidateName || '候选人'}-${params.template ? '项目模板申朴简历' : '申朴简历'}${outputExt}`,
@@ -6572,12 +6832,39 @@ function shenpuResumeStoredWordConditionSql(screeningAlias: string): string {
   )`
 }
 
+function shenpuResumeXlsxTemplateConditionSql(projectAlias: string): string {
+  return `(TRIM(COALESCE(${projectAlias}.shenpu_resume_template_storage_path, '')) <> ''
+              AND (
+                LOWER(COALESCE(${projectAlias}.shenpu_resume_template_file_name, '')) LIKE '%.xlsx'
+                OR LOWER(COALESCE(${projectAlias}.shenpu_resume_template_file_name, '')) LIKE '%.xls'
+                OR LOWER(COALESCE(${projectAlias}.shenpu_resume_template_mime_type, '')) LIKE '%spreadsheetml%'
+                OR LOWER(COALESCE(${projectAlias}.shenpu_resume_template_mime_type, '')) LIKE '%ms-excel%'
+                OR LOWER(COALESCE(${projectAlias}.shenpu_resume_template_mime_type, '')) LIKE '%excel%'
+              ))`
+}
+
+function shenpuResumeStoredXlsxConditionSql(screeningAlias: string): string {
+  return `(
+    LOWER(COALESCE((SELECT sr.mime_type FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%spreadsheetml%'
+    OR LOWER(COALESCE((SELECT sr.mime_type FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%ms-excel%'
+    OR LOWER(COALESCE((SELECT sr.mime_type FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%excel%'
+    OR LOWER(COALESCE((SELECT sr.file_name FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%.xlsx'
+    OR LOWER(COALESCE((SELECT sr.file_name FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%.xls'
+  )`
+}
+
+function shenpuResumeTemplateMismatchConditionSql(screeningAlias: string, projectAlias: string): string {
+  return `(
+    (${shenpuResumeWordTemplateConditionSql(projectAlias)} AND NOT ${shenpuResumeStoredWordConditionSql(screeningAlias)})
+    OR (${shenpuResumeXlsxTemplateConditionSql(projectAlias)} AND NOT ${shenpuResumeStoredXlsxConditionSql(screeningAlias)})
+  )`
+}
+
 function shenpuResumeStatusSelectSql(screeningAlias: string, projectAlias: string): string {
   const statusSub = `(SELECT sr.status FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1)`
   return `CASE
-    WHEN ${shenpuResumeWordTemplateConditionSql(projectAlias)}
+    WHEN ${shenpuResumeTemplateMismatchConditionSql(screeningAlias, projectAlias)}
       AND COALESCE(${statusSub}, 'missing') = 'ready'
-      AND NOT ${shenpuResumeStoredWordConditionSql(screeningAlias)}
     THEN 'missing'
     ELSE COALESCE(${statusSub}, 'missing')
   END`
@@ -6585,9 +6872,8 @@ function shenpuResumeStatusSelectSql(screeningAlias: string, projectAlias: strin
 
 function shenpuResumeProgressSelectSql(screeningAlias: string, projectAlias: string): string {
   return `CASE
-    WHEN ${shenpuResumeWordTemplateConditionSql(projectAlias)}
+    WHEN ${shenpuResumeTemplateMismatchConditionSql(screeningAlias, projectAlias)}
       AND COALESCE((SELECT sr.status FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), 'missing') = 'ready'
-      AND NOT ${shenpuResumeStoredWordConditionSql(screeningAlias)}
     THEN 0
     ELSE COALESCE((SELECT sr.progress_percent FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), 0)
   END`
@@ -6595,9 +6881,8 @@ function shenpuResumeProgressSelectSql(screeningAlias: string, projectAlias: str
 
 function shenpuResumeStageSelectSql(screeningAlias: string, projectAlias: string): string {
   return `CASE
-    WHEN ${shenpuResumeWordTemplateConditionSql(projectAlias)}
+    WHEN ${shenpuResumeTemplateMismatchConditionSql(screeningAlias, projectAlias)}
       AND COALESCE((SELECT sr.status FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), 'missing') = 'ready'
-      AND NOT ${shenpuResumeStoredWordConditionSql(screeningAlias)}
     THEN '项目模板已更新，请重新生成'
     ELSE COALESCE((SELECT sr.progress_stage FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')
   END`
@@ -8279,13 +8564,13 @@ app.get('/api/admin/resume-screenings/:id/shenpu-resume', async (req, res) => {
       return res.status(409).json({ message: String(r.error_message || '申朴简历生成失败') })
     }
     const projectTemplate = await loadProjectShenpuResumeTemplate(r)
-    const shouldBeWord = isWordResumeTemplate(projectTemplate)
+    const templateKind = templateKindFromTemplate(projectTemplate)
     const storedMime = String(r.mime_type || '').toLowerCase()
     const storedName = String(r.file_name || '').toLowerCase()
-    const storedIsWord =
-      storedMime.includes('wordprocessingml') || storedName.endsWith('.docx') || storedName.endsWith('.doc')
-    if (shouldBeWord && !storedIsWord) {
-      return res.status(409).json({ message: '当前项目使用 Word 简历模板，请重新生成申朴简历。' })
+    const storedKind = templateKindFromFile(storedName, storedMime)
+    if ((templateKind === 'word' || templateKind === 'xlsx') && templateKind !== storedKind) {
+      const kindLabel = templateKind === 'word' ? 'Word' : 'Excel'
+      return res.status(409).json({ message: `当前项目使用 ${kindLabel} 简历模板，请重新生成申朴简历。` })
     }
     const abs = resolveResumeStorageAbsPath(r.storage_path)
     if (!abs) return res.status(404).json({ message: '申朴简历文件不存在或已被移除' })

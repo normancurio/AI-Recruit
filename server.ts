@@ -1113,12 +1113,15 @@ async function startServer() {
       const allowed =
         lower.endsWith('.docx') ||
         lower.endsWith('.doc') ||
+        lower.endsWith('.xlsx') ||
         lower.endsWith('.pdf') ||
         mime.includes('wordprocessingml') ||
         mime.includes('msword') ||
+        mime.includes('spreadsheetml') ||
+        mime.includes('excel') ||
         mime.includes('pdf');
       if (!allowed) {
-        res.status(400).json({ message: '模板目前支持 Word 或 PDF 文件' });
+        res.status(400).json({ message: '模板目前支持 Word、Excel 或 PDF 文件' });
         return;
       }
       const saved = saveProjectResumeTemplateFile(req.file);

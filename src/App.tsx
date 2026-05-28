@@ -2235,8 +2235,8 @@ function ProjectManagementView({
   const uploadProjectResumeTemplate = async (project: Project, file: File | null | undefined) => {
     if (!file) return;
     const lower = file.name.toLowerCase();
-    if (!/\.(docx|doc|pdf)$/.test(lower)) {
-      setAdminMsg({ title: '模板格式不支持', message: '请上传 Word 或 PDF 格式的简历模板。' });
+    if (!/\.(docx|doc|xlsx|pdf)$/.test(lower)) {
+      setAdminMsg({ title: '模板格式不支持', message: '请上传 Word、Excel 或 PDF 格式的简历模板。' });
       return;
     }
     const fd = new FormData();
@@ -2823,7 +2823,7 @@ function ProjectManagementView({
                               )}
                               <input
                                 type="file"
-                                accept=".doc,.docx,.pdf,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                accept=".doc,.docx,.xlsx,.pdf,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
                                 className="hidden"
                                 disabled={templateBusyProjectId === project.id}
                                 onChange={(e) => {
@@ -8767,9 +8767,14 @@ function ResumeScreeningView({
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
+        const ext = blob.type.includes('wordprocessingml')
+          ? '.docx'
+          : blob.type.includes('spreadsheetml') || blob.type.includes('ms-excel') || blob.type.includes('excel')
+            ? '.xlsx'
+            : '.pdf';
         a.download = filenameFromContentDisposition(
           r.headers.get('Content-Disposition'),
-          `${resume.name || '候选人'}-申朴简历${blob.type.includes('wordprocessingml') ? '.docx' : '.pdf'}`
+          `${resume.name || '候选人'}-申朴简历${ext}`
         );
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1500);

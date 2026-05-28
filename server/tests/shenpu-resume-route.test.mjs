@@ -27,7 +27,7 @@ test('shenpu resume generation route loads current project template before gener
   assert.match(routeSource, /template: projectTemplate/)
 })
 
-test('shenpu resume download refuses stale pdf when current project template is word', () => {
+test('shenpu resume download refuses stale file when current project template is office format', () => {
   const routeStart = source.indexOf("app.get('/api/admin/resume-screenings/:id/shenpu-resume'")
   assert.notEqual(routeStart, -1)
 
@@ -35,7 +35,9 @@ test('shenpu resume download refuses stale pdf when current project template is 
   const routeSource = source.slice(routeStart, nextRoute === -1 ? undefined : nextRoute)
 
   assert.match(routeSource, /const projectTemplate = await loadProjectShenpuResumeTemplate\(r\)/)
-  assert.match(routeSource, /shouldBeWord && !storedIsWord/)
+  assert.match(routeSource, /templateKindFromTemplate\(projectTemplate\)/)
+  assert.match(routeSource, /templateKindFromFile\(storedName, storedMime\)/)
+  assert.match(routeSource, /templateKind === 'word' \|\| templateKind === 'xlsx'/)
   assert.match(routeSource, /请重新生成申朴简历/)
 })
 
@@ -82,11 +84,20 @@ test('project template Word resume expands template rows instead of dropping ove
   assert.match(renderSource, /rows\.join\(''\)/)
 })
 
+test('shenpu resume supports xlsx template extraction and rendering', () => {
+  assert.match(source, /templateKindFromFile\(/)
+  assert.match(source, /templateKindFromTemplate\(/)
+  assert.match(source, /requireCjs\('exceljs'\)/)
+  assert.match(source, /renderProjectTemplateResumeXlsxBuffer/)
+  assert.match(source, /templateKind === 'xlsx'/)
+  assert.match(source, /application\/vnd\.openxmlformats-officedocument\.spreadsheetml\.sheet/)
+})
+
 test('shenpu resume extraction preserves detailed experience text for template rendering', () => {
   assert.match(source, /不要总结、不要压缩、不要改写为概要/)
   assert.match(source, /项目描述\/职责\/技术栈\/成果/)
   assert.match(source, /highlights: safeTextArray\(r\.highlights, 20\)/)
-  assert.match(source, /\.slice\(0, 20\) \|\| fallback\.projectExperiences/)
+  assert.match(source, /return parsed\.length \? parsed : fallback\.projectExperiences/)
 
   const renderStart = source.indexOf('async function renderProjectTemplateResumeDocxBuffer')
   assert.notEqual(renderStart, -1)
