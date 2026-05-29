@@ -12,8 +12,8 @@
 # 服务器上放置 .env（从 .env.example 复制并填写 MYSQL_*、WECHAT_*、ADMIN_API_TOKEN 等），然后：
 #   docker compose up -d
 #
-# 简历原件（预览/下载）：api 已挂载命名卷到容器内 /app/storage/resumes（与代码默认一致）。
-#   改用宿主机目录持久化：把 api.volumes 改为例如
+# 简历原件与项目模板（预览/下载/生成）：api 与 admin 共用命名卷到容器内 /app/storage/resumes（与代码默认一致）。
+#   改用宿主机目录持久化：把 api/admin.volumes 改为例如
 #     - /srv/ai-recruit/resume-files:/app/storage/resumes
 #   并在 .env 中可设 RESUME_STORAGE_DIR=/app/storage/resumes（与挂载右侧路径一致）。
 #   管理端「预览/下载」由浏览器请求公网 API（PUBLIC_API_BASE / 构建期 VITE_API_BASE），须能访问到 3011。
@@ -43,7 +43,7 @@ services:
       HOST: "0.0.0.0"
       TZ: Asia/Shanghai
     volumes:
-      # 简历原件：持久化命名卷；重建/升级容器不丢文件（否则预览/下载 404）
+      # 简历原件与申朴生成文件：持久化命名卷；重建/升级容器不丢文件（否则预览/下载 404）
       - resume_screening_files:/app/storage/resumes
     restart: unless-stopped
     healthcheck:
@@ -73,6 +73,9 @@ services:
       ADMIN_API_UPSTREAM: http://api:3011
       # 浏览器访问的小程序 API 公网根地址（无尾斜杠），覆盖错误构建里的 localhost:3011
       MINIAPP_API_PUBLIC_URL: ${MINIAPP_API_PUBLIC_URL:-}
+    volumes:
+      # 项目申朴简历模板由 admin 上传，api 生成时读取，两个服务必须共享同一目录。
+      - resume_screening_files:/app/storage/resumes
     restart: unless-stopped
 
 volumes:

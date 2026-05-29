@@ -8,6 +8,7 @@ import https from 'node:https';
 import { URL } from 'node:url';
 import dotenv from 'dotenv';
 import mysql from 'mysql2/promise';
+import multer from 'multer';
 import type { ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import {
   normalizeJobLevel,
@@ -49,6 +50,17 @@ const bizPool = createResilientMysqlPool({
   queueLimit: 0
 });
 
+const projectTemplateUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 12 * 1024 * 1024 }
+});
+
+const RESUME_STORAGE_DIR = (() => {
+  const fromEnv = process.env.RESUME_STORAGE_DIR?.trim();
+  if (!fromEnv) return path.resolve(process.cwd(), 'storage', 'resumes');
+  return path.isAbsolute(fromEnv) ? fromEnv : path.resolve(process.cwd(), fromEnv);
+})();
+
 /** jobs.recruiters JSON 列：mysql2 可能返回数组 / 字符串 */
 function parseRecruiters(raw: unknown): string[] {
   if (Array.isArray(raw)) return raw.map(String)
@@ -86,6 +98,38 @@ function normalizeRecruitersForDb(raw: unknown): string {
     }
   }
   return '[]';
+}
+
+function normalizeMultipartFilename(raw: string): string {
+  const decoded = Buffer.from(String(raw || ''), 'latin1').toString('utf8');
+  const picked = /[\u4e00-\u9fff]/.test(decoded) ? decoded : String(raw || '');
+  return picked.replace(/[\\/:*?"<>|\r\n]+/g, '_').trim();
+}
+
+function safeStorageExt(fileName: string): string {
+  const ext = path.extname(String(fileName || '')).toLowerCase();
+  if (ext && /^[.\w-]{1,16}$/.test(ext)) return ext;
+  return '.bin';
+}
+
+function saveProjectResumeTemplateFile(file: { buffer: Buffer; originalname?: string; mimetype?: string }): {
+  storageKey: string;
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number;
+} {
+  fs.mkdirSync(RESUME_STORAGE_DIR, { recursive: true });
+  const originalName =
+    normalizeMultipartFilename(file.originalname || 'resume-template.docx').slice(0, 255) || 'resume-template.docx';
+  const ext = safeStorageExt(originalName);
+  const storageKey = `project-template-${Date.now()}-${crypto.randomUUID()}${ext}`;
+  fs.writeFileSync(path.join(RESUME_STORAGE_DIR, storageKey), file.buffer);
+  return {
+    storageKey,
+    originalName,
+    mimeType: String(file.mimetype || 'application/octet-stream').trim() || 'application/octet-stream',
+    sizeBytes: Number(file.buffer?.length || 0)
+  };
 }
 
 type GenerateJdPayload = { title: string; level: string; location?: string; salary?: string };
@@ -331,6 +375,79 @@ async function bizProjectsHaveRecruitmentLeads(pool: mysql.Pool): Promise<boolea
     bizProjectsRecruitmentLeads = false;
   }
   return bizProjectsRecruitmentLeads;
+}
+
+/** 业务库 projects 是否已执行 migration_projects_shenpu_resume_template.sql */
+let bizProjectsShenpuResumeTemplate: boolean | null = null;
+async function bizProjectsHaveShenpuResumeTemplate(pool: mysql.Pool): Promise<boolean> {
+  if (bizProjectsShenpuResumeTemplate !== null) return bizProjectsShenpuResumeTemplate;
+  try {
+    await pool.query(
+      'SELECT shenpu_resume_template_file_name, shenpu_resume_template_storage_path, shenpu_resume_template_uploaded_at FROM projects LIMIT 1'
+    );
+    bizProjectsShenpuResumeTemplate = true;
+  } catch {
+    bizProjectsShenpuResumeTemplate = false;
+  }
+  return bizProjectsShenpuResumeTemplate;
+}
+
+async function ensureBizProjectsShenpuResumeTemplateColumns(pool: mysql.Pool): Promise<void> {
+  const alters = [
+    `ALTER TABLE projects ADD COLUMN shenpu_resume_template_file_name VARCHAR(255) NULL AFTER member_count`,
+    `ALTER TABLE projects ADD COLUMN shenpu_resume_template_mime_type VARCHAR(128) NULL AFTER shenpu_resume_template_file_name`,
+    `ALTER TABLE projects ADD COLUMN shenpu_resume_template_size_bytes BIGINT UNSIGNED NULL AFTER shenpu_resume_template_mime_type`,
+    `ALTER TABLE projects ADD COLUMN shenpu_resume_template_storage_path VARCHAR(512) NULL AFTER shenpu_resume_template_size_bytes`,
+    `ALTER TABLE projects ADD COLUMN shenpu_resume_template_uploaded_at TIMESTAMP NULL DEFAULT NULL AFTER shenpu_resume_template_storage_path`
+  ];
+  for (const sql of alters) {
+    try {
+      await pool.query(sql);
+    } catch (e) {
+      const code = (e as { code?: string })?.code;
+      if (code !== 'ER_DUP_FIELDNAME') throw e;
+    }
+  }
+  bizProjectsShenpuResumeTemplate = true;
+}
+
+async function invalidateShenpuResumesForProject(projectId: string): Promise<number> {
+  const id = String(projectId || '').trim();
+  if (!id) return 0;
+  try {
+    const onJob = `CONVERT(TRIM(j.job_code) USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                   CONVERT(TRIM(s.job_code) USING utf8mb4) COLLATE utf8mb4_unicode_ci`;
+    const onProject = `CONVERT(TRIM(j.project_id) USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                       CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci`;
+    const [rows] = await bizPool.query<RowDataPacket[]>(
+      `SELECT sr.storage_path
+       FROM resume_screening_shenpu_resumes sr
+       INNER JOIN resume_screenings s ON s.id = sr.screening_id
+       INNER JOIN jobs j ON ${onJob}
+       WHERE ${onProject}`,
+      [id]
+    );
+    const [hdr] = await bizPool.query<ResultSetHeader>(
+      `DELETE sr
+       FROM resume_screening_shenpu_resumes sr
+       INNER JOIN resume_screenings s ON s.id = sr.screening_id
+       INNER JOIN jobs j ON ${onJob}
+       WHERE ${onProject}`,
+      [id]
+    );
+    for (const row of rows || []) {
+      const storageKey = String(row.storage_path || '').trim();
+      if (storageKey && /^[\w.-]{4,240}$/.test(path.basename(storageKey))) {
+        fs.rm(path.join(RESUME_STORAGE_DIR, path.basename(storageKey)), { force: true }, () => {});
+      }
+    }
+    return Number(hdr.affectedRows || 0);
+  } catch (e) {
+    const code = (e as { code?: string })?.code;
+    if (code === 'ER_NO_SUCH_TABLE' || code === 'ER_BAD_FIELD_ERROR') return 0;
+    console.warn('[projects] invalidate shenpu resumes skipped:', e);
+    return 0;
+  }
 }
 
 /** 业务库 jobs 是否已执行 migration_add_jobs_claimed_by.sql */
@@ -643,16 +760,20 @@ async function startServer() {
     try {
       const hasUi = await bizProjectsHaveUiFields(bizPool);
       const hasRl = await bizProjectsHaveRecruitmentLeads(bizPool);
+      const hasTpl = await bizProjectsHaveShenpuResumeTemplate(bizPool);
+      const tplCols = hasTpl
+        ? ', shenpu_resume_template_file_name, shenpu_resume_template_mime_type, shenpu_resume_template_size_bytes, shenpu_resume_template_storage_path, shenpu_resume_template_uploaded_at'
+        : '';
       const projSql = hasUi
         ? hasRl
-          ? `SELECT id, name, client, dept, manager, recruitment_leads, status, project_code, start_date, end_date, description, member_count, created_at, updated_at
+          ? `SELECT id, name, client, dept, manager, recruitment_leads, status, project_code, start_date, end_date, description, member_count, created_at, updated_at${tplCols}
              FROM projects ORDER BY updated_at DESC, id DESC`
-          : `SELECT id, name, client, dept, manager, status, project_code, start_date, end_date, description, member_count, created_at, updated_at
+          : `SELECT id, name, client, dept, manager, status, project_code, start_date, end_date, description, member_count, created_at, updated_at${tplCols}
              FROM projects ORDER BY updated_at DESC, id DESC`
         : hasRl
-          ? `SELECT id, name, client, dept, manager, recruitment_leads, status, created_at, updated_at
+          ? `SELECT id, name, client, dept, manager, recruitment_leads, status, created_at, updated_at${tplCols}
              FROM projects ORDER BY updated_at DESC, id DESC`
-          : `SELECT id, name, client, dept, manager, status, created_at, updated_at
+          : `SELECT id, name, client, dept, manager, status, created_at, updated_at${tplCols}
              FROM projects ORDER BY updated_at DESC, id DESC`;
       const [projects] = await bizPool.query<any[]>(projSql);
       const hasClaim = await jobsHaveClaimedBy(bizPool);
@@ -711,6 +832,15 @@ async function startServer() {
           endDate: hasUi ? fmtSqlDate(p.end_date) : '',
           description: hasUi && p.description != null ? String(p.description) : '',
           memberCount,
+          shenpuResumeTemplate:
+            hasTpl && p.shenpu_resume_template_storage_path
+              ? {
+                  fileName: String(p.shenpu_resume_template_file_name || '简历模板'),
+                  mimeType: String(p.shenpu_resume_template_mime_type || 'application/octet-stream'),
+                  sizeBytes: Number(p.shenpu_resume_template_size_bytes) || 0,
+                  uploadedAt: fmtSqlDateTime(p.shenpu_resume_template_uploaded_at)
+                }
+              : null,
           ...(hasRl ? { recruitmentLeads: parseRecruiters(p.recruitment_leads) } : {}),
           jobs: jobMapped
         };
@@ -751,6 +881,7 @@ async function startServer() {
           endDate: '',
           description: '',
           memberCount: 0,
+          shenpuResumeTemplate: null,
           jobs: unassignedJobs
         });
       }
@@ -767,6 +898,7 @@ async function startServer() {
           endDate: '',
           description: '',
           memberCount: 0,
+          shenpuResumeTemplate: null,
           jobs: []
         });
       }
@@ -963,6 +1095,115 @@ async function startServer() {
     }
   });
 
+  app.post('/api/projects/:projectId/shenpu-resume-template', projectTemplateUpload.single('file'), async (req, res) => {
+    try {
+      const id = String(req.params.projectId || '').trim();
+      if (!id || id === 'EMPTY' || id === 'UNASSIGNED') {
+        res.status(400).json({ message: '无效的项目' });
+        return;
+      }
+      if (!req.file) {
+        res.status(400).json({ message: '请选择要上传的简历模板文件' });
+        return;
+      }
+      await ensureBizProjectsShenpuResumeTemplateColumns(bizPool);
+      const originalName = normalizeMultipartFilename(req.file.originalname || '');
+      const lower = originalName.toLowerCase();
+      const mime = String(req.file.mimetype || '').toLowerCase();
+      const allowed =
+        lower.endsWith('.docx') ||
+        lower.endsWith('.doc') ||
+        lower.endsWith('.xlsx') ||
+        lower.endsWith('.pdf') ||
+        mime.includes('wordprocessingml') ||
+        mime.includes('msword') ||
+        mime.includes('spreadsheetml') ||
+        mime.includes('excel') ||
+        mime.includes('pdf');
+      if (!allowed) {
+        res.status(400).json({ message: '模板目前支持 Word、Excel 或 PDF 文件' });
+        return;
+      }
+      const saved = saveProjectResumeTemplateFile(req.file);
+      const [hdr] = await bizPool.query<ResultSetHeader>(
+        `UPDATE projects
+         SET shenpu_resume_template_file_name=?,
+             shenpu_resume_template_mime_type=?,
+             shenpu_resume_template_size_bytes=?,
+             shenpu_resume_template_storage_path=?,
+             shenpu_resume_template_uploaded_at=NOW()
+         WHERE id=?`,
+        [saved.originalName, saved.mimeType, saved.sizeBytes, saved.storageKey, id]
+      );
+      if (!hdr.affectedRows) {
+        res.status(404).json({ message: '项目不存在' });
+        return;
+      }
+      const invalidated = await invalidateShenpuResumesForProject(id);
+      res.json({
+        ok: true,
+        data: {
+          fileName: saved.originalName,
+          mimeType: saved.mimeType,
+          sizeBytes: saved.sizeBytes,
+          uploadedAt: fmtSqlDateTime(new Date()),
+          invalidatedShenpuResumeCount: invalidated
+        }
+      });
+    } catch (e) {
+      const code = (e as { code?: string })?.code;
+      if (code === 'ER_BAD_FIELD_ERROR') {
+        res.status(503).json({ message: '项目表缺少模板字段，请执行 server/migration_projects_shenpu_resume_template.sql' });
+        return;
+      }
+      console.error('[POST /api/projects/:projectId/shenpu-resume-template]', e);
+      res.status(500).json({ message: '模板上传失败，请稍后重试或联系管理员。' });
+    }
+  });
+
+  app.delete('/api/projects/:projectId/shenpu-resume-template', async (req, res) => {
+    try {
+      const id = String(req.params.projectId || '').trim();
+      if (!id || id === 'EMPTY' || id === 'UNASSIGNED') {
+        res.status(400).json({ message: '无效的项目' });
+        return;
+      }
+      await ensureBizProjectsShenpuResumeTemplateColumns(bizPool);
+      const [rows] = await bizPool.query<RowDataPacket[]>(
+        'SELECT shenpu_resume_template_storage_path FROM projects WHERE id=? LIMIT 1',
+        [id]
+      );
+      const storageKey = String(rows?.[0]?.shenpu_resume_template_storage_path || '').trim();
+      const [hdr] = await bizPool.query<ResultSetHeader>(
+        `UPDATE projects
+         SET shenpu_resume_template_file_name=NULL,
+             shenpu_resume_template_mime_type=NULL,
+             shenpu_resume_template_size_bytes=NULL,
+             shenpu_resume_template_storage_path=NULL,
+             shenpu_resume_template_uploaded_at=NULL
+         WHERE id=?`,
+        [id]
+      );
+      if (!hdr.affectedRows) {
+        res.status(404).json({ message: '项目不存在' });
+        return;
+      }
+      await invalidateShenpuResumesForProject(id);
+      if (storageKey && /^[\w.-]{4,240}$/.test(path.basename(storageKey))) {
+        fs.rm(path.join(RESUME_STORAGE_DIR, path.basename(storageKey)), { force: true }, () => {});
+      }
+      res.json({ ok: true });
+    } catch (e) {
+      const code = (e as { code?: string })?.code;
+      if (code === 'ER_BAD_FIELD_ERROR') {
+        res.status(503).json({ message: '项目表缺少模板字段，请执行 server/migration_projects_shenpu_resume_template.sql' });
+        return;
+      }
+      console.error('[DELETE /api/projects/:projectId/shenpu-resume-template]', e);
+      res.status(500).json({ message: '模板删除失败，请稍后重试或联系管理员。' });
+    }
+  });
+
   app.delete('/api/projects/:projectId', async (req, res) => {
     try {
       const id = String(req.params.projectId || '').trim();
@@ -970,10 +1211,22 @@ async function startServer() {
         res.status(400).json({ message: '无效的项目' });
         return;
       }
+      const hasTpl = await bizProjectsHaveShenpuResumeTemplate(bizPool);
+      let storageKey = '';
+      if (hasTpl) {
+        const [rows] = await bizPool.query<RowDataPacket[]>(
+          'SELECT shenpu_resume_template_storage_path FROM projects WHERE id=? LIMIT 1',
+          [id]
+        );
+        storageKey = String(rows?.[0]?.shenpu_resume_template_storage_path || '').trim();
+      }
       const [hdr] = await bizPool.query<ResultSetHeader>('DELETE FROM projects WHERE id=?', [id]);
       if (!hdr.affectedRows) {
         res.status(404).json({ message: '项目不存在' });
         return;
+      }
+      if (storageKey && /^[\w.-]{4,240}$/.test(path.basename(storageKey))) {
+        fs.rm(path.join(RESUME_STORAGE_DIR, path.basename(storageKey)), { force: true }, () => {});
       }
       res.json({ ok: true });
     } catch (e) {

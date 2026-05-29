@@ -75,7 +75,7 @@ const uploadResumeMemory = multer({
   limits: { fileSize: 12 * 1024 * 1024 }
 })
 
-type ResumeScreenTaskStatus = 'queued' | 'running' | 'done' | 'failed'
+type ResumeScreenTaskStatus = 'queued' | 'running' | 'done' | 'failed' | 'duplicate'
 
 type ResumeScreenTask = {
   taskId: string
@@ -594,16 +594,18 @@ function saveResumeOriginalFile(file: { buffer: Buffer; originalname?: string; m
   }
 }
 
-function saveGeneratedResumePdf(buffer: Buffer, preferredName: string): {
+function saveGeneratedResumeFile(buffer: Buffer, preferredName: string, ext: '.pdf' | '.docx' | '.xlsx'): {
   storageKey: string
   absPath: string
   sizeBytes: number
   originalName: string
 } {
   ensureResumeStorageDir()
+  const safeExt = ext === '.docx' || ext === '.xlsx' ? ext : '.pdf'
   const originalName =
-    normalizeMultipartFilename(preferredName || 'shenpu-resume.pdf').replace(/\.[^.]+$/, '').slice(0, 220) + '.pdf'
-  const key = `shenpu-${Date.now()}-${crypto.randomUUID()}.pdf`
+    normalizeMultipartFilename(preferredName || `shenpu-resume${safeExt}`).replace(/\.[^.]+$/, '').slice(0, 220) +
+    safeExt
+  const key = `shenpu-${Date.now()}-${crypto.randomUUID()}${safeExt}`
   const absPath = path.join(RESUME_STORAGE_DIR, key)
   fs.writeFileSync(absPath, buffer)
   return { storageKey: key, absPath, sizeBytes: buffer.length, originalName }
@@ -1801,7 +1803,7 @@ function buildResumeEvalPromptForServer(params: {
     (isRisk ? '招聘评估（风控岗）。' : '招聘评估（研发岗）。') +
     '只输出一个 JSON 对象，无 markdown。' +
     '字段：schema_version,job_type,hard_gate,dimension_scores,total_score,strengths,risks,decision,summary,candidate_profile,candidate_name。' +
-    'candidate_name 为简历姓名，无法识别用 ""。' +
+    'candidate_name 为简历正文中的真实候选人姓名，无法识别用 ""；禁止把文件名、模板名、项目名、岗位名（如“申朴简历”“测试简历”“JAVA开发工程师”）当姓名。' +
     'candidate_profile 从简历抽取，无依据 null；尽量填 school,job_title,email,candidate_phone,current_company,gender,age,work_experience_years,major,education；禁止编造。' +
     `dimension_scores 每项 {"score":0-100,"evidence":["…"]}，须含 ${dimKeys}。` +
     'risks 为 {"risk","interview_question"} 数组。' +
@@ -1962,14 +1964,37 @@ function resumeProfileRowFromValues(input: {
 }
 
 const PLACEHOLDER_NAMES = new Set(
-  ['未知', '无', '未提供', '不详', '候选人', '未识别', '暂无', '姓名', '名字', 'n/a', 'na', 'null', 'none']
+  [
+    '未知',
+    '无',
+    '未提供',
+    '不详',
+    '候选人',
+    '未识别',
+    '暂无',
+    '姓名',
+    '名字',
+    '个人简历',
+    '求职简历',
+    '申朴简历',
+    '测试简历',
+    'n/a',
+    'na',
+    'null',
+    'none'
+  ]
 )
+
+const NON_PERSON_CANDIDATE_NAME_RE = /(简历|模板|测试|岗位|项目|工程师|开发|申朴)/
+const RESUME_SECTION_TITLE_NAME_RE =
+  /^(工作背景|工作经历|工作经验|工作履历|任职经历|任职履历|职业经历|职业履历|项目经历|项目经验|项目履历|教育背景|教育经历|学历背景|学历信息|个人技能|专业技能|技能特长|专业能力|技术能力|联系方式|基本信息|个人信息|求职意向|自我评价|个人评价|综合评价)$/i
 
 function isPlaceholderCandidateName(s: string): boolean {
   const t = s.trim().toLowerCase()
   if (!t) return true
   if (PLACEHOLDER_NAMES.has(s.trim())) return true
   if (PLACEHOLDER_NAMES.has(t)) return true
+  if (RESUME_SECTION_TITLE_NAME_RE.test(s.trim())) return true
   return false
 }
 
@@ -1995,6 +2020,7 @@ function sanitizeCandidateName(raw: unknown): string {
   }
   if (!n || isPlaceholderCandidateName(n)) return ''
   if (n.length < 2 || n.length > 30) return ''
+  if (NON_PERSON_CANDIDATE_NAME_RE.test(n)) return ''
   // 姓名不应包含明显句子标点、长数字、邮箱/链接等噪音。
   if (/[，。；;：:！？!?、]/.test(n)) return ''
   if (/\d{4,}/.test(n)) return ''
@@ -2070,13 +2096,10 @@ function guessCandidateNameFromFilename(filename: string): string {
     .filter(Boolean)
 
   const candidates: string[] = []
-  for (let i = 0; i < parts.length; i += 1) {
-    if (FILENAME_NAME_STOP_WORDS.has(parts[i]!)) {
-      if (i > 0) candidates.push(parts[i - 1]!)
-      if (i + 1 < parts.length) candidates.push(parts[i + 1]!)
-    }
-  }
   for (let i = parts.length - 1; i >= 0; i -= 1) candidates.push(parts[i]!)
+  for (let i = 0; i < parts.length; i += 1) {
+    if (FILENAME_NAME_STOP_WORDS.has(parts[i]!) && i + 1 < parts.length) candidates.push(parts[i + 1]!)
+  }
   if (parts[0] && parts[0] !== '申朴') candidates.push(parts[0])
 
   for (const c of candidates) {
@@ -2100,11 +2123,7 @@ function chooseCandidateName(aiName: string, resumeName: string, filenameName: s
   const ai = sanitizeCandidateName(aiName)
   const resume = sanitizeCandidateName(resumeName)
   const file = sanitizeCandidateName(filenameName)
-  // 上传文件名通常由招聘侧人工命名，形如「申朴-Java-张三-上海.pdf」。
-  // 只要文件名能抽出可信中文姓名，就优先作为候选人姓名，避免 AI 从正文中误取联系人、
-  // 推荐人、证明人或上一段项目人员姓名。
-  if (file) return file
-  return ai || resume || file || '候选人'
+  return resume || ai || file || '候选人'
 }
 
 function rewriteEvaluationCandidateName(evaluationJson: string, candidateName: string): string {
@@ -2160,6 +2179,71 @@ function normalizeResumeEvalDimension(
   }
 }
 
+function resumeEvalHardGatePassed(value: unknown): boolean | null {
+  if (value === true || value === false) return value
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const gate = value as { passed?: unknown; items?: unknown }
+  if (gate.passed === true || gate.passed === false) return gate.passed
+  if (Array.isArray(gate.items)) {
+    const hasFail = gate.items.some((item) => {
+      const result = String((item as { result?: unknown })?.result || '').trim().toLowerCase()
+      return result === 'fail' || result === 'failed' || result === 'false' || result === '不通过'
+    })
+    if (hasFail) return false
+  }
+  return null
+}
+
+function weightedResumeEvalDimensionScore(dim: Record<string, { score: number; evidence: string[] }>): number | null {
+  const weights: Record<string, number> = {
+    risk_fit: 25,
+    tech_fit: 25,
+    depth: 20,
+    engineering_depth: 20,
+    impact: 20,
+    data_skill: 15,
+    code_quality: 15,
+    stability_growth: 10,
+    communication_business: 10
+  }
+  let sum = 0
+  let totalWeight = 0
+  for (const [key, value] of Object.entries(dim)) {
+    const weight = weights[key] || 0
+    if (!weight) continue
+    const score = Number(value?.score)
+    if (!Number.isFinite(score)) continue
+    sum += clampResumeScore(score) * weight
+    totalWeight += weight
+  }
+  if (totalWeight <= 0) return null
+  return clampResumeScore(sum / totalWeight)
+}
+
+function normalizeResumeEvalTotalScore(input: {
+  rawTotal: unknown
+  dimensionScore: number | null
+  decision: string
+  hardGatePassed: boolean | null
+}): number {
+  const rawTotal = Number(input.rawTotal)
+  const rawInRange = Number.isFinite(rawTotal) && rawTotal >= 0 && rawTotal <= 100
+  let score =
+    rawInRange
+      ? clampResumeScore(rawTotal)
+      : input.dimensionScore != null
+        ? clampResumeScore(input.dimensionScore)
+        : clampResumeScore(rawTotal)
+  if (input.dimensionScore != null && score - input.dimensionScore > 25) {
+    score = clampResumeScore(input.dimensionScore)
+  }
+  const decision = String(input.decision || '').trim()
+  if (decision === '不建议推进') score = Math.min(score, 59)
+  else if (decision === '建议备选') score = Math.min(score, 79)
+  if (input.hardGatePassed === false) score = Math.min(score, 49)
+  return clampResumeScore(score)
+}
+
 function parseResumeEvalToScreeningResult(raw: string, resumePlain?: string): ResumeScreeningAiResult | null {
   try {
     const cleaned = String(raw || '')
@@ -2167,13 +2251,21 @@ function parseResumeEvalToScreeningResult(raw: string, resumePlain?: string): Re
       .replace(/^```(?:json)?\s*/i, '')
       .replace(/\s*```\s*$/i, '')
     const parsed = JSON.parse(cleaned) as Record<string, unknown>
-    const totalScore = clampResumeScore(Number(parsed.total_score))
-    if (!Number.isFinite(totalScore)) return null
+    const rawTotalScore = Number(parsed.total_score)
+    if (!Number.isFinite(rawTotalScore)) return null
     const rawDim = (parsed.dimension_scores || {}) as Record<string, unknown>
     const dim: Record<string, { score: number; evidence: string[] }> = {}
     for (const [k, v] of Object.entries(rawDim)) {
       dim[String(k)] = normalizeResumeEvalDimension(v, String(k))
     }
+    const decision = String(parsed.decision || '建议备选').trim()
+    const hardGatePassed = resumeEvalHardGatePassed(parsed.hard_gate)
+    const totalScore = normalizeResumeEvalTotalScore({
+      rawTotal: parsed.total_score,
+      dimensionScore: weightedResumeEvalDimensionScore(dim),
+      decision,
+      hardGatePassed
+    })
     const fallback = deriveResumeDimensionScores(totalScore)
     const skillScore = clampResumeScore(
       firstFiniteNumber(dim.data_skill?.score, dim.code_quality?.score) ?? fallback.skillScore
@@ -2188,7 +2280,6 @@ function parseResumeEvalToScreeningResult(raw: string, resumePlain?: string): Re
       firstFiniteNumber(dim.stability_growth?.score) ?? fallback.stabilityScore
     )
     const summary = String(parsed.summary || '').trim()
-    const decision = String(parsed.decision || '建议备选').trim()
     const strengths = Array.isArray(parsed.strengths)
       ? parsed.strengths.map((x) => String(x || '').trim()).filter(Boolean)
       : []
@@ -2224,6 +2315,10 @@ function parseResumeEvalToScreeningResult(raw: string, resumePlain?: string): Re
     const candidateNameAi = extractCandidateNameFromEvalParsed(parsed, rawProfile)
     const normalizedEval = {
       ...parsedRest,
+      ...(Number.isFinite(rawTotalScore) && (rawTotalScore < 0 || rawTotalScore > 100)
+        ? { model_total_score_raw: rawTotalScore }
+        : {}),
+      total_score: totalScore,
       dimension_scores: dim,
       risks,
       ...(profileFinal ? { candidate_profile: profileFinal } : {}),
@@ -2459,10 +2554,16 @@ function guessCandidateNameFromResume(text: string): string {
         .trim()
         .replace(/[,，.。;；、]+$/g, '')
         .replace(/\s+/g, ' ')
-      n = sanitizeCandidateName(n)
-      if (n) return n
+      if (/^\d+$/.test(n)) continue
+      const cleaned = sanitizeCandidateName(n)
+      if (cleaned) return cleaned
     }
   }
+  const contactBlockName = t.match(
+    /(?:^|\n)\s*([\u4e00-\u9fa5·•．]{2,8})\s*\n\s*(?:电话|手机|邮箱|生日|现居|院校)[:：]/
+  )
+  const contactName = sanitizeCandidateName(contactBlockName?.[1])
+  if (contactName) return contactName
   const skipLine =
     /^(简历|个人简历|curriculum\s*vitae|resume|cv|个人简介|自我评价|求职意向|联系方式|教育背景|工作经历|项目经验|专业技能|电话|手机|邮箱|e-mail|@\d)/i
   const lines = t.split('\n').map((l) => l.trim()).filter(Boolean)
@@ -2473,8 +2574,9 @@ function guessCandidateNameFromResume(text: string): string {
     if (digits.length >= 11 && /1[3-9]\d{9}/.test(digits)) continue
     if (/[@#]/.test(line) && line.length > 14) continue
     if (/^[0-9\s\-—–:+（）()]+$/.test(line)) continue
-    const name = sanitizeCandidateName(line)
-    if (name) return name
+    const cleaned = sanitizeCandidateName(line)
+    if (cleaned && /^[\u4e00-\u9fa5·•．\s]{2,8}$/.test(line)) return cleaned
+    if (cleaned && /^[A-Za-z][a-z]{1,12}(\s+[A-Za-z]+){0,2}$/.test(line)) return cleaned
   }
   return '候选人'
 }
@@ -2815,6 +2917,19 @@ type ShenpuResumeDocument = {
   headline: string
   professionalSummary: string
   targetMatchSummary: string
+  personalInfo: {
+    birthDate: string
+    ethnicity: string
+    politicalStatus: string
+    householdRegistration: string
+    address: string
+    email: string
+    graduationDate: string
+    targetPosition: string
+    itYears: string
+    insuranceYears: string
+    piccProjectYears: string
+  }
   coreSkills: string[]
   workExperiences: Array<{ company: string; title: string; period: string; highlights: string[] }>
   projectExperiences: Array<{ name: string; role: string; period: string; highlights: string[] }>
@@ -2823,6 +2938,36 @@ type ShenpuResumeDocument = {
   risks: string[]
   clientRequirements: string[]
   responsibilities: string[]
+  templateSectionAliases?: {
+    education?: string[]
+    skills?: string[]
+    work?: string[]
+    project?: string[]
+    selfEvaluation?: string[]
+  }
+  /**
+   * 候选人原始简历里"证书 / 资格 / 职称"栏目下能找到的真实记录。
+   * 由 AI 严格按"逐字提取"规则识别，简历里没明确写就为 []。
+   * 填充时：有数据 → 填到模板的证书表（按表头列对应）；没数据 → 整段删除该 section。
+   */
+  certificates?: Array<{
+    date: string    // 起始年月/获取时间（如"2024.10""2023-10"）
+    title: string   // 专业技术职称或资格名称
+    issuer: string  // 发证单位
+    remark: string  // 备注
+  }>
+  /**
+   * 由 AI 按模板示例段落「风格迁移」生成的、可直接塞回模板合并大单元格的段落数组。
+   * 每个元素 = 一行段落（保留段首/列对齐用的全角空格）。仅在模板对应 section
+   * 是单合并大单元格、并且模板示例段落有可学习的列对齐/分行风格时才会生成。
+   */
+  sectionFormattedText?: {
+    education?: string[]
+    skills?: string[]
+    work?: string[]
+    project?: string[]
+    selfEvaluation?: string[]
+  }
   portrait: {
     dimensions: Array<{ label: string; candidate: number; requirement: number }>
     conclusion: string
@@ -2857,6 +3002,21 @@ function sanitizeShenpuResumeDocument(raw: unknown, fallback: ShenpuResumeDocume
   const arr = (v: unknown) => (Array.isArray(v) ? v : [])
   const portraitObj =
     obj.portrait && typeof obj.portrait === 'object' ? (obj.portrait as Record<string, unknown>) : {}
+  const personalObj =
+    obj.personalInfo && typeof obj.personalInfo === 'object' ? (obj.personalInfo as Record<string, unknown>) : {}
+  const templateAliasObj =
+    obj.templateSectionAliases && typeof obj.templateSectionAliases === 'object'
+      ? (obj.templateSectionAliases as Record<string, unknown>)
+      : {}
+  const personal = (key: string, max = 120) =>
+    String(personalObj[key] || (fallback.personalInfo as Record<string, string>)[key] || '')
+      .trim()
+      .slice(0, max)
+  const aliases = (key: string): string[] => {
+    const fromModel = safeTextArray(templateAliasObj[key], 12)
+    const fromFallback = safeTextArray(fallback.templateSectionAliases?.[key as keyof NonNullable<ShenpuResumeDocument['templateSectionAliases']>], 12)
+    return Array.from(new Set([...fromModel, ...fromFallback])).slice(0, 12)
+  }
   const dimensions = arr(portraitObj.dimensions)
     .map((x) => {
       const d = x && typeof x === 'object' ? (x as Record<string, unknown>) : {}
@@ -2878,35 +3038,52 @@ function sanitizeShenpuResumeDocument(raw: unknown, fallback: ShenpuResumeDocume
     targetMatchSummary:
       String(obj.targetMatchSummary || fallback.targetMatchSummary).trim().slice(0, 500) ||
       fallback.targetMatchSummary,
+    personalInfo: {
+      birthDate: personal('birthDate', 40),
+      ethnicity: personal('ethnicity', 40),
+      politicalStatus: personal('politicalStatus', 60),
+      householdRegistration: personal('householdRegistration', 100),
+      address: personal('address', 160),
+      email: personal('email', 120),
+      graduationDate: personal('graduationDate', 40),
+      targetPosition: personal('targetPosition', 120),
+      itYears: personal('itYears', 40),
+      insuranceYears: personal('insuranceYears', 40),
+      piccProjectYears: personal('piccProjectYears', 40)
+    },
     coreSkills: safeTextArray(obj.coreSkills, 12).length ? safeTextArray(obj.coreSkills, 12) : fallback.coreSkills,
-    workExperiences:
-      arr(obj.workExperiences)
+    workExperiences: (() => {
+      const parsed = arr(obj.workExperiences)
         .map((x) => {
           const r = x && typeof x === 'object' ? (x as Record<string, unknown>) : {}
           return {
             company: String(r.company || '').trim().slice(0, 80),
             title: String(r.title || '').trim().slice(0, 80),
             period: String(r.period || '').trim().slice(0, 60),
-            highlights: safeTextArray(r.highlights, 5)
+            highlights: safeTextArray(r.highlights, 20)
           }
         })
         .filter((x) => x.company || x.title || x.highlights.length)
-        .slice(0, 5) || fallback.workExperiences,
-    projectExperiences:
-      arr(obj.projectExperiences)
+        .slice(0, 20)
+      return parsed.length ? parsed : fallback.workExperiences
+    })(),
+    projectExperiences: (() => {
+      const parsed = arr(obj.projectExperiences)
         .map((x) => {
           const r = x && typeof x === 'object' ? (x as Record<string, unknown>) : {}
           return {
             name: String(r.name || '').trim().slice(0, 100),
             role: String(r.role || '').trim().slice(0, 80),
             period: String(r.period || '').trim().slice(0, 60),
-            highlights: safeTextArray(r.highlights, 5)
+            highlights: safeTextArray(r.highlights, 20)
           }
         })
         .filter((x) => x.name || x.role || x.highlights.length)
-        .slice(0, 6) || fallback.projectExperiences,
-    educationExperiences:
-      arr(obj.educationExperiences)
+        .slice(0, 20)
+      return parsed.length ? parsed : fallback.projectExperiences
+    })(),
+    educationExperiences: (() => {
+      const parsed = arr(obj.educationExperiences)
         .map((x) => {
           const r = x && typeof x === 'object' ? (x as Record<string, unknown>) : {}
           return {
@@ -2917,7 +3094,9 @@ function sanitizeShenpuResumeDocument(raw: unknown, fallback: ShenpuResumeDocume
           }
         })
         .filter((x) => x.school || x.major || x.degree)
-        .slice(0, 3) || fallback.educationExperiences,
+        .slice(0, 3)
+      return parsed.length ? parsed : fallback.educationExperiences
+    })(),
     strengths: safeTextArray(obj.strengths, 5).length ? safeTextArray(obj.strengths, 5) : fallback.strengths,
     risks: safeTextArray(obj.risks, 5).length ? safeTextArray(obj.risks, 5) : fallback.risks,
     clientRequirements: safeTextArray(obj.clientRequirements, 8).length
@@ -2926,11 +3105,158 @@ function sanitizeShenpuResumeDocument(raw: unknown, fallback: ShenpuResumeDocume
     responsibilities: safeTextArray(obj.responsibilities, 8).length
       ? safeTextArray(obj.responsibilities, 8)
       : fallback.responsibilities,
+    templateSectionAliases: {
+      education: aliases('education'),
+      skills: aliases('skills'),
+      work: aliases('work'),
+      project: aliases('project'),
+      selfEvaluation: aliases('selfEvaluation')
+    },
+    certificates:
+      arr(obj.certificates)
+        .map((x) => {
+          const r = x && typeof x === 'object' ? (x as Record<string, unknown>) : {}
+          return {
+            date: String(r.date || '').trim().slice(0, 40),
+            title: String(r.title || '').trim().slice(0, 100),
+            issuer: String(r.issuer || '').trim().slice(0, 100),
+            remark: String(r.remark || '').trim().slice(0, 100)
+          }
+        })
+        .filter((x) => x.date || x.title || x.issuer || x.remark)
+        .slice(0, 20),
+    sectionFormattedText: fallback.sectionFormattedText,
     portrait: {
       dimensions: dimensions.length >= 3 ? dimensions : fallback.portrait.dimensions,
       conclusion: String(portraitObj.conclusion || fallback.portrait.conclusion).trim().slice(0, 300)
     }
   }
+}
+
+/**
+ * 兜底-事实校验：AI 偶尔会把"项目简历模板文本"里的占位项目/学校/公司当成候选人数据写入。
+ * 这里在 sanitize 之后做一次"必须在简历正文里能找到"过滤，模板占位项目就被丢掉。
+ * 匹配规则：取实体（项目名/公司/学校）的核心 token 去空格后，若在简历正文（去空格）里找不到则丢弃；
+ * 若在模板示例文本里找到 → 几乎一定是占位，强制丢弃。
+ */
+function isMentionedInResume(probe: string, resumeNoSpace: string): boolean {
+  if (!probe) return false
+  // 取实体核心 token（最长连续中文/英数字串）防止"，：（）"等分隔影响匹配
+  const tokens = probe.match(/[\u4e00-\u9fffA-Za-z0-9]+/g) || []
+  if (!tokens.length) return false
+  // 找最长的 token 在简历里出现即可（一般是公司名/项目主名）
+  const longest = tokens.sort((a, b) => b.length - a.length)[0]
+  if (longest.length < 3) {
+    // 整体串都很短：要求至少一个 token 出现且长度 >= 2
+    return tokens.some((t) => t.length >= 2 && resumeNoSpace.includes(t))
+  }
+  // 取最长 token 前若干字符，覆盖 OCR 抖动 / 标点差异
+  const probeLen = Math.min(longest.length, 8)
+  return resumeNoSpace.includes(longest.slice(0, probeLen))
+}
+
+function dropTemplatePlaceholdersFromDoc(
+  doc: ShenpuResumeDocument,
+  resumeText: string,
+  templateText: string
+): ShenpuResumeDocument {
+  const norm = (s: string) => String(s || '').replace(/\s+/g, '').toLowerCase()
+  const resumeNoSpace = norm(resumeText)
+  const templateNoSpace = norm(templateText)
+  if (!resumeNoSpace) return doc
+  const isFromTemplateOnly = (probe: string): boolean => {
+    if (!probe) return false
+    const tokens = probe.match(/[\u4e00-\u9fffA-Za-z0-9]+/g) || []
+    if (!tokens.length) return false
+    const longest = tokens.sort((a, b) => b.length - a.length)[0]
+    const slice = longest.slice(0, Math.min(longest.length, 8))
+    return !!templateNoSpace && templateNoSpace.includes(slice) && !resumeNoSpace.includes(slice)
+  }
+  doc.projectExperiences = (doc.projectExperiences || []).filter((p) => {
+    const name = norm(p.name)
+    if (!name) return (p.highlights || []).length > 0
+    if (isFromTemplateOnly(name)) return false
+    return isMentionedInResume(name, resumeNoSpace) || (p.highlights || []).length >= 2
+  })
+  doc.workExperiences = (doc.workExperiences || []).filter((w) => {
+    const company = norm(w.company)
+    if (!company) return (w.highlights || []).length > 0
+    if (isFromTemplateOnly(company)) return false
+    return isMentionedInResume(company, resumeNoSpace) || (w.highlights || []).length >= 1
+  })
+  doc.educationExperiences = (doc.educationExperiences || []).filter((e) => {
+    const school = norm(e.school)
+    if (!school) return false
+    if (isFromTemplateOnly(school)) return false
+    return isMentionedInResume(school, resumeNoSpace)
+  })
+  doc.certificates = (doc.certificates || []).filter((c) => {
+    const title = norm(c.title)
+    const issuer = norm(c.issuer)
+    if (!title && !issuer) return false
+    // 任一字段命中模板示例文本（且不在简历里） → 占位污染，丢
+    if (title && isFromTemplateOnly(title)) return false
+    if (issuer && isFromTemplateOnly(issuer)) return false
+    // title 或 issuer 在简历里能找到 → 保留
+    if (title && isMentionedInResume(title, resumeNoSpace)) return true
+    if (issuer && isMentionedInResume(issuer, resumeNoSpace)) return true
+    return false
+  })
+  return doc
+}
+
+/**
+ * 兜底：当 AI 把多个项目合并塞进一个 projectExperiences 对象的 highlights 里时，
+ * 用启发式规则按照"项目名称/项目一二三/项目1234/●项目"等分隔标记把它拆开成多个独立对象。
+ * 仅在数组长度 <= 1 且 highlights 含明显多项目标记时触发，避免误伤已经正确拆分的结果。
+ */
+function splitMergedProjectsHeuristically(
+  projects: ShenpuResumeDocument['projectExperiences']
+): ShenpuResumeDocument['projectExperiences'] {
+  if (!Array.isArray(projects) || projects.length > 1) return projects
+  const only = projects[0]
+  if (!only || !Array.isArray(only.highlights) || only.highlights.length < 2) return projects
+  const lines = only.highlights.map((s) => String(s || '').trim()).filter(Boolean)
+  // 触发标记：行首出现新项目分界
+  const splitMarkers: Array<{ idx: number; name: string; period: string }> = []
+  const nameRe = /^(?:[●■◆▪︎▶•·]\s*)?(?:项目(?:名称|编号)?\s*[:：]?\s*)(.{2,80})$/
+  const ordinalRe = /^(?:[●■◆▪︎▶•·]\s*)?项目\s*(?:[一二三四五六七八九十]|\d{1,2})\s*[、.:：\-]\s*(.{1,80})?$/
+  const numHeadRe = /^(?:\d{1,2})\s*[、.\)）]\s*(.{2,80})$/
+  // 匹配 "2023.01-2024.06 项目名称：xxx" 这类组合
+  const periodNameRe = /^(\d{4}[\.\-\/年]\d{1,2}.{0,12}\d{0,4}[\.\-\/月]?\d{0,2}日?)\s+(.{2,80})$/
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]
+    let m: RegExpMatchArray | null = null
+    let name = ''
+    let period = ''
+    if ((m = line.match(nameRe))) {
+      name = m[1].trim()
+    } else if ((m = line.match(ordinalRe))) {
+      name = (m[1] || '').trim()
+    } else if ((m = line.match(numHeadRe))) {
+      // 仅当原 highlights 中至少出现 2 处编号开头才认作项目分隔，避免误伤普通编号要点
+      const numCount = lines.filter((l) => numHeadRe.test(l)).length
+      if (numCount >= 2) name = m[1].trim()
+    } else if ((m = line.match(periodNameRe))) {
+      period = (m[1] || '').trim()
+      name = (m[2] || '').trim()
+    }
+    if (name) splitMarkers.push({ idx: i, name, period })
+  }
+  if (splitMarkers.length < 2) return projects
+  const out: ShenpuResumeDocument['projectExperiences'] = []
+  for (let s = 0; s < splitMarkers.length; s += 1) {
+    const startIdx = splitMarkers[s].idx
+    const endIdx = s + 1 < splitMarkers.length ? splitMarkers[s + 1].idx : lines.length
+    const body = lines.slice(startIdx + 1, endIdx)
+    out.push({
+      name: splitMarkers[s].name.slice(0, 100),
+      role: s === 0 ? only.role || '' : '',
+      period: splitMarkers[s].period || (s === 0 ? only.period || '' : ''),
+      highlights: body.slice(0, 20)
+    })
+  }
+  return out.length > 1 ? out : projects
 }
 
 function splitJdSections(jdText: string): { clientRequirements: string[]; responsibilities: string[] } {
@@ -2968,14 +3294,49 @@ function splitJdSections(jdText: string): { clientRequirements: string[]; respon
   return { clientRequirements, responsibilities }
 }
 
+function extractProjectNamesFromResumeText(text: string, maxCount = 6): string[] {
+  const src = String(text || '').replace(/\r\n/g, '\n')
+  const out: string[] = []
+  const push = (v: string) => {
+    const t = v.replace(/\s+/g, ' ').trim()
+    if (!t) return
+    if (t.length < 2 || t.length > 80) return
+    if (out.some((x) => x === t)) return
+    out.push(t)
+  }
+  for (const m of src.matchAll(/(?:项目名称|项目)\s*[:：]\s*([^\n；;，,]{2,80})/g)) {
+    push(String(m[1] || ''))
+    if (out.length >= maxCount) break
+  }
+  if (out.length < maxCount) {
+    const lines = src
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+    for (const line of lines) {
+      if (!/项目/.test(line)) continue
+      if (/项目经历|项目经验|项目描述|个人承担|职责|技术栈|工作内容/.test(line)) continue
+      push(line.replace(/^[\d一二三四五六七八九十]+[、.）)]\s*/, '').replace(/^[-*●■]\s*/, ''))
+      if (out.length >= maxCount) break
+    }
+  }
+  return out.slice(0, maxCount)
+}
+
 function fallbackShenpuResumeDocument(params: {
   candidateName: string
   jobTitle: string
   jdText?: string
+  resumeText?: string
   result: ResumeScreeningAiResult
   evaluationJson?: Record<string, unknown>
 }): ShenpuResumeDocument {
   const e = params.evaluationJson || {}
+  const profile =
+    e.candidate_profile && typeof e.candidate_profile === 'object'
+      ? (e.candidate_profile as Record<string, unknown>)
+      : {}
+  const pText = (k: string, maxLen: number) => String(profile[k] || '').trim().slice(0, maxLen)
   const strengths = safeTextArray(e.strengths, 5)
   const riskRaw = Array.isArray(e.risks) ? e.risks : []
   const risks = riskRaw
@@ -2984,18 +3345,71 @@ function fallbackShenpuResumeDocument(params: {
     .filter(Boolean)
     .slice(0, 5)
   const jdSections = splitJdSections(params.jdText || '')
+  const projectNames = extractProjectNamesFromResumeText(params.resumeText || '', 6)
+  const fallbackWorkCompany = pText('current_company', 80)
+  const fallbackWorkTitle = pText('job_title', 80) || params.jobTitle || ''
+  const fallbackWorkYears = pText('work_experience_years', 20)
+  const workExperiences =
+    fallbackWorkCompany || fallbackWorkTitle
+      ? [
+          {
+            company: fallbackWorkCompany,
+            title: fallbackWorkTitle,
+            period: fallbackWorkYears ? `${fallbackWorkYears}年` : '',
+            highlights: []
+          }
+        ]
+      : []
+  const educationExperiences =
+    pText('school', 80) || pText('major', 80) || pText('education', 60)
+      ? [
+          {
+            school: pText('school', 80),
+            major: pText('major', 80),
+            degree: pText('education', 60),
+            period: ''
+          }
+        ]
+      : []
+  const projectExperiences = projectNames.map((name) => ({
+    name,
+    role: fallbackWorkTitle,
+    period: '',
+    highlights: []
+  }))
   return {
     headline: `${params.jobTitle || '目标岗位'}候选人`,
     professionalSummary: params.result.summary || '候选人信息已完成结构化整理，建议结合原始简历进一步复核。',
     targetMatchSummary: params.result.summary || '已根据岗位 JD 与简历完成匹配评估。',
-    coreSkills: strengths.slice(0, 6),
-    workExperiences: [],
-    projectExperiences: [],
-    educationExperiences: [],
+    personalInfo: {
+      birthDate: '',
+      ethnicity: '',
+      politicalStatus: '',
+      householdRegistration: '',
+      address: pText('current_address', 160),
+      email: pText('email', 120),
+      graduationDate: pText('graduation_date', 40),
+      targetPosition: params.jobTitle || '',
+      itYears: fallbackWorkYears ? `${fallbackWorkYears}年` : '',
+      insuranceYears: '',
+      piccProjectYears: ''
+    },
+    coreSkills: strengths.slice(0, 6).length ? strengths.slice(0, 6) : safeTextArray(e.skills, 8),
+    workExperiences,
+    projectExperiences,
+    educationExperiences,
     strengths,
     risks,
     clientRequirements: jdSections.clientRequirements,
     responsibilities: jdSections.responsibilities,
+    templateSectionAliases: {
+      education: [],
+      skills: [],
+      work: [],
+      project: [],
+      selfEvaluation: []
+    },
+    certificates: [],
     portrait: {
       dimensions: [
         { label: '技能匹配', candidate: params.result.skillScore, requirement: 80 },
@@ -3016,6 +3430,7 @@ async function runShenpuResumeWithAi(params: {
   jdText: string
   resumeText: string
   result: ResumeScreeningAiResult
+  templateText?: string
 }): Promise<ShenpuResumeDocument> {
   let parsedEval: Record<string, unknown> = {}
   try {
@@ -3027,6 +3442,7 @@ async function runShenpuResumeWithAi(params: {
     candidateName: params.candidateName,
     jobTitle: params.jobTitle,
     jdText: params.jdText,
+    resumeText: params.resumeText,
     result: params.result,
     evaluationJson: parsedEval
   })
@@ -3048,9 +3464,31 @@ async function runShenpuResumeWithAi(params: {
           `目标岗位：${params.jobTitle}`,
           `部门：${params.department || '未知'}`,
           `岗位JD：${String(params.jdText || '').replace(/\\s+/g, ' ').slice(0, 12000)}`,
+          params.templateText
+            ? `项目简历模板文本（用于判断需要填充的字段、章节和章节别名，必须忠于原始简历，不得为了填满模板而编造）：${String(params.templateText || '').replace(/\\s+/g, ' ').slice(0, 8000)}`
+            : '',
           `简历全文：${String(params.resumeText || '').replace(/\\s+/g, ' ').slice(0, 20000)}`,
           `已有评估JSON：${JSON.stringify(parsedEval).slice(0, 12000)}`,
-          '请输出字段：headline, professionalSummary, targetMatchSummary, coreSkills[], workExperiences[{company,title,period,highlights[]}], projectExperiences[{name,role,period,highlights[]}], educationExperiences[{school,major,degree,period}], strengths[], risks[], clientRequirements[], responsibilities[], portrait{dimensions[{label,candidate,requirement}], conclusion}。',
+          '请输出字段：headline, professionalSummary, targetMatchSummary, personalInfo{birthDate,ethnicity,politicalStatus,householdRegistration,address,email,graduationDate,targetPosition,itYears,insuranceYears,piccProjectYears}, coreSkills[], workExperiences[{company,title,period,highlights[]}], projectExperiences[{name,role,period,highlights[]}], educationExperiences[{school,major,degree,period}], certificates[{date,title,issuer,remark}], strengths[], risks[], clientRequirements[], responsibilities[], templateSectionAliases{education[],skills[],work[],project[],selfEvaluation[]}, portrait{dimensions[{label,candidate,requirement}], conclusion}。',
+          '所有字段都以“简历全文”为第一来源：姓名、工作经历、项目经历、教育经历、技能等都必须来自原始简历正文；文件名、模板文本、岗位JD只用于辅助理解或兜底，不能覆盖正文里的真实内容。',
+          '【极重要-禁止模板污染】"项目简历模板文本"里出现的所有具体值——人名、公司名、项目名、学校名、专业名、时间区间、职务名、模块名、占位说明（如"就读学校1""测试工程师""主要工作内容1""众邦银行项目管理平台开发""控制工程（研究生）"等）——全部是**占位示例**，不是候选人的真实数据。禁止把这些占位值写入 personalInfo / workExperiences / projectExperiences / educationExperiences / coreSkills 的任何字段。模板只用来理解"章节标题/字段顺序/排版结构"，绝不用来"补全"候选人信息。',
+          '判定方法：如果一段"候选人信息"在简历全文里**完全找不到**（即便去掉空格也找不到对应实体词），就**不要**输出它；宁可输出空数组 []，也不要靠模板示例补全。',
+          '【极重要-逐字复制不改写】对 workExperiences / projectExperiences / educationExperiences / coreSkills，每一条字段值都必须是简历正文里"逐字复制"出来的连续片段，不要改一个字。具体要求：',
+          '  · workExperiences[].title 必须是简历正文里该工作行写的原文（如"软件测试工程师"），禁止把项目内的角色（如"组长""测试经理""软硬件"）合并进 title。',
+          '  · workExperiences[].company 必须是简历正文里写的公司全名（如"成都万创科技股份有限公司"），不许补字、不许改字。',
+          '  · workExperiences[].highlights 应该包含简历"工作经历/工作背景"段下方紧跟的、明确写给该工作（而不是某具体项目）的职责描述。比如简历某工作行下方有"负责驻场农行研发中心参与以下工作：1.项目功能的研发  2.应用的部署以及BUG修复  3.项目联调对接 ..."，这就是该工作的 highlights，必须挂在 workExperiences[i] 而不是 projectExperiences。多家工作要分别挂到各自的对象。',
+          '  · projectExperiences[].name / role / period 必须照搬简历正文。',
+          '  · projectExperiences[].highlights 必须按简历原文里"项目责任描述/工作内容"那一段，**逐行**复制；如果原文有"1. xxx""2. xxx""3.xxx""1）xxx""2）xxx"这种编号或子编号，**必须把编号一起带上**，不要删除编号；如果原文一个项目有 6 条 1~6 编号的责任，highlights 就必须有 6 条对应。',
+          '  · 多行嵌套（如"4. 进行部分任务执行：1）…… 2）……"）时，主编号一段、每个子编号各一段，原文顺序保留。',
+          '  · 禁止合并多条、禁止省略中间项、禁止改措辞或同义改写、禁止补充原文没有的解释。',
+          '  · 如果某条 highlight 原文很长（>200 字），不要切断也不要总结，整段塞进去即可。',
+          '【宁缺毋滥】如果候选人简历正文里某项目没有明确写"项目业绩/项目规模/公司名称"，对应字段就留空字符串 ""，禁止从其他位置抓内容来补、禁止臆想数字。这一规则适用于所有 section 的每一个字段。',
+          '【certificates 提取规则】certificates 是候选人简历"证书 / 资格证 / 职业资格证书 / 技能证书 / 职称"等栏目下的真实记录，每条 { date, title, issuer, remark }：date=取证年月（如"2024.10""2023-10"），title=证书/资格/职称的完整名称（如"软件设计师""中级软件工程师"），issuer=发证机构（如"工信部教育与考试中心"），remark=备注（候选人没写就留 ""）。**只有简历正文里明确出现"证书/资格/职称/通过 xx 考试/获得 xx 证书"这类字眼时才填**；候选人的技能描述、技术栈、项目经验都不算证书，禁止把"熟练使用 Spring""熟悉 Java"等技能写成证书。如果简历里完全没提到证书/资格证/职称，certificates 输出空数组 []。',
+          'workExperiences 和 projectExperiences 必须尽量保留原始简历里的完整经历内容，不要总结、不要压缩、不要改写为概要；项目描述/职责/技术栈/成果/业绩/问题解决过程都放入 highlights，按原文顺序拆成多条，模板空间不足也不要主动删减。',
+          '【关键-多项目拆分】每个独立项目都必须输出为 projectExperiences 数组中的“独立对象”，禁止把多个项目合并进同一个对象的 highlights。判定独立项目的依据（满足其一即视为新项目）：① 出现“项目名称：xxx”/“项目：xxx”等明确标记；② 出现“项目一/项目二/项目1/项目2/第一个项目/第二个项目/●项目/■项目”等编号或符号标记；③ 出现新的项目起止时间段（如 2023.01-2024.06 与上一项目时间段不同）；④ 简历中明显的空行+新项目标题分隔。如果原始简历有 5 个项目就输出 5 个对象，1 个就输出 1 个，绝对不能压缩到 1 个对象里。',
+          '【关键-多工作拆分】每段独立的工作经历也必须输出为 workExperiences 数组中的“独立对象”：公司名、岗位、起止时间任意一项不同就拆开；不要把多家公司或同公司多个职位合并到同一个对象。',
+          'personalInfo 中只填原始简历能支持的信息；民族、政治面貌、户籍、保险行业年数、PICC项目年数若原文没有就留空。',
+          'templateSectionAliases 必须根据“项目简历模板文本”提取模板真实章节标题并归类：education 对应教育/学历/学习经历；skills 对应技能/证书/专业能力；work 对应工作/任职/履历/从业/服务经历，例如“任职履历明细”“职业履历”“工作履历”都归到 work；project 对应项目/案例/交付经历；selfEvaluation 对应自我评价/个人评价/综合评价。只返回模板里实际出现或高度等价的标题，不要编造。',
           'portrait.dimensions 请优先给 5~6 个岗位可读的具体能力项，能细到技术栈时不要只写“技能匹配”，例如 Java、Git、MySQL、SpringBoot、沟通能力；candidate/requirement 为 0~100；缺失信息用空数组，不要臆造。',
           'clientRequirements 是从岗位 JD 中提炼出的“客户要求 / 任职要求”要点列表（每条 8~60 字，使用陈述句，不要带项目符号）；responsibilities 是岗位职责描述要点列表，每条 12~80 字。两组都严格忠于 JD 原文，不要重复也不要凑数；若 JD 中没有明确信息，则返回空数组。'
         ].join('\\n')
@@ -3063,9 +3501,117 @@ async function runShenpuResumeWithAi(params: {
       .trim()
       .replace(/^```(?:json)?\\s*/i, '')
       .replace(/\\s*```\\s*$/i, '')
-    return sanitizeShenpuResumeDocument(JSON.parse(text), fallback)
+    const sanitized = sanitizeShenpuResumeDocument(JSON.parse(text), fallback)
+    sanitized.projectExperiences = splitMergedProjectsHeuristically(sanitized.projectExperiences)
+    // 关键兜底：把 AI 误从模板示例抓进来的"占位项目/公司/学校"剔除——
+    // 项目名/公司名/学校名必须能在候选人简历正文里找到，不在简历但出现在模板里的就视为占位被丢。
+    return dropTemplatePlaceholdersFromDoc(sanitized, params.resumeText, params.templateText || '')
   } catch {
     return fallback
+  }
+}
+
+/**
+ * 第二次 AI 调用：让模型严格按"模板示例段落"的格式规则（列宽/对齐字符/分行/空段）重写候选人的对应内容。
+ * 设计原则：
+ *   - 只做"格式迁移"，绝不增删事实
+ *   - 列对齐符号继续用模板示例里出现的那种空白（一般是全角空格 \u3000）
+ *   - 不输出装饰性符号（emoji、bullet、序号点）除非模板示例自带
+ *   - 严格 JSON 输出 string[]，无 markdown
+ * 触发条件：模板对应 section 是单合并大单元格、且模板示例段落非空。
+ */
+async function aiFormatSectionsForTemplate(params: {
+  doc: ShenpuResumeDocument
+  candidateName: string
+  jobTitle: string
+  resumeText: string
+  templateSamples: TemplateSectionSamples
+}): Promise<ShenpuResumeDocument['sectionFormattedText']> {
+  const samples = params.templateSamples || {}
+  const keys: Array<keyof TemplateSectionSamples> = (['education', 'skills', 'work', 'project', 'selfEvaluation'] as const).filter(
+    (k) => Array.isArray(samples[k]) && (samples[k] as string[]).length > 0
+  )
+  if (!keys.length) return undefined
+  if (!process.env.DASHSCOPE_API_KEY?.trim()) return undefined
+  const model = process.env.QWEN_RESUME_MODEL?.trim() || process.env.QWEN_QUESTION_MODEL?.trim() || 'qwen-turbo'
+  const candidateSection = {
+    education: params.doc.educationExperiences,
+    skills: params.doc.coreSkills,
+    work: params.doc.workExperiences,
+    project: params.doc.projectExperiences,
+    selfEvaluation: { strengths: params.doc.strengths, summary: params.doc.professionalSummary }
+  }
+  const sampleBlock = keys
+    .map((k) => `[模板示例-${k}]\n${(samples[k] as string[]).map((s) => `「${s}」`).join('\n')}`)
+    .join('\n\n')
+  try {
+    const data = await dashScopeChatCompletions({
+      model,
+      temperature: 0,
+      messages: [
+        {
+          role: 'system',
+          content:
+            '你是一个"模板格式迁移器"，只做一件事：把候选人结构化数据按"模板示例段落"的排版规则重写成段落字符串数组。严格 JSON 输出，不要 markdown 包裹，不要解释。'
+        },
+        {
+          role: 'user',
+          content: [
+            `候选人：${params.candidateName}　目标岗位：${params.jobTitle}`,
+            '',
+            '【任务】观察下面每个 section 的"模板示例段落"——它只告诉你列宽用什么字符填充（一般是全角空格 \\u3000）、字段顺序、行结构、空段位置。然后把候选人对应的真实数据按【完全相同的格式风格】重新书写成新的段落数组。',
+            '',
+            '【硬性规则 - 严格遵守】',
+            '1) 列对齐：完全照搬模板示例里用的空白字符（多为全角空格 \\u3000），不要换成制表符 \\t 或半角空格。',
+            '2) 字段顺序、表头是否保留、表头与数据之间是否留空段、不同条目之间的空段数量，必须与示例完全一致。',
+            '3) 【极重要】模板示例段落里的"具体值"（如"就读学校1""控制工程（研究生）""测试工程师""主要工作内容1""主要工作内容2""技能1""证书1""项目1""2013.09-2016.01""当前供应商公司不填写"等）一律是【占位文本】——它们不是候选人数据，**绝对禁止**出现在输出中。每一段输出里出现的具体名字、时间、内容，都必须来源于"候选人结构化数据"或"候选人简历正文"，不能照抄模板。',
+            '4) 候选人原始信息中的事实（公司名、时间、岗位、技能、项目细节）必须全部保留，禁止总结/省略/合并；项目描述/职责/技术栈/成果都按示例的分行规则平铺。',
+            '5) 禁止新增模板示例里没有的装饰符号（如 emoji / ●▪️ / 方括号 / 序号点 / 加粗符号 / markdown）。',
+            '6) 候选人数据没有某个字段时，整行整段留空（输出一个 " " 段），不要塞模板示例的占位文字，也不要塞"无"/"-"。',
+            '7) 表头行（如"起止时间 学校名称 专业 全日制/非全日制"）原样保留；表头之后只输出候选人的真实数据行，禁止再附加模板示例的"就读学校1/项目1/技能1/主要工作内容1/2"等占位行。',
+            '8) 输出严格 JSON：{"education":[...],"skills":[...],"work":[...],"project":[...],"selfEvaluation":[...]}。每个字段是 string[]，每个 string = 一行段落。没采样的 section 不输出该键。',
+            '',
+            sampleBlock,
+            '',
+            '【候选人结构化数据（按 section 列出）】',
+            JSON.stringify(candidateSection, null, 0).slice(0, 18000),
+            '',
+            '【候选人简历正文（兜底，遇到结构化数据中缺失的细节请回原文取）】',
+            String(params.resumeText || '').replace(/\\s+/g, ' ').slice(0, 14000),
+            '',
+            '请直接输出 JSON 结果。'
+          ].join('\n')
+        }
+      ]
+    })
+    const raw = data?.choices?.[0]?.message?.content
+    const text = String(raw || '')
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```\s*$/i, '')
+    const parsed = JSON.parse(text)
+    if (!parsed || typeof parsed !== 'object') return undefined
+    const pick = (k: keyof TemplateSectionSamples): string[] | undefined => {
+      const v = (parsed as Record<string, unknown>)[k]
+      if (!Array.isArray(v)) return undefined
+      const out = v
+        .map((x) => (typeof x === 'string' ? x : ''))
+        // 仅 trim 行末的换行 / 制表符，保留段首的全角/半角空格
+        .map((s) => s.replace(/[\r\n\t]+/g, ' ').replace(/[ \u3000]+$/g, ''))
+        .filter((s, i, arr) => !(s.trim() === '' && i === arr.length - 1)) // 去掉末尾多余空段
+        .slice(0, 200)
+      return out.length ? out : undefined
+    }
+    return {
+      education: pick('education'),
+      skills: pick('skills'),
+      work: pick('work'),
+      project: pick('project'),
+      selfEvaluation: pick('selfEvaluation')
+    }
+  } catch (e) {
+    console.warn('[shenpu-resume] aiFormatSectionsForTemplate failed:', e instanceof Error ? e.message : e)
+    return undefined
   }
 }
 
@@ -3313,6 +3859,983 @@ async function renderHtmlToPdfBuffer(html: string): Promise<Buffer> {
   }
 }
 
+type ProjectShenpuResumeTemplate = {
+  fileName: string
+  mimeType: string
+  storagePath: string
+  absPath: string
+  text: string
+}
+
+type ShenpuTemplateKind = 'word' | 'xlsx' | 'pdf'
+
+function templateKindFromFile(fileName: string, mimeType: string): ShenpuTemplateKind {
+  const lower = String(fileName || '').toLowerCase()
+  const mime = String(mimeType || '').toLowerCase()
+  if (
+    lower.endsWith('.docx') ||
+    lower.endsWith('.doc') ||
+    mime.includes('wordprocessingml') ||
+    mime.includes('msword')
+  ) {
+    return 'word'
+  }
+  if (
+    lower.endsWith('.xlsx') ||
+    lower.endsWith('.xls') ||
+    mime.includes('spreadsheetml') ||
+    mime.includes('ms-excel') ||
+    mime.includes('excel')
+  ) {
+    return 'xlsx'
+  }
+  return 'pdf'
+}
+
+function templateKindFromTemplate(template?: ProjectShenpuResumeTemplate | null): ShenpuTemplateKind {
+  if (!template) return 'pdf'
+  return templateKindFromFile(template.fileName, template.mimeType)
+}
+
+async function readProjectTemplateText(absPath: string, mimeType: string, fileName: string): Promise<string> {
+  try {
+    const kind = templateKindFromFile(fileName || absPath, mimeType)
+    if (kind === 'word') {
+      const result = await mammoth.extractRawText({ path: absPath })
+      return String(result.value || '').trim().slice(0, 12000)
+    }
+    if (kind === 'xlsx') {
+      const ExcelJS = requireCjs('exceljs')
+      const wb = new ExcelJS.Workbook()
+      await wb.xlsx.readFile(absPath)
+      const lines: string[] = []
+      for (const ws of wb.worksheets) {
+        lines.push(`[工作表] ${ws.name}`)
+        for (let r = 1; r <= ws.rowCount; r += 1) {
+          const row = ws.getRow(r)
+          const cells: string[] = []
+          for (let c = 1; c <= ws.columnCount; c += 1) {
+            const raw = row.getCell(c).value
+            const text =
+              raw == null
+                ? ''
+                : typeof raw === 'object' && raw && 'richText' in raw
+                  ? String(
+                      Array.isArray((raw as { richText?: Array<{ text?: string }> }).richText)
+                        ? (raw as { richText?: Array<{ text?: string }> }).richText!.map((x) => x?.text || '').join('')
+                        : ''
+                    )
+                  : String(raw)
+            const compact = text.replace(/\s+/g, ' ').trim()
+            if (compact) cells.push(compact)
+          }
+          if (cells.length) lines.push(cells.join(' | '))
+          if (lines.join('\n').length > 14000) break
+        }
+        if (lines.join('\n').length > 14000) break
+      }
+      return lines.join('\n').slice(0, 12000)
+    }
+    return ''
+  } catch (e) {
+    console.warn('[shenpu-resume] template text extract skipped:', e instanceof Error ? e.message : e)
+    return ''
+  }
+}
+
+async function loadProjectShenpuResumeTemplate(row: Record<string, unknown>): Promise<ProjectShenpuResumeTemplate | null> {
+  const storagePath = String(row.shenpu_resume_template_storage_path || '').trim()
+  if (!storagePath) return null
+  const absPath = resolveResumeStorageAbsPath(storagePath)
+  if (!absPath) return null
+  const fileName = normalizeMultipartFilename(String(row.shenpu_resume_template_file_name || '项目简历模板.docx')).slice(0, 255)
+  const mimeType = String(row.shenpu_resume_template_mime_type || 'application/octet-stream')
+  return {
+    fileName,
+    mimeType,
+    storagePath,
+    absPath,
+    text: await readProjectTemplateText(absPath, mimeType, fileName)
+  }
+}
+
+/**
+ * 模板的每个 section（教育/技能/工作/项目/自评）下方第一个合并大单元格里的"示例段落"。
+ * 段落里保留模板原本用于列对齐/缩进的全角空格——这就是 AI 做"格式迁移"时的参考样板。
+ * 单元格不是合并大格（cells > 1，例如众邦那种表格化字段块）的 section 不会被采样。
+ */
+interface TemplateSectionSamples {
+  education?: string[]
+  skills?: string[]
+  work?: string[]
+  project?: string[]
+  selfEvaluation?: string[]
+}
+
+async function extractTemplateSectionSamples(
+  template: ProjectShenpuResumeTemplate,
+  aiAliases?: ShenpuResumeDocument['templateSectionAliases']
+): Promise<TemplateSectionSamples> {
+  if (!isWordResumeTemplate(template)) return {}
+  try {
+    const JSZip = requireCjs('jszip')
+    const zip = await JSZip.loadAsync(fs.readFileSync(template.absPath))
+    const documentFile = zip.file('word/document.xml')
+    if (!documentFile) return {}
+    const xml = await documentFile.async('string')
+    const xmlUnescape = (v: string) =>
+      v
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
+        .replace(/&amp;/g, '&')
+    const rowRe = /<w:tr\b[^>]*>[\s\S]*?<\/w:tr>/g
+    const rows: string[] = []
+    for (const m of xml.matchAll(rowRe)) rows.push(m[0])
+    const cellsOf = (r: string): string[] =>
+      [...r.matchAll(/<w:tc\b[^>]*>[\s\S]*?<\/w:tc>/g)].map((m) => m[0])
+    // 保留段首 / 列对齐用的空格（包括 xml:space="preserve" 的全角空格）
+    const paragraphsOf = (cell: string): string[] => {
+      const out: string[] = []
+      for (const pm of cell.matchAll(/<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g)) {
+        const inner = pm[1]
+        const tParts: string[] = []
+        for (const tm of inner.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)) tParts.push(xmlUnescape(tm[1]))
+        out.push(tParts.join(''))
+      }
+      return out
+    }
+    const rowTextFlat = (r: string): string => {
+      const all = [...r.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map((m) => xmlUnescape(m[1])).join('')
+      return all.replace(/\s+/g, ' ').trim()
+    }
+    const normalizeLabel = (v: string) =>
+      v
+        .replace(/[：:]/g, '')
+        .replace(/[\s\u3000【】\[\]（）()\/／\-—_]/g, '')
+        .toLowerCase()
+    const aliasMap: Record<keyof TemplateSectionSamples, string[]> = {
+      education: ['教育背景', '教育经历', '学历信息', '学历背景', '学习经历', ...(aiAliases?.education || [])],
+      skills: ['个人技能', '专业技能', '专业技能证书', '技能证书', '技能特长', '专业能力', '技术能力', ...(aiAliases?.skills || [])],
+      work: ['工作经历', '工作经验', '任职经历', '任职履历', '任职履历明细', '职业经历', '职业履历', '工作履历', '从业经历', '服务经历', ...(aiAliases?.work || [])],
+      project: ['项目经历', '项目经验', '项目履历', '项目案例', '交付经历', '实施经历', ...(aiAliases?.project || [])],
+      selfEvaluation: ['自我评价', '个人评价', '综合评价', '个人优势', '自我介绍', ...(aiAliases?.selfEvaluation || [])]
+    }
+    const matchSectionKey = (rowXml: string): keyof TemplateSectionSamples | null => {
+      const cells = cellsOf(rowXml)
+      if (cells.length > 2) return null
+      const txt = rowTextFlat(rowXml)
+      const normalized = normalizeLabel(txt)
+      if (!normalized || normalized.length > 12) return null
+      for (const k of Object.keys(aliasMap) as Array<keyof TemplateSectionSamples>) {
+        const keys = aliasMap[k]
+        const hit = keys.some((key) => {
+          const nk = normalizeLabel(key)
+          return nk.length >= 2 && (normalized === nk || normalized.startsWith(nk))
+        })
+        if (hit) return k
+      }
+      return null
+    }
+    const result: TemplateSectionSamples = {}
+    for (let i = 0; i < rows.length; i += 1) {
+      const key = matchSectionKey(rows[i])
+      if (!key) continue
+      const bodyIdx = i + 1
+      if (bodyIdx >= rows.length) continue
+      const bodyCells = cellsOf(rows[bodyIdx])
+      // 只对"单合并大单元格"section 采样（多列表格化字段块不需要 AI 风格迁移，靠代码字段名匹配就行）
+      if (bodyCells.length !== 1) continue
+      const paras = paragraphsOf(bodyCells[0])
+      if (!paras.length) continue
+      // 限制单段长度，避免某些模板示例特别长把 prompt 撑爆
+      result[key] = paras.map((p) => p.slice(0, 200)).slice(0, 40)
+    }
+    return result
+  } catch (e) {
+    console.warn('[shenpu-resume] extractTemplateSectionSamples failed:', e instanceof Error ? e.message : e)
+    return {}
+  }
+}
+
+function isWordResumeTemplate(template?: ProjectShenpuResumeTemplate | null): boolean {
+  return templateKindFromTemplate(template) === 'word'
+}
+
+async function renderProjectTemplateResumeDocxBuffer(params: {
+  candidateName: string
+  candidatePhone?: string | null
+  jobTitle: string
+  doc: ShenpuResumeDocument
+  templateFileName: string
+  templateAbsPath: string
+}): Promise<Buffer> {
+  const JSZip = requireCjs('jszip')
+  const zip = await JSZip.loadAsync(fs.readFileSync(params.templateAbsPath))
+  const documentFile = zip.file('word/document.xml')
+  if (!documentFile) {
+    throw new Error(`Word 模板缺少 document.xml：${params.templateFileName}`)
+  }
+  let documentXml = await documentFile.async('string')
+  const info = params.doc.personalInfo
+  const xmlEscape = (v: unknown) =>
+    String(v ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+  const xmlUnescape = (v: string) =>
+    v
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&amp;/g, '&')
+  const compactText = (v: unknown) => String(v ?? '').replace(/\s+/g, ' ').trim()
+  const normalizeLabel = (v: unknown) =>
+    compactText(v)
+      .replace(/[：:]/g, '')
+      .replace(/[\s\u3000【】\[\]（）()\/／\-—_]/g, '')
+      .toLowerCase()
+  const textOfXml = (xml: string) =>
+    xmlUnescape(
+      [...xml.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)]
+        .map((m) => m[1])
+        .join('')
+        .replace(/<[^>]+>/g, '')
+    )
+  const rowText = (rowXml: string) => compactText(textOfXml(rowXml))
+  const splitCells = (rowXml: string) => [...rowXml.matchAll(/<w:tc\b[\s\S]*?<\/w:tc>/g)].map((m) => m[0])
+  const cloneTextRunProps = (cellXml: string) => cellXml.match(/<w:rPr\b[\s\S]*?<\/w:rPr>/)?.[0] || ''
+  const cloneParagraphProps = (cellXml: string) => cellXml.match(/<w:pPr\b[\s\S]*?<\/w:pPr>/)?.[0] || ''
+  const paragraphText = (v: unknown) => {
+    const raw = String(v ?? '')
+    if (!raw) return ''
+    const leadMatch = raw.match(/^[ \u3000]+/)
+    const lead = leadMatch ? leadMatch[0] : ''
+    return lead + raw.slice(lead.length).replace(/\s+/g, ' ').trim()
+  }
+  const makeParagraphXml = (line: string | string[], pPr: string, rPr: string) => {
+    const parts = Array.isArray(line) ? line : [line]
+    const runs = parts
+      .map((part, idx) => {
+        const tab = idx > 0 ? '<w:r><w:tab/></w:r>' : ''
+        return `${tab}<w:r>${rPr}<w:t xml:space="preserve">${xmlEscape(paragraphText(part) || ' ')}</w:t></w:r>`
+      })
+      .join('')
+    return `<w:p>${pPr}${runs}</w:p>`
+  }
+  const replaceCellContent = (cellXml: string, lines: Array<string | string[]>) => {
+    const open = cellXml.match(/^<w:tc\b[^>]*>/)?.[0] || '<w:tc>'
+    const tcPr = cellXml.match(/<w:tcPr\b[\s\S]*?<\/w:tcPr>/)?.[0] || ''
+    const pPr = cloneParagraphProps(cellXml)
+    const rPr = cloneTextRunProps(cellXml)
+    const content = (lines.length ? lines : [' ']).map((line) => makeParagraphXml(line, pPr, rPr)).join('')
+    return `${open}${tcPr}${content}</w:tc>`
+  }
+  const rebuildRowWithCells = (rowXml: string, cells: string[]) => {
+    const matches = [...rowXml.matchAll(/<w:tc\b[\s\S]*?<\/w:tc>/g)]
+    let out = ''
+    let last = 0
+    matches.forEach((m, idx) => {
+      out += rowXml.slice(last, m.index) + (cells[idx] || m[0])
+      last = Number(m.index) + m[0].length
+    })
+    return out + rowXml.slice(last)
+  }
+  const replaceRowCell = (rowXml: string, cellIndex: number, lines: Array<string | string[]>) => {
+    const cells = splitCells(rowXml)
+    if (!cells[cellIndex]) return rowXml
+    cells[cellIndex] = replaceCellContent(cells[cellIndex], lines)
+    return rebuildRowWithCells(rowXml, cells)
+  }
+  const replaceRowCells = (rowXml: string, values: Array<string | string[]>) => {
+    const cells = splitCells(rowXml)
+    if (!cells.length) return rowXml
+    values.forEach((value, idx) => {
+      if (cells[idx]) cells[idx] = replaceCellContent(cells[idx], [value])
+    })
+    return rebuildRowWithCells(rowXml, cells)
+  }
+  const ensureRowCapacity = (
+    rows: string[],
+    firstDataIndex: number,
+    endIndex: number,
+    neededCount: number
+  ): number => {
+    const availableCount = Math.max(0, endIndex - firstDataIndex)
+    if (neededCount <= availableCount) return endIndex
+    const templateRow = rows[Math.max(firstDataIndex, endIndex - 1)]
+    if (!templateRow) return endIndex
+    const inserts = Array.from({ length: neededCount - availableCount }, () => templateRow)
+    rows.splice(endIndex, 0, ...inserts)
+    return endIndex + inserts.length
+  }
+  const firstEdu = params.doc.educationExperiences[0]
+  const fieldValues = new Map<string, string>([
+    ['姓名', params.candidateName],
+    ['出生年月', info.birthDate],
+    ['民族', info.ethnicity],
+    ['政治面貌', info.politicalStatus],
+    ['电话', params.candidatePhone || ''],
+    ['联系方式', params.candidatePhone || ''],
+    ['户籍', info.householdRegistration],
+    ['邮箱', info.email],
+    ['住址', info.address],
+    ['现工作地', info.address],
+    ['全日制毕业院校', firstEdu?.school || ''],
+    ['毕业院校', firstEdu?.school || ''],
+    ['全日制最高学历', firstEdu?.degree || ''],
+    ['最高学历', firstEdu?.degree || ''],
+    ['学历学位', firstEdu?.degree || ''],
+    ['毕业时间', info.graduationDate || firstEdu?.period || ''],
+    ['专业', firstEdu?.major || ''],
+    ['岗位意向', info.targetPosition || params.jobTitle],
+    ['面试岗位', info.targetPosition || params.jobTitle],
+    ['IT工作年数', info.itYears],
+    ['IT年限', info.itYears],
+    ['金融年限', info.insuranceYears],
+    ['保险行业工作年数', info.insuranceYears],
+    ['PICC项目工作年数', info.piccProjectYears]
+  ])
+  const templateSectionAliases = {
+    education: ['教育背景', '教育经历', '学历信息', '学历背景', '学习经历', ...(params.doc.templateSectionAliases?.education || [])],
+    skills: ['个人技能', '专业技能', '专业技能证书', '技能证书', '技能特长', '专业能力', '技术能力', ...(params.doc.templateSectionAliases?.skills || [])],
+    work: [
+      '工作经历',
+      '工作经验',
+      '任职经历',
+      '任职履历',
+      '任职履历明细',
+      '职业经历',
+      '职业履历',
+      '工作履历',
+      '从业经历',
+      '服务经历',
+      ...(params.doc.templateSectionAliases?.work || [])
+    ],
+    project: ['项目经历', '项目经验', '项目履历', '项目案例', '交付经历', '实施经历', ...(params.doc.templateSectionAliases?.project || [])],
+    selfEvaluation: ['自我评价', '个人评价', '综合评价', '个人优势', '自我介绍', ...(params.doc.templateSectionAliases?.selfEvaluation || [])]
+  }
+  const allSectionAliases = Object.values(templateSectionAliases).flat()
+  // 严格识别 section row：
+  // - 必须是合并/单值行（cells <= 2），多列 key-value 行（如"岗位意向/IT工作年数"5 cells）一律排除
+  // - 文本长度短（normalized <= 12 字符），避免如"技能1；技能2；证书1；证书2；"这种内容被当成"技能" section
+  // - 必须以 alias 精确开头或全等，且 alias 至少 2 字
+  const rowMatchesAnyAlias = (rowXml: string, keys: string[]): boolean => {
+    const cells = splitCells(rowXml)
+    if (cells.length > 2) return false
+    const normalized = normalizeLabel(rowText(rowXml))
+    if (!normalized || normalized.length > 12) return false
+    return keys.some((key) => {
+      const k = normalizeLabel(key)
+      if (!k || k.length < 2) return false
+      return normalized === k || normalized.startsWith(k)
+    })
+  }
+  const isSectionRow = (rowXml: string, keys = allSectionAliases) => rowMatchesAnyAlias(rowXml, keys)
+  const matchesSection = (rowXml: string, section: keyof typeof templateSectionAliases) =>
+    rowMatchesAnyAlias(rowXml, templateSectionAliases[section])
+  const findNextSectionIndex = (rows: string[], start: number) => {
+    for (let i = start; i < rows.length; i += 1) {
+      if (isSectionRow(rows[i])) return i
+    }
+    return rows.length
+  }
+  const fillKeyValueRow = (rowXml: string) => {
+    const cells = splitCells(rowXml)
+    let changed = false
+    for (let i = 0; i < cells.length - 1; i += 1) {
+      const label = normalizeLabel(textOfXml(cells[i]))
+      const value = fieldValues.get(label)
+      if (value === undefined) continue
+      // 如果下一个 cell 自身已经是另一个"字段标签"（如教育表头里"毕业院校 | 学历/学位 | 专业"），
+      // 那这是表头行，不要把候选人值塞到字段名的位置上。
+      const nextLabel = normalizeLabel(textOfXml(cells[i + 1]))
+      if (nextLabel && fieldValues.has(nextLabel)) continue
+      cells[i + 1] = replaceCellContent(cells[i + 1], [value])
+      changed = true
+      i += 1
+    }
+    return changed ? rebuildRowWithCells(rowXml, cells) : rowXml
+  }
+  // ---- 模板填充共用排版常量 ----
+  // 列与列之间的分隔：两个全角空格，简单可靠且在合并大 cell 中不会糊在一起
+  const COL_SEP = '\u3000\u3000'
+  // 段落首行缩进（两个全角空格），让 highlights 与"标题行"有视觉层级
+  const HL_INDENT = '\u3000\u3000'
+  // 单个空格段在 Word 中表现为一行空隙，用于段落级视觉分隔
+  const PARA_GAP = ' '
+  const decorateHighlight = (h: unknown) => `${HL_INDENT}${String(h || '').trim()}`
+  const joinCols = (cols: Array<string | undefined>) =>
+    cols.map((c) => String(c || '').trim()).filter(Boolean).join(COL_SEP)
+
+  const educationLines = (): string[] => {
+    const lines: string[] = ['起止时间' + COL_SEP + '学校名称' + COL_SEP + '专业（学历）' + COL_SEP + '全日制/非全日制']
+    params.doc.educationExperiences.forEach((x) => {
+      lines.push(PARA_GAP)
+      const major = [x.major, x.degree ? `（${x.degree}）` : ''].filter(Boolean).join('')
+      lines.push(joinCols([x.period, x.school, major, '全日制']))
+    })
+    return lines.length > 1 ? lines : [PARA_GAP]
+  }
+
+  // 技能：每条独占一段，结尾用"；"风格，跟人保财模板示例一致；候选人原文是什么字面就什么字面
+  const skillLines = (): string[] => {
+    const src = params.doc.coreSkills.length ? params.doc.coreSkills : params.doc.strengths
+    if (!src.length) return [PARA_GAP]
+    return src.map((s) => {
+      const t = String(s || '').trim()
+      if (!t) return PARA_GAP
+      return /[；;。！？!?]$/.test(t) ? t : `${t}；`
+    })
+  }
+
+  // 工作经历：表头 + 每条 [period, company, title] 一段；如果 AI 提取到了 highlights，紧跟一段段独立列出
+  const workLines = (): Array<string | string[]> => {
+    const lines: Array<string | string[]> = ['起止时间' + COL_SEP + '公司名称' + COL_SEP + '岗位（职务）']
+    params.doc.workExperiences.forEach((x, idx) => {
+      lines.push(PARA_GAP)
+      lines.push(joinCols([x.period, x.company, x.title]))
+      x.highlights.forEach((h) => lines.push(decorateHighlight(h)))
+      void idx
+    })
+    return lines.length > 1 ? lines : [PARA_GAP]
+  }
+
+  // 项目经历：表头 + 每个项目段落块（标题行 + 每条 highlight 一段），项目间留空段
+  const projectLines = (): Array<string | string[]> => {
+    const lines: Array<string | string[]> = ['起止时间' + COL_SEP + '项目名称' + COL_SEP + '岗位（职务）']
+    params.doc.projectExperiences.forEach((x) => {
+      lines.push(PARA_GAP)
+      lines.push(joinCols([x.period, x.name, x.role]))
+      x.highlights.forEach((h) => lines.push(decorateHighlight(h)))
+    })
+    return lines.length > 1 ? lines : [PARA_GAP]
+  }
+
+  const selfEvaluationLines = (): string[] => {
+    const out: string[] = []
+    params.doc.strengths.forEach((s) => {
+      const t = String(s || '').trim()
+      if (t) out.push(t)
+    })
+    if (!out.length && params.doc.professionalSummary) out.push(params.doc.professionalSummary)
+    return out.length ? out : [PARA_GAP]
+  }
+
+  // 业绩/成果类 highlight 关键词；命中后归入"工作业绩"，其余归"项目描述"
+  const achievementRe = /(业绩|成果|成绩|获奖|奖项|产出|收益|营收|增长|增收|降本|降低|提升|改善|减少|节省|上线|交付|落地|通过|获评|表彰|认证|获取|取得|斩获)/
+  const splitHighlightsByRole = (highlights: string[]): { desc: string[]; ach: string[] } => {
+    const desc: string[] = []
+    const ach: string[] = []
+    highlights.forEach((h) => {
+      const t = String(h || '').trim()
+      if (!t) return
+      if (achievementRe.test(t)) ach.push(t)
+      else desc.push(t)
+    })
+    return { desc, ach }
+  }
+  const spacedHighlights = (highlights: string[]): string[] => {
+    const out: string[] = []
+    highlights.forEach((h, i) => {
+      if (i > 0) out.push(PARA_GAP)
+      out.push(decorateHighlight(h))
+    })
+    return out
+  }
+  const fillSimpleSection = (rows: string[], sectionIndex: number, lines: Array<string | string[]>) => {
+    const bodyIndex = sectionIndex + 1
+    if (bodyIndex < rows.length && !isSectionRow(rows[bodyIndex])) {
+      rows[bodyIndex] = replaceRowCell(rows[bodyIndex], 0, lines)
+    }
+  }
+  // 把指定区间内每行的所有 cell 内容清空（保留 cell 结构、表格边框等样式不动）。
+  // 用途：模板里某 section 下方有"模板示例占位行"（如"2024年10月""就读学校1"），
+  // 当候选人完全没有对应数据时，避免占位文字泄漏到生成简历里。
+  const clearTemplateRowsBetween = (rows: string[], startInclusive: number, endExclusive: number) => {
+    for (let i = startInclusive; i < endExclusive; i += 1) {
+      if (isSectionRow(rows[i])) continue
+      const cells = splitCells(rows[i])
+      if (!cells.length) continue
+      rows[i] = replaceRowCells(rows[i], cells.map(() => ''))
+    }
+  }
+  // 判断 row 是不是"证书/资格/职称"那种多列表头（候选人 ShenpuResumeDocument 中没有 certificates 字段，
+  // 此类 section 严格"宁缺毋滥"：候选人简历里没写过证书就不要硬填，让模板表头保持空）。
+  const looksLikeCertificateHeaderRow = (rowXml: string): boolean => {
+    const txt = normalizeLabel(rowText(rowXml))
+    if (!txt) return false
+    return /(专业技术职称|资格|发证|颁发|证书)/.test(txt)
+  }
+  // 待整体删除的 row 区间（含起始、不含结束）。在主循环结束后统一物理删除，
+  // 用于"候选人完全没该 section 数据 + 模板里却有该 section 占位（表头+示例行）"时，
+  // 按"宁缺毋滥"删除整段 section，不让模板的占位栏目出现在生成简历里。
+  const sectionsToDelete: Array<{ start: number; end: number }> = []
+  // 智能 skills 填充：模板下方是单合并大 cell → 塞技能列表；多列表头（证书/资格表）+ 候选人没证书 → 整段删除
+  const fillSkillsSectionSmart = (rows: string[], sectionIndex: number) => {
+    const bodyIndex = sectionIndex + 1
+    const endIndex = findNextSectionIndex(rows, bodyIndex)
+    if (bodyIndex >= rows.length || isSectionRow(rows[bodyIndex])) return
+    const bodyCells = splitCells(rows[bodyIndex])
+    if (bodyCells.length <= 1) {
+      // 单合并大 cell：候选人有技能就填，没技能就连同 section 标题整段删
+      const skillData = preferAiFormatted('skills') || skillLines()
+      const hasContent = skillData.some((l) => {
+        const t = Array.isArray(l) ? l.join('') : String(l || '')
+        return t.trim().length > 0
+      })
+      if (hasContent) {
+        rows[bodyIndex] = replaceRowCell(rows[bodyIndex], 0, skillData)
+      } else {
+        sectionsToDelete.push({ start: sectionIndex, end: endIndex })
+      }
+      return
+    }
+    // 多列表头：通常是"起始年月/专业技术职称或资格/发证单位/备注"证书表
+    // 候选人有证书数据 → 按表头列对应填入；没数据 → 整段 section 删除（不留空白占位）
+    if (looksLikeCertificateHeaderRow(rows[bodyIndex])) {
+      const certs = params.doc.certificates || []
+      if (certs.length === 0) {
+        sectionsToDelete.push({ start: sectionIndex, end: endIndex })
+        return
+      }
+      // 按表头 cell 文本顺序映射候选人字段：date / title / issuer / remark
+      const headerLabels = bodyCells.map((c) => normalizeLabel(textOfXml(c)))
+      const pickValue = (lbl: string, cert: NonNullable<ShenpuResumeDocument['certificates']>[number]): string => {
+        if (/年月|起始|起止|时间|日期/.test(lbl)) return cert.date
+        if (/职称|资格|证书|名称/.test(lbl)) return cert.title
+        if (/发证|颁发|机构|单位/.test(lbl)) return cert.issuer
+        if (/备注|说明|其他/.test(lbl)) return cert.remark
+        return ''
+      }
+      // 模板示例数据行用候选人 certs 替换；不够补、超出克隆
+      fillTabularRows(
+        rows,
+        bodyIndex + 1,
+        endIndex,
+        certs.map((c) => headerLabels.map((lbl) => pickValue(lbl, c)))
+      )
+      return
+    }
+    // 其他多列形态：保持模板原样，不乱塞
+  }
+  // 优先使用 AI 按模板示例风格生成的段落数组（"格式迁移"产物）。
+  // 没有 AI 输出时再退化到代码硬拼的旧逻辑。
+  const preferAiFormatted = (key: keyof NonNullable<ShenpuResumeDocument['sectionFormattedText']>): string[] | null => {
+    const arr = params.doc.sectionFormattedText?.[key]
+    return Array.isArray(arr) && arr.length > 0 ? arr : null
+  }
+  const fillTabularRows = (
+    rows: string[],
+    firstDataIndex: number,
+    endIndex: number,
+    items: Array<Array<string | string[]>>
+  ) => {
+    endIndex = ensureRowCapacity(rows, firstDataIndex, endIndex, items.length)
+    let itemIndex = 0
+    for (let i = firstDataIndex; i < endIndex && itemIndex < items.length; i += 1) {
+      if (isSectionRow(rows[i])) break
+      rows[i] = replaceRowCells(rows[i], items[itemIndex])
+      itemIndex += 1
+    }
+  }
+  const fillEducationSection = (rows: string[], sectionIndex: number) => {
+    const bodyIndex = sectionIndex + 1
+    const endIndex = findNextSectionIndex(rows, bodyIndex)
+    if (bodyIndex >= rows.length || endIndex <= bodyIndex) return
+    // 候选人没教育数据 → 整段删除，避免模板示例"就读学校1 / 控制工程"等占位泄漏
+    if (params.doc.educationExperiences.length === 0) {
+      sectionsToDelete.push({ start: sectionIndex, end: endIndex })
+      return
+    }
+    const cells = splitCells(rows[bodyIndex])
+    const bodyText = normalizeLabel(rowText(rows[bodyIndex]))
+    const hasTableHeader = cells.length > 1 && (bodyText.includes('起始年月') || bodyText.includes('起止时间') || bodyText.includes('毕业院校'))
+    if (hasTableHeader) {
+      fillTabularRows(
+        rows,
+        bodyIndex + 1,
+        endIndex,
+        params.doc.educationExperiences.map((x) => [x.period, x.school, x.degree, x.major])
+      )
+    } else {
+      const ai = preferAiFormatted('education')
+      rows[bodyIndex] = replaceRowCell(rows[bodyIndex], 0, ai || educationLines())
+    }
+  }
+  const fillWorkSection = (rows: string[], sectionIndex: number) => {
+    const bodyIndex = sectionIndex + 1
+    const endIndex = findNextSectionIndex(rows, bodyIndex)
+    if (bodyIndex >= rows.length || endIndex <= bodyIndex) return
+    if (params.doc.workExperiences.length === 0) {
+      sectionsToDelete.push({ start: sectionIndex, end: endIndex })
+      return
+    }
+    const cells = splitCells(rows[bodyIndex])
+    const bodyText = normalizeLabel(rowText(rows[bodyIndex]))
+    const hasTableHeader = cells.length > 1 && (bodyText.includes('起始年月') || bodyText.includes('公司名称') || bodyText.includes('岗位职责'))
+    if (hasTableHeader) {
+      fillTabularRows(
+        rows,
+        bodyIndex + 1,
+        endIndex,
+        params.doc.workExperiences.map((x) => [x.period, x.company, x.title, x.highlights.join('；')])
+      )
+    } else {
+      const ai = preferAiFormatted('work')
+      rows[bodyIndex] = replaceRowCell(rows[bodyIndex], 0, ai || workLines())
+    }
+  }
+  const fillProjectBlocks = (rows: string[], bodyIndex: number, endIndex: number) => {
+    // 严格识别"X、项目名称：xxx"分块标题：必须带编号前缀（一二三/数字）+「项目名称」+「:/：」，
+    // 避免表头里普通"项目名称"列（如人保财模板）被错判为分块。
+    const projectTitleRe = /^\s*(?:[一二三四五六七八九十百千]+|\d{1,3})\s*[、.．]\s*项目名称\s*[:：]/
+    const titleIndexes: number[] = []
+    for (let i = bodyIndex; i < endIndex; i += 1) {
+      const txt = compactText(textOfXml(rows[i]))
+      if (projectTitleRe.test(txt)) titleIndexes.push(i)
+    }
+    if (!titleIndexes.length) return false
+    const appendProjectBlock = (projectIndex: number, templateStart: number, templateEnd: number, insertAt: number) => {
+      const cloned = rows.slice(templateStart, templateEnd)
+      rows.splice(insertAt, 0, ...cloned)
+      const insertedTitleIndex = insertAt
+      const insertedEndIndex = insertAt + cloned.length
+      titleIndexes.push(insertedTitleIndex)
+      fillOneProjectBlock(projectIndex, insertedTitleIndex, insertedEndIndex)
+    }
+    const fillOneProjectBlock = (projectIndex: number, start: number, stop: number) => {
+      const project = params.doc.projectExperiences[projectIndex]
+      if (!project) return
+      const projectTitleLine = `${projectIndex + 1 === 1 ? '一' : projectIndex + 1 === 2 ? '二' : projectIndex + 1 === 3 ? '三' : projectIndex + 1}、项目名称：${project.name}${project.period ? `（${project.period}）` : ''}`
+      // "宁缺毋滥"原则：候选人原文里没有明确写"项目业绩/规模/公司名"等字段，模板对应单元格就留空，
+      // 不要硬拆 highlights 去填。所有 highlights 完整保留到"项目描述"单元格，编号顺序原样。
+      const descLines = spacedHighlights(project.highlights)
+      rows[start] = replaceRowCell(rows[start], 0, [projectTitleLine])
+      let wroteProjectDetail = false
+      for (let i = start + 1; i < stop; i += 1) {
+        const cells = splitCells(rows[i])
+        if (cells.length < 2) continue
+        const label = normalizeLabel(textOfXml(cells[0]))
+        if (label.includes('公司名称')) rows[i] = replaceRowCell(rows[i], 1, [''])
+        else if (label.includes('所在职务')) rows[i] = replaceRowCell(rows[i], 1, [project.role || ''])
+        else if (label.includes('项目描述')) {
+          rows[i] = replaceRowCell(rows[i], 1, descLines.length ? descLines : [' '])
+          if (descLines.length) wroteProjectDetail = true
+        }
+        else if (label.includes('项目规模')) rows[i] = replaceRowCell(rows[i], 1, [''])
+        else if (label.includes('工作业绩')) rows[i] = replaceRowCell(rows[i], 1, [''])
+      }
+      if (!wroteProjectDetail && project.highlights.length) {
+        rows[start] = replaceRowCell(rows[start], 0, [projectTitleLine, ...descLines])
+      }
+    }
+    params.doc.projectExperiences.slice(0, titleIndexes.length).forEach((project, idx) => {
+      const start = titleIndexes[idx]
+      const stop = titleIndexes[idx + 1] || endIndex
+      fillOneProjectBlock(idx, start, stop)
+      void project
+    })
+    const baseBlockCount = titleIndexes.length
+    const templateStart = titleIndexes[baseBlockCount - 1]
+    const templateEnd = endIndex
+    let insertAt = endIndex
+    params.doc.projectExperiences.slice(baseBlockCount).forEach((_, overflowOffset) => {
+      appendProjectBlock(baseBlockCount + overflowOffset, templateStart, templateEnd, insertAt)
+      insertAt += templateEnd - templateStart
+    })
+    return true
+  }
+  const fillProjectSection = (rows: string[], sectionIndex: number) => {
+    const bodyIndex = sectionIndex + 1
+    const endIndex = findNextSectionIndex(rows, bodyIndex)
+    if (bodyIndex >= rows.length || endIndex <= bodyIndex) return
+    if (params.doc.projectExperiences.length === 0) {
+      sectionsToDelete.push({ start: sectionIndex, end: endIndex })
+      return
+    }
+    // 优先：若 section 内出现"X、项目名称：xxx"标题，按项目分块表填充每个项目的字段单元格。
+    // 否则（如人保财那种合并大单元格）退化为 single-cell 段落式填充。
+    if (fillProjectBlocks(rows, bodyIndex, endIndex)) return
+    const ai = preferAiFormatted('project')
+    rows[bodyIndex] = replaceRowCell(rows[bodyIndex], 0, ai || projectLines())
+  }
+  const rowMatches = [...documentXml.matchAll(/<w:tr\b[\s\S]*?<\/w:tr>/g)]
+  const rows = rowMatches.map((m) => m[0])
+  for (let i = 0; i < rows.length; i += 1) {
+    rows[i] = fillKeyValueRow(rows[i])
+  }
+  // 记录已 fill 过的 section row index，用于后续扫描"未知扩展栏目"时避开
+  const knownSectionRowIndexes = new Set<number>()
+  for (let i = 0; i < rows.length; i += 1) {
+    if (matchesSection(rows[i], 'education')) { fillEducationSection(rows, i); knownSectionRowIndexes.add(i) }
+    else if (matchesSection(rows[i], 'skills')) { fillSkillsSectionSmart(rows, i); knownSectionRowIndexes.add(i) }
+    else if (matchesSection(rows[i], 'work')) { fillWorkSection(rows, i); knownSectionRowIndexes.add(i) }
+    else if (matchesSection(rows[i], 'project')) { fillProjectSection(rows, i); knownSectionRowIndexes.add(i) }
+    else if (matchesSection(rows[i], 'selfEvaluation')) {
+      knownSectionRowIndexes.add(i)
+      const ai = preferAiFormatted('selfEvaluation')
+      const lines = ai || selfEvaluationLines()
+      const hasContent = lines.some((l) => {
+        const t = Array.isArray(l) ? l.join('') : String(l || '')
+        return t.trim().length > 0
+      })
+      if (hasContent) {
+        fillSimpleSection(rows, i, lines)
+      } else {
+        const endIdx = findNextSectionIndex(rows, i + 1)
+        sectionsToDelete.push({ start: i, end: endIdx })
+      }
+    }
+  }
+  // 【通用-宁缺毋滥】扫描模板里所有"未被识别为已知 section"但**看起来像章节标题行**的 row，
+  // 它们通常是用户自定义模板里的扩展栏目（证书/资格/获奖/培训/出版/科研/语言/兴趣/家庭等），
+  // ShenpuResumeDocument 里没有对应字段；候选人简历正文也没必要硬塞进去 → 整段删除。
+  // 这是通用方案，适配任意新模板，不写死任何具体模板。
+  const looksLikeExtraSectionRow = (rowXml: string): boolean => {
+    const cells = splitCells(rowXml)
+    if (cells.length > 2) return false
+    const txt = normalizeLabel(rowText(rowXml))
+    if (!txt || txt.length > 12) return false
+    // 一组常见"扩展栏目"关键词；命中其一就当成 section 标题行
+    return /(证书|资格|职称|获奖|奖项|荣誉|表彰|培训|进修|研修|论文|出版|著作|科研|专利|发明|实践|实习|社会|兼职|家庭|紧急联系|语言能力|外语|兴趣|爱好|附件|附录|备注|其他)/.test(txt)
+  }
+  const findNextAnySectionRow = (startInclusive: number): number => {
+    for (let i = startInclusive; i < rows.length; i += 1) {
+      if (knownSectionRowIndexes.has(i)) return i
+      if (isSectionRow(rows[i])) return i
+      if (looksLikeExtraSectionRow(rows[i])) return i
+    }
+    return rows.length
+  }
+  for (let i = 0; i < rows.length; i += 1) {
+    if (knownSectionRowIndexes.has(i)) continue
+    if (!looksLikeExtraSectionRow(rows[i])) continue
+    const endIdx = findNextAnySectionRow(i + 1)
+    sectionsToDelete.push({ start: i, end: endIdx })
+  }
+  // 按 start desc 倒序统一物理删除，前后不影响 index
+  sectionsToDelete
+    .sort((a, b) => b.start - a.start)
+    .forEach(({ start, end }) => {
+      rows.splice(start, Math.max(0, end - start))
+    })
+  if (rowMatches.length > 0) {
+    const firstRowIndex = Number(rowMatches[0].index)
+    const lastRowMatch = rowMatches[rowMatches.length - 1]
+    const lastRowEnd = Number(lastRowMatch.index) + lastRowMatch[0].length
+    documentXml = documentXml.slice(0, firstRowIndex) + rows.join('') + documentXml.slice(lastRowEnd)
+  }
+  zip.file('word/document.xml', documentXml)
+  return Buffer.from(await zip.generateAsync({ type: 'nodebuffer' }))
+}
+
+function renderProjectTemplateResumeHtml(params: {
+  candidateName: string
+  candidatePhone?: string | null
+  jobTitle: string
+  doc: ShenpuResumeDocument
+  templateFileName: string
+}): string {
+  const info = params.doc.personalInfo
+  const esc = escapeHtml
+  const firstEdu = params.doc.educationExperiences[0]
+  const td = (label: string, value?: unknown) =>
+    `<td class="label">${esc(label)}</td><td class="value">${esc(String(value || '').trim() || '—')}</td>`
+  const sectionRows = (items: string[]) =>
+    items.length ? items.map((x) => `<p>${esc(x)}</p>`).join('') : '<p class="muted">—</p>'
+  const line = (parts: unknown[], cls = '') =>
+    `<div class="line ${cls}"><span>${parts.map((x) => esc(String(x || '').trim() || '—')).join('</span><span>')}</span></div>`
+  const eduRows = params.doc.educationExperiences.length
+    ? params.doc.educationExperiences
+        .map((x) => {
+          const majorDegree = [x.major, x.degree].filter(Boolean).join(x.major && x.degree ? '（' : '')
+          const display = majorDegree && x.major && x.degree ? `${majorDegree}）` : majorDegree
+          return line([x.period, x.school, display, '全日制'])
+        })
+        .join('')
+    : '<p class="muted">—</p>'
+  const expRows = params.doc.workExperiences.length
+    ? params.doc.workExperiences
+        .map(
+          (x) =>
+            `${line([x.period, x.company, x.title])}${x.highlights.length ? `<div class="detail">${sectionRows(x.highlights)}</div>` : ''}`
+        )
+        .join('')
+    : '<p class="muted">—</p>'
+  const projectRows = params.doc.projectExperiences.length
+    ? params.doc.projectExperiences
+        .map(
+          (x, idx) =>
+            `${line([`项目${idx + 1}  ${x.name || ''}`, x.role, x.period], 'strong')}${sectionRows(x.highlights)}`
+        )
+        .join('')
+    : '<p class="muted">—</p>'
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+    @page { size: A4; margin: 12mm; }
+    * { box-sizing: border-box; } body { margin: 0; font-family: "Arial Unicode MS","PingFang SC","Hiragino Sans GB",sans-serif; color: #111827; font-size: 11px; line-height: 1.45; }
+    .title { text-align: center; font-size: 20px; font-weight: 800; letter-spacing: .28em; margin-bottom: 8px; }
+    table.resume { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    .resume td, .resume th { border: 1px solid #111827; padding: 6px 7px; vertical-align: middle; word-break: break-word; }
+    .resume th { background: #f3f4f6; text-align: center; font-weight: 700; }
+    .label { width: 14%; background: #f8fafc; font-weight: 700; text-align: center; }
+    .value { width: 24%; min-height: 28px; }
+    .photo { width: 18%; text-align: center; color: #6b7280; }
+    .section { background: #d8d8d8; font-weight: 800; }
+    .section-body { color: #333333; }
+    .line { display: grid; grid-template-columns: 1.1fr 1.8fr 1.4fr 1fr; gap: 14px; margin-bottom: 3px; }
+    .line span:last-child { text-align: right; }
+    .line.strong { font-weight: 700; }
+    .work .line { grid-template-columns: 1.1fr 2.1fr 1.4fr; }
+    .project .line { grid-template-columns: 2.8fr 1.3fr 1.2fr; }
+    .detail, .skills { color: #333333; margin-bottom: 4px; }
+    .detail p, .skills p { margin: 0 0 3px; }
+    .muted { color: #9ca3af; }
+    .foot { margin-top: 6px; text-align: right; color: #6b7280; font-size: 9px; }
+  </style></head><body>
+    <div class="title">个人简历</div>
+    <table class="resume">
+      <tr>${td('姓名', params.candidateName)}${td('出生年月', info.birthDate)}<td class="photo" rowspan="4">照片</td></tr>
+      <tr>${td('民族', info.ethnicity)}${td('政治面貌', info.politicalStatus)}</tr>
+      <tr>${td('电话', params.candidatePhone || '')}${td('户籍', info.householdRegistration)}</tr>
+      <tr>${td('邮箱', info.email)}${td('住址', info.address)}</tr>
+      <tr>${td('（全日制）毕业院校', firstEdu?.school || '')}${td('（全日制）最高学历', firstEdu?.degree || '')}<td></td></tr>
+      <tr>${td('毕业时间', info.graduationDate || firstEdu?.period || '')}${td('专业', firstEdu?.major || '')}<td></td></tr>
+      <tr>${td('岗位意向', info.targetPosition || params.jobTitle)}${td('IT工作年数', info.itYears)}<td></td></tr>
+      <tr>${td('保险行业工作年数', info.insuranceYears)}${td('PICC项目工作年数', info.piccProjectYears)}<td></td></tr>
+      <tr><td colspan="5" class="section">教育背景</td></tr>
+      <tr><td colspan="5" class="section-body">${line(['起止时间', '学校名称', '专业（大专/本科/研究生）', '全日制/非全日制'], 'strong')}${eduRows}</td></tr>
+      <tr><td colspan="5" class="section">个人技能</td></tr>
+      <tr><td colspan="5" class="skills">${sectionRows(params.doc.coreSkills.length ? params.doc.coreSkills : params.doc.strengths)}</td></tr>
+      <tr><td colspan="5" class="section">工作经历</td></tr>
+      <tr><td colspan="5" class="section-body work">${line(['起止时间', '公司名称', '岗位（职务）'], 'strong')}${expRows}</td></tr>
+      <tr><td colspan="5" class="section">项目经历</td></tr>
+      <tr><td colspan="5" class="section-body project">${projectRows}</td></tr>
+      <tr><td colspan="5" class="section">自我评价</td></tr>
+      <tr><td colspan="5" class="detail">${sectionRows(params.doc.strengths.length ? params.doc.strengths : [params.doc.professionalSummary])}</td></tr>
+    </table>
+    <div class="foot">基于项目模板「${esc(params.templateFileName)}」生成</div>
+  </body></html>`
+}
+
+async function renderProjectTemplateResumeXlsxBuffer(params: {
+  candidateName: string
+  candidatePhone?: string | null
+  jobTitle: string
+  doc: ShenpuResumeDocument
+  templateAbsPath: string
+}): Promise<Buffer> {
+  const ExcelJS = requireCjs('exceljs')
+  const wb = new ExcelJS.Workbook()
+  await wb.xlsx.readFile(params.templateAbsPath)
+  const ws = wb.worksheets[0]
+  if (!ws) throw new Error('Excel 模板缺少工作表')
+  const info = params.doc.personalInfo
+  const firstEdu = params.doc.educationExperiences[0]
+  const cellText = (cell: unknown): string => {
+    const v = (cell as { value?: unknown })?.value
+    if (v == null) return ''
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v)
+    if (v instanceof Date) return v.toISOString().slice(0, 10)
+    if (typeof v === 'object') {
+      const obj = v as Record<string, unknown>
+      if (Array.isArray(obj.richText)) {
+        return obj.richText
+          .map((x) => (x && typeof x === 'object' ? String((x as Record<string, unknown>).text || '') : ''))
+          .join('')
+      }
+      if (typeof obj.text === 'string') return obj.text
+      if (typeof obj.result === 'string') return obj.result
+      if (typeof obj.hyperlink === 'string' && typeof obj.text === 'string') return obj.text
+    }
+    return ''
+  }
+  const normalizeLabel = (v: unknown) =>
+    String(v ?? '')
+      .replace(/[：:\s\u3000【】\[\]（）()\/／\-—_]/g, '')
+      .toLowerCase()
+  const compact = (v: unknown) => String(v ?? '').replace(/\s+/g, ' ').trim()
+  const fieldValues = new Map<string, string>([
+    ['姓名', params.candidateName],
+    ['性别', ''],
+    ['出生年月', info.birthDate],
+    ['身份证号码', ''],
+    ['现工作职位', params.jobTitle || info.targetPosition || ''],
+    ['email', info.email],
+    ['联系电话', params.candidatePhone || ''],
+    ['工作年限', info.itYears],
+    ['金融相关工作年限', info.insuranceYears],
+    ['推荐级别', ''],
+    ['技能', (params.doc.coreSkills[0] || params.doc.strengths[0] || '').trim()],
+    ['学历', firstEdu?.degree || ''],
+    ['毕业学校', firstEdu?.school || ''],
+    ['毕业时间', info.graduationDate || firstEdu?.period || '']
+  ])
+  const workRows = params.doc.workExperiences.length ? params.doc.workExperiences : [{ company: '', period: '', title: '', highlights: [] }]
+  const projectRows = params.doc.projectExperiences.length
+    ? params.doc.projectExperiences
+    : [{ name: '', role: '', period: '', highlights: [] }]
+  let workIdx = 0
+  let projectHeaderIdx = 0
+  let projectDetailIdx = 0
+  let projectRoleIdx = 0
+  for (let r = 1; r <= ws.rowCount; r += 1) {
+    const row = ws.getRow(r)
+    const texts: string[] = []
+    for (let c = 1; c <= ws.columnCount; c += 1) texts.push(compact(cellText(row.getCell(c))))
+    const first = normalizeLabel(texts[0])
+    if (!first) continue
+    for (let c = 1; c < ws.columnCount; c += 1) {
+      const label = normalizeLabel(texts[c - 1])
+      const next = row.getCell(c + 1)
+      const value = fieldValues.get(label)
+      if (value !== undefined && compact(cellText(next)) !== label) {
+        next.value = value
+      }
+    }
+    if (first === '工作经历') {
+      const rowData = workRows[Math.min(workIdx, workRows.length - 1)]
+      if (normalizeLabel(texts[1]) !== '工作单位') {
+        if (ws.columnCount >= 2) row.getCell(2).value = rowData.company || ''
+        if (ws.columnCount >= 3) row.getCell(3).value = rowData.period || ''
+        if (ws.columnCount >= 4) row.getCell(4).value = rowData.period || ''
+        if (ws.columnCount >= 5) row.getCell(5).value = rowData.title || ''
+        workIdx += 1
+      }
+      continue
+    }
+    if (first === '项目经验') {
+      const rowData = projectRows[Math.min(projectHeaderIdx, projectRows.length - 1)]
+      const second = normalizeLabel(texts[1])
+      if (second === '项目名称') {
+        if (ws.columnCount >= 2) row.getCell(2).value = rowData.name || ''
+        if (ws.columnCount >= 3) row.getCell(3).value = rowData.period || ''
+        if (ws.columnCount >= 4) row.getCell(4).value = rowData.period || ''
+        if (ws.columnCount >= 5) row.getCell(5).value = rowData.role || ''
+        projectHeaderIdx += 1
+      } else if (second === '项目描述') {
+        const d = projectRows[Math.min(projectDetailIdx, projectRows.length - 1)]
+        const desc = d.highlights.length ? d.highlights.join('；') : d.name || ''
+        if (ws.columnCount >= 3) row.getCell(3).value = desc
+        if (ws.columnCount >= 4) row.getCell(4).value = desc
+        if (ws.columnCount >= 5) row.getCell(5).value = desc
+        projectDetailIdx += 1
+      } else if (second.includes('个人承担的角色及工作')) {
+        const d = projectRows[Math.min(projectRoleIdx, projectRows.length - 1)]
+        const roleDesc = [d.role, ...(d.highlights || []).slice(0, 2)].filter(Boolean).join('；')
+        if (ws.columnCount >= 3) row.getCell(3).value = roleDesc
+        if (ws.columnCount >= 4) row.getCell(4).value = roleDesc
+        if (ws.columnCount >= 5) row.getCell(5).value = roleDesc
+        projectRoleIdx += 1
+      }
+    }
+  }
+  return Buffer.from(await wb.xlsx.writeBuffer())
+}
+
 async function generateShenpuResumeForScreening(params: {
   screeningId: number
   candidateName: string
@@ -3322,6 +4845,7 @@ async function generateShenpuResumeForScreening(params: {
   jdText: string
   resumeText: string
   result: ResumeScreeningAiResult
+  template?: ProjectShenpuResumeTemplate | null
 }): Promise<void> {
   try {
     await ensureShenpuResumeTable()
@@ -3341,30 +4865,74 @@ async function generateShenpuResumeForScreening(params: {
       department: params.department || '',
       jdText: params.jdText,
       resumeText: params.resumeText,
-      result: params.result
+      result: params.result,
+      templateText: params.template?.text || ''
     })
+    // 注：之前在这里做了一次"AI 风格迁移"二次调用，实测会让模型把内容总结/精简、并把模板示例占位
+    // 文本（如"主要工作内容1"/"就读学校1"）抄进输出，违背"不修饰、不总结、只提取"的要求。
+    // 现在彻底关掉二次 AI 调用：候选人字段的字面值完全来自第一次 AI 结构化结果（doc），代码直接做
+    // "模板感知"的纯排版填充——表头 + 全角空格列分隔 + 每条独立段落 + 空段分隔，不改一个字。
     await mysqlPool.query(
       `UPDATE resume_screening_shenpu_resumes SET progress_percent=70, progress_stage='排版画像图表' WHERE screening_id=?`,
       [params.screeningId]
     )
-    const html = renderShenpuResumeHtml({
-      candidateName: params.candidateName,
-      candidatePhone: params.candidatePhone,
-      jobTitle: params.jobTitle,
-      department: params.department,
-      doc
-    })
-    const pdf = await renderHtmlToPdfBuffer(html)
+    const templateKind = templateKindFromTemplate(params.template)
+    const generatedBuffer =
+      templateKind === 'word'
+      ? await renderProjectTemplateResumeDocxBuffer({
+          candidateName: params.candidateName,
+          candidatePhone: params.candidatePhone,
+          jobTitle: params.jobTitle,
+          doc,
+          templateFileName: params.template?.fileName || '项目简历模板',
+          templateAbsPath: params.template!.absPath
+        })
+      : templateKind === 'xlsx'
+        ? await renderProjectTemplateResumeXlsxBuffer({
+            candidateName: params.candidateName,
+            candidatePhone: params.candidatePhone,
+            jobTitle: params.jobTitle,
+            doc,
+            templateAbsPath: params.template!.absPath
+          })
+        : await renderHtmlToPdfBuffer(
+            params.template
+              ? renderProjectTemplateResumeHtml({
+                  candidateName: params.candidateName,
+                  candidatePhone: params.candidatePhone,
+                  jobTitle: params.jobTitle,
+                  doc,
+                  templateFileName: params.template.fileName
+                })
+              : renderShenpuResumeHtml({
+                  candidateName: params.candidateName,
+                  candidatePhone: params.candidatePhone,
+                  jobTitle: params.jobTitle,
+                  department: params.department,
+                  doc
+                })
+          )
     await mysqlPool.query(
-      `UPDATE resume_screening_shenpu_resumes SET progress_percent=90, progress_stage='写入 PDF 文件' WHERE screening_id=?`,
-      [params.screeningId]
+      `UPDATE resume_screening_shenpu_resumes SET progress_percent=90, progress_stage=? WHERE screening_id=?`,
+      [templateKind === 'word' ? '写入 Word 文件' : templateKind === 'xlsx' ? '写入 Excel 文件' : '写入 PDF 文件', params.screeningId]
     )
-    const saved = saveGeneratedResumePdf(pdf, `${params.candidateName || '候选人'}-申朴简历.pdf`)
+    const outputExt = templateKind === 'word' ? '.docx' : templateKind === 'xlsx' ? '.xlsx' : '.pdf'
+    const outputMime =
+      templateKind === 'word'
+        ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        : templateKind === 'xlsx'
+          ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          : 'application/pdf'
+    const saved = saveGeneratedResumeFile(
+      generatedBuffer,
+      `${params.candidateName || '候选人'}-${params.template ? '项目模板申朴简历' : '申朴简历'}${outputExt}`,
+      outputExt
+    )
     await mysqlPool.query(
       `UPDATE resume_screening_shenpu_resumes
-       SET status='ready', file_name=?, mime_type='application/pdf', file_size_bytes=?, storage_path=?, content_json=?, progress_percent=100, progress_stage='已完成', error_message=NULL, generated_at=NOW(), updated_at=NOW()
+       SET status='ready', file_name=?, mime_type=?, file_size_bytes=?, storage_path=?, content_json=?, progress_percent=100, progress_stage='已完成', error_message=NULL, generated_at=NOW(), updated_at=NOW()
        WHERE screening_id=?`,
-      [saved.originalName, saved.sizeBytes, saved.storageKey, JSON.stringify(doc), params.screeningId]
+      [saved.originalName, outputMime, saved.sizeBytes, saved.storageKey, JSON.stringify(doc), params.screeningId]
     )
   } catch (e) {
     const message = e instanceof Error ? e.message : 'generate failed'
@@ -5398,8 +6966,103 @@ function resumeScreeningsProjectJoinSql(): string {
       LEFT JOIN projects pn ON ${onPn}`
 }
 
+function shenpuResumeWordTemplateConditionSql(projectAlias: string): string {
+  return `(TRIM(COALESCE(${projectAlias}.shenpu_resume_template_storage_path, '')) <> ''
+              AND (
+                LOWER(COALESCE(${projectAlias}.shenpu_resume_template_file_name, '')) LIKE '%.docx'
+                OR LOWER(COALESCE(${projectAlias}.shenpu_resume_template_file_name, '')) LIKE '%.doc'
+                OR LOWER(COALESCE(${projectAlias}.shenpu_resume_template_mime_type, '')) LIKE '%wordprocessingml%'
+                OR LOWER(COALESCE(${projectAlias}.shenpu_resume_template_mime_type, '')) LIKE '%msword%'
+              ))`
+}
+
+function shenpuResumeStoredWordConditionSql(screeningAlias: string): string {
+  return `(
+    LOWER(COALESCE((SELECT sr.mime_type FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%wordprocessingml%'
+    OR LOWER(COALESCE((SELECT sr.file_name FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%.docx'
+    OR LOWER(COALESCE((SELECT sr.file_name FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%.doc'
+  )`
+}
+
+function shenpuResumeXlsxTemplateConditionSql(projectAlias: string): string {
+  return `(TRIM(COALESCE(${projectAlias}.shenpu_resume_template_storage_path, '')) <> ''
+              AND (
+                LOWER(COALESCE(${projectAlias}.shenpu_resume_template_file_name, '')) LIKE '%.xlsx'
+                OR LOWER(COALESCE(${projectAlias}.shenpu_resume_template_file_name, '')) LIKE '%.xls'
+                OR LOWER(COALESCE(${projectAlias}.shenpu_resume_template_mime_type, '')) LIKE '%spreadsheetml%'
+                OR LOWER(COALESCE(${projectAlias}.shenpu_resume_template_mime_type, '')) LIKE '%ms-excel%'
+                OR LOWER(COALESCE(${projectAlias}.shenpu_resume_template_mime_type, '')) LIKE '%excel%'
+              ))`
+}
+
+function shenpuResumeStoredXlsxConditionSql(screeningAlias: string): string {
+  return `(
+    LOWER(COALESCE((SELECT sr.mime_type FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%spreadsheetml%'
+    OR LOWER(COALESCE((SELECT sr.mime_type FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%ms-excel%'
+    OR LOWER(COALESCE((SELECT sr.mime_type FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%excel%'
+    OR LOWER(COALESCE((SELECT sr.file_name FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%.xlsx'
+    OR LOWER(COALESCE((SELECT sr.file_name FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')) LIKE '%.xls'
+  )`
+}
+
+function shenpuResumeTemplateMismatchConditionSql(screeningAlias: string, projectAlias: string): string {
+  return `(
+    (${shenpuResumeWordTemplateConditionSql(projectAlias)} AND NOT ${shenpuResumeStoredWordConditionSql(screeningAlias)})
+    OR (${shenpuResumeXlsxTemplateConditionSql(projectAlias)} AND NOT ${shenpuResumeStoredXlsxConditionSql(screeningAlias)})
+  )`
+}
+
+function shenpuResumeStatusSelectSql(screeningAlias: string, projectAlias: string): string {
+  const statusSub = `(SELECT sr.status FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1)`
+  return `CASE
+    WHEN ${shenpuResumeTemplateMismatchConditionSql(screeningAlias, projectAlias)}
+      AND COALESCE(${statusSub}, 'missing') = 'ready'
+    THEN 'missing'
+    ELSE COALESCE(${statusSub}, 'missing')
+  END`
+}
+
+function shenpuResumeProgressSelectSql(screeningAlias: string, projectAlias: string): string {
+  return `CASE
+    WHEN ${shenpuResumeTemplateMismatchConditionSql(screeningAlias, projectAlias)}
+      AND COALESCE((SELECT sr.status FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), 'missing') = 'ready'
+    THEN 0
+    ELSE COALESCE((SELECT sr.progress_percent FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), 0)
+  END`
+}
+
+function shenpuResumeStageSelectSql(screeningAlias: string, projectAlias: string): string {
+  return `CASE
+    WHEN ${shenpuResumeTemplateMismatchConditionSql(screeningAlias, projectAlias)}
+      AND COALESCE((SELECT sr.status FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), 'missing') = 'ready'
+    THEN '项目模板已更新，请重新生成'
+    ELSE COALESCE((SELECT sr.progress_stage FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = ${screeningAlias}.id LIMIT 1), '')
+  END`
+}
+
 const RESUME_SCREENING_PROFILE_JOIN = `LEFT JOIN resume_screening_profiles prof ON prof.screening_id = s.id`
 let shenpuResumeTableReady = false
+let projectsShenpuTemplateColumnsReady = false
+
+async function ensureProjectsShenpuTemplateColumns(): Promise<void> {
+  if (projectsShenpuTemplateColumnsReady) return
+  const alters = [
+    `ALTER TABLE projects ADD COLUMN shenpu_resume_template_file_name VARCHAR(255) NULL AFTER member_count`,
+    `ALTER TABLE projects ADD COLUMN shenpu_resume_template_mime_type VARCHAR(128) NULL AFTER shenpu_resume_template_file_name`,
+    `ALTER TABLE projects ADD COLUMN shenpu_resume_template_size_bytes BIGINT UNSIGNED NULL AFTER shenpu_resume_template_mime_type`,
+    `ALTER TABLE projects ADD COLUMN shenpu_resume_template_storage_path VARCHAR(512) NULL AFTER shenpu_resume_template_size_bytes`,
+    `ALTER TABLE projects ADD COLUMN shenpu_resume_template_uploaded_at TIMESTAMP NULL DEFAULT NULL AFTER shenpu_resume_template_storage_path`
+  ]
+  for (const sql of alters) {
+    try {
+      await mysqlPool.query(sql)
+    } catch (e: unknown) {
+      const code = (e as { code?: string })?.code
+      if (code !== 'ER_DUP_FIELDNAME') throw e
+    }
+  }
+  projectsShenpuTemplateColumnsReady = true
+}
 
 async function ensureShenpuResumeTable(): Promise<void> {
   if (shenpuResumeTableReady) return
@@ -5485,9 +7148,9 @@ function resumeScreeningsJoinSql(
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username,
               CAST(DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS CHAR(32)) AS created_at,
               EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
-              COALESCE((SELECT sr.status FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), 'missing') AS shenpu_resume_status,
-              COALESCE((SELECT sr.progress_percent FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), 0) AS shenpu_resume_progress,
-              COALESCE((SELECT sr.progress_stage FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), '') AS shenpu_resume_stage,
+              ${shenpuResumeStatusSelectSql('s', 'pn')} AS shenpu_resume_status,
+              ${shenpuResumeProgressSelectSql('s', 'pn')} AS shenpu_resume_progress,
+              ${shenpuResumeStageSelectSql('s', 'pn')} AS shenpu_resume_stage,
               ${plainCol},
               lr.overall_score AS interview_overall_score,
               lr.passed AS interview_passed,
@@ -5603,9 +7266,9 @@ function resumeScreeningsPlainSql(
               s.status, ${ps}s.report_summary, s.evaluation_json, s.file_name, s.uploader_username,
               CAST(DATE_FORMAT(s.created_at, '%Y-%m-%d %H:%i:%s') AS CHAR(32)) AS created_at,
               EXISTS(SELECT 1 FROM resume_screening_files rf WHERE rf.screening_id = s.id LIMIT 1) AS has_original_file,
-              COALESCE((SELECT sr.status FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), 'missing') AS shenpu_resume_status,
-              COALESCE((SELECT sr.progress_percent FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), 0) AS shenpu_resume_progress,
-              COALESCE((SELECT sr.progress_stage FROM resume_screening_shenpu_resumes sr WHERE sr.screening_id = s.id LIMIT 1), '') AS shenpu_resume_stage,
+              ${shenpuResumeStatusSelectSql('s', 'pn')} AS shenpu_resume_status,
+              ${shenpuResumeProgressSelectSql('s', 'pn')} AS shenpu_resume_progress,
+              ${shenpuResumeStageSelectSql('s', 'pn')} AS shenpu_resume_stage,
               ${plainCol},
               TRIM(COALESCE(pn.name, '')) AS job_project_name
        FROM resume_screenings s
@@ -7032,10 +8695,17 @@ app.get('/api/admin/resume-screenings/:id/shenpu-resume', async (req, res) => {
   const idNum = Number(String(req.params.id || '').trim())
   if (!Number.isFinite(idNum) || idNum <= 0) return res.status(400).json({ message: 'invalid id' })
   try {
+    await ensureProjectsShenpuTemplateColumns()
+    const shenpuJobJoin = resumeScreeningsJobCodeMatchSql('j', 's')
     const [rows] = await mysqlPool.query<any[]>(
-      `SELECT status, file_name, mime_type, storage_path, error_message
-       FROM resume_screening_shenpu_resumes
-       WHERE screening_id=? LIMIT 1`,
+      `SELECT sr.status, sr.file_name, sr.mime_type, sr.storage_path, sr.error_message,
+              p.shenpu_resume_template_file_name, p.shenpu_resume_template_mime_type,
+              p.shenpu_resume_template_storage_path
+       FROM resume_screening_shenpu_resumes sr
+       LEFT JOIN resume_screenings s ON s.id = sr.screening_id
+       LEFT JOIN jobs j ON ${shenpuJobJoin}
+       LEFT JOIN projects p ON ${resumeScreeningsProjectIdMatchSql('p', 'j')}
+       WHERE sr.screening_id=? LIMIT 1`,
       [Math.floor(idNum)]
     )
     if (!rows.length) return res.status(404).json({ message: '申朴简历尚未生成' })
@@ -7044,6 +8714,15 @@ app.get('/api/admin/resume-screenings/:id/shenpu-resume', async (req, res) => {
     if (status === 'generating') return res.status(409).json({ message: '申朴简历生成中' })
     if (status !== 'ready') {
       return res.status(409).json({ message: String(r.error_message || '申朴简历生成失败') })
+    }
+    const projectTemplate = await loadProjectShenpuResumeTemplate(r)
+    const templateKind = templateKindFromTemplate(projectTemplate)
+    const storedMime = String(r.mime_type || '').toLowerCase()
+    const storedName = String(r.file_name || '').toLowerCase()
+    const storedKind = templateKindFromFile(storedName, storedMime)
+    if ((templateKind === 'word' || templateKind === 'xlsx') && templateKind !== storedKind) {
+      const kindLabel = templateKind === 'word' ? 'Word' : 'Excel'
+      return res.status(409).json({ message: `当前项目使用 ${kindLabel} 简历模板，请重新生成申朴简历。` })
     }
     const abs = resolveResumeStorageAbsPath(r.storage_path)
     if (!abs) return res.status(404).json({ message: '申朴简历文件不存在或已被移除' })
@@ -7067,29 +8746,36 @@ app.post('/api/admin/resume-screenings/:id/shenpu-resume', async (req, res) => {
   const screeningId = Math.floor(idNum)
   try {
     await ensureShenpuResumeTable()
-    const [existingRows] = await mysqlPool.query<RowDataPacket[]>(
-      `SELECT status FROM resume_screening_shenpu_resumes WHERE screening_id=? LIMIT 1`,
-      [screeningId]
-    )
-    const existingStatus = String((existingRows?.[0] as { status?: unknown } | undefined)?.status || '')
-    if (existingStatus === 'generating') {
-      return res.status(202).json({
-        data: { screeningId: String(screeningId), status: 'generating', progress: 10, stage: '准备画像数据' }
-      })
-    }
+    await ensureProjectsShenpuTemplateColumns()
     const shenpuJobJoin = resumeScreeningsJobCodeMatchSql('j', 's')
     const [rows] = await mysqlPool.query<RowDataPacket[]>(
       `SELECT s.id, s.job_code, s.candidate_name, s.candidate_phone, s.matched_job_title, s.match_score,
               s.skill_score, s.experience_score, s.education_score, s.stability_score,
               s.status, s.report_summary, s.evaluation_json, s.resume_plaintext,
-              j.title AS job_title, j.department, j.jd_text
+              j.title AS job_title, j.department, j.jd_text,
+              p.shenpu_resume_template_file_name, p.shenpu_resume_template_mime_type,
+              p.shenpu_resume_template_size_bytes, p.shenpu_resume_template_storage_path,
+              p.shenpu_resume_template_uploaded_at
        FROM resume_screenings s
        LEFT JOIN jobs j ON ${shenpuJobJoin}
+       LEFT JOIN projects p ON ${resumeScreeningsProjectIdMatchSql('p', 'j')}
        WHERE s.id=? LIMIT 1`,
       [screeningId]
     )
     if (!rows.length) return res.status(404).json({ message: '简历筛查记录不存在' })
     const row = rows[0] as Record<string, unknown>
+    const projectTemplate = await loadProjectShenpuResumeTemplate(row)
+    const [existingRows] = await mysqlPool.query<RowDataPacket[]>(
+      `SELECT status, file_name, mime_type FROM resume_screening_shenpu_resumes WHERE screening_id=? LIMIT 1`,
+      [screeningId]
+    )
+    const existing = existingRows?.[0] as { status?: unknown; file_name?: unknown; mime_type?: unknown } | undefined
+    const existingStatus = String(existing?.status || '')
+    if (existingStatus === 'generating') {
+      return res.status(202).json({
+        data: { screeningId: String(screeningId), status: 'generating', progress: 10, stage: '准备画像数据' }
+      })
+    }
     const resumeText = String(row.resume_plaintext || '').trim()
     if (!resumeText) {
       return res.status(422).json({ message: '该记录缺少原始简历正文，无法生成申朴标准简历，请重新上传可解析的简历。' })
@@ -7101,15 +8787,30 @@ app.post('/api/admin/resume-screenings/:id/shenpu-resume', async (req, res) => {
       [screeningId]
     )
     const result = resumeScreeningAiResultFromRow(row)
+    const resumeNameGuess = guessCandidateNameFromResume(resumeText)
+    const fileNameGuess = guessCandidateNameFromFilename(String(row.file_name || ''))
+    const effectiveCandidateName = chooseCandidateName(result.candidateName, resumeNameGuess, fileNameGuess)
+    if (effectiveCandidateName && effectiveCandidateName !== result.candidateName && effectiveCandidateName !== '候选人') {
+      result.candidateName = effectiveCandidateName
+      if (result.evaluationJson) {
+        result.evaluationJson = rewriteEvaluationCandidateName(result.evaluationJson, effectiveCandidateName)
+      }
+      await mysqlPool.query('UPDATE resume_screenings SET candidate_name=?, evaluation_json=? WHERE id=?', [
+        effectiveCandidateName,
+        result.evaluationJson || null,
+        screeningId
+      ])
+    }
     void generateShenpuResumeForScreening({
       screeningId,
-      candidateName: result.candidateName || '候选人',
+      candidateName: effectiveCandidateName || result.candidateName || '候选人',
       candidatePhone: result.candidatePhone,
       jobTitle: String(row.job_title || row.matched_job_title || row.job_code || ''),
       department: row.department == null ? null : String(row.department || ''),
       jdText: String(row.jd_text || ''),
       resumeText: resumeText.slice(0, RESUME_PLAINTEXT_MAX_SAVE),
-      result
+      result,
+      template: projectTemplate
     })
     return res.status(202).json({
       data: { screeningId: String(screeningId), status: 'generating', progress: 10, stage: '准备画像数据' }
@@ -7976,6 +9677,7 @@ async function processResumeScreenTask(params: {
       })
     } catch (e: unknown) {
       const code = (e as { code?: string })?.code
+      const duplicate = e instanceof ResumeScreenTaskError && e.statusCode === 409
       const message =
         e instanceof ResumeScreenTaskError
           ? e.message
@@ -7984,9 +9686,10 @@ async function processResumeScreenTask(params: {
             : 'screening failed'
       flowLog('resume-screen', false, e instanceof Error ? e.message : 'failed')
       patchResumeScreenTask(taskId, {
-        status: 'failed',
-        uploadStage: '原始简历提取失败',
-        error: message,
+        status: duplicate ? 'duplicate' : 'failed',
+        uploadProgress: duplicate ? 100 : undefined,
+        uploadStage: duplicate ? '该简历已存在，无需重复上传' : '原始简历提取失败',
+        error: duplicate ? undefined : message,
         message,
         ...(e instanceof ResumeScreenTaskError && e.extra ? e.extra : {})
       })
