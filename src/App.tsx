@@ -8146,6 +8146,7 @@ function ResumeScreeningView({
   const [uploadHint, setUploadHint] = useState('');
   const [uploadProjectFilter, setUploadProjectFilter] = useState('');
   const [uploadJobCode, setUploadJobCode] = useState('');
+  const [uploadCandidateName, setUploadCandidateName] = useState('');
   const [uploadTask, setUploadTask] = useState<ResumeUploadTask | null>(null);
   const [uploadTaskJobLabel, setUploadTaskJobLabel] = useState('');
   const [uploadTaskProjectLabel, setUploadTaskProjectLabel] = useState('');
@@ -8182,6 +8183,7 @@ function ResumeScreeningView({
   const closeUploadModal = useCallback(() => {
     setUploadModalOpen(false);
     setUploadHint('');
+    setUploadCandidateName('');
   }, []);
   useAdminOverlayLockAndEscape(Boolean(inviteModal), () => setInviteModal(null));
   useAdminOverlayLockAndEscape(uploadModalOpen, closeUploadModal);
@@ -8937,6 +8939,7 @@ function ResumeScreeningView({
     const fd = new FormData();
     fd.append('file', file);
     fd.append('jobCode', uploadJobCode);
+    if (uploadCandidateName.trim()) fd.append('candidateName', uploadCandidateName.trim());
     void miniappApiFetch('/api/admin/resume-screen', { method: 'POST', body: fd })
       .then(async (r) => {
         const j = (await r.json()) as { data?: ResumeUploadTask; message?: string }
@@ -9802,6 +9805,21 @@ function ResumeScreeningView({
                       }
                     />
                   </div>
+                </div>
+                <div>
+                  <label className="mb-0.5 block text-xs font-medium text-slate-600">
+                    候选人姓名 <span className="font-normal text-slate-400">可选</span>
+                  </label>
+                  <input
+                    value={uploadCandidateName}
+                    onChange={(e) => setUploadCandidateName(e.target.value)}
+                    disabled={uploading || uploadTaskActive}
+                    placeholder="文件名不含姓名或扫描件时建议填写"
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/20 disabled:bg-slate-50"
+                  />
+                  <p className="mt-1 text-[11px] leading-snug text-slate-500">
+                    填写后优先作为候选人姓名；不填则按文件名、简历正文和 AI 结果自动识别。
+                  </p>
                 </div>
                 {uploadHint ? (
                   <p

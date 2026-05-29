@@ -9,7 +9,6 @@ import { createRequire } from 'node:module'
 import mysql, { type PoolConnection, type ResultSetHeader, type RowDataPacket } from 'mysql2/promise'
 import multer from 'multer'
 import Redis from 'ioredis'
-import { PDFParse } from 'pdf-parse'
 import mammoth from 'mammoth'
 import {
   normalizeJobLevel,
@@ -1976,11 +1975,24 @@ function isPlaceholderCandidateName(s: string): boolean {
 
 /** 候选人姓名清洗：过滤明显非姓名文本（句子、职责片段、占位词等）。 */
 function sanitizeCandidateName(raw: unknown): string {
-  const n = String(raw ?? '')
+  let n = String(raw ?? '')
     .trim()
     .replace(/^[`"'“”‘’\s]+|[`"'“”‘’\s]+$/g, '')
     .replace(/[,，.。;；、]+$/g, '')
     .replace(/\s+/g, ' ')
+  n = n
+    .replace(/^(?:姓\s*名|姓名|名字|候选人姓名|申请人|求职者|应聘人)\s*[:：]?\s*/i, '')
+    .replace(/\s*(?:性\s*别|gender)\s*[:：]?\s*[男女MF]?.*$/i, '')
+    .replace(/\s*(?:年龄|年纪|电话|手机|邮箱|E-?mail)\s*[:：].*$/i, '')
+    .replace(/^(?:先生|女士|小姐)\s*/, '')
+    .replace(/\s*(?:先生|女士|小姐)$/, '')
+    .trim()
+  if (/^[\u4e00-\u9fa5·•．\s]+$/.test(n)) {
+    n = n.replace(/\s+/g, '')
+  }
+  if (/^[\u4e00-\u9fa5]{2,4}[男女]$/.test(n)) {
+    n = n.slice(0, -1)
+  }
   if (!n || isPlaceholderCandidateName(n)) return ''
   if (n.length < 2 || n.length > 30) return ''
   // 姓名不应包含明显句子标点、长数字、邮箱/链接等噪音。
@@ -2447,9 +2459,8 @@ function guessCandidateNameFromResume(text: string): string {
         .trim()
         .replace(/[,，.。;；、]+$/g, '')
         .replace(/\s+/g, ' ')
-      if (/^\d+$/.test(n)) continue
-      if (isPlaceholderCandidateName(n)) continue
-      if (n.length >= 2 && n.length <= 32) return n.slice(0, 64)
+      n = sanitizeCandidateName(n)
+      if (n) return n
     }
   }
   const skipLine =
@@ -2462,8 +2473,8 @@ function guessCandidateNameFromResume(text: string): string {
     if (digits.length >= 11 && /1[3-9]\d{9}/.test(digits)) continue
     if (/[@#]/.test(line) && line.length > 14) continue
     if (/^[0-9\s\-—–:+（）()]+$/.test(line)) continue
-    if (/^[\u4e00-\u9fa5·•．\s]{2,8}$/.test(line)) return line.slice(0, 64)
-    if (/^[A-Za-z][a-z]{1,12}(\s+[A-Za-z]+){0,2}$/.test(line)) return line.slice(0, 64)
+    const name = sanitizeCandidateName(line)
+    if (name) return name
   }
   return '候选人'
 }
@@ -2524,12 +2535,152 @@ function normalizePdfExtractedText(s: string): string {
   return t.replace(/([:：])\s*\n\s*/g, '$1 ')
 }
 
+let pdfParseCtorPromise: Promise<any> | null = null
+
+async function getPdfParseCtor() {
+  if (!(globalThis as { DOMException?: unknown }).DOMException) {
+    ;(globalThis as { DOMException?: unknown }).DOMException = class DOMException extends Error {
+      code = 0
+      constructor(message = '', name = 'Error') {
+        super(message)
+        this.name = name
+      }
+    }
+  }
+  if (!pdfParseCtorPromise) {
+    pdfParseCtorPromise = import('pdf-parse').then((m) => (m as { PDFParse: unknown }).PDFParse)
+  }
+  return pdfParseCtorPromise
+}
+
+type ResumeOcrIdentity = {
+  candidateName?: string
+  candidatePhone?: string
+  email?: string
+  gender?: string
+  rawText?: string
+}
+
+function resumeOcrEnabled(): boolean {
+  const v = String(process.env.RESUME_OCR_ENABLED ?? '1').trim().toLowerCase()
+  return !['0', 'false', 'no', 'off'].includes(v)
+}
+
+function resumeOcrModel(): string {
+  return process.env.QWEN_RESUME_OCR_MODEL?.trim() || 'qwen-vl-ocr-latest'
+}
+
+function resumeOcrTimeoutMs(): number {
+  const n = Number(process.env.RESUME_OCR_TIMEOUT_MS)
+  if (Number.isFinite(n) && n >= 5000) return Math.min(90000, Math.floor(n))
+  return 30000
+}
+
+async function renderPdfFirstPageToPngDataUri(buffer: Buffer): Promise<string> {
+  const dir = fs.mkdtempSync(path.join('/tmp', 'resume-ocr-'))
+  const pdfPath = path.join(dir, 'input.pdf')
+  const outPrefix = path.join(dir, 'page')
+  const outPath = `${outPrefix}.png`
+  try {
+    fs.writeFileSync(pdfPath, buffer)
+    await execFileAsync('pdftoppm', ['-f', '1', '-l', '1', '-png', '-singlefile', '-r', '160', pdfPath, outPrefix], {
+      timeout: 20000,
+      maxBuffer: 1024 * 1024 * 2
+    })
+    const img = fs.readFileSync(outPath)
+    return `data:image/png;base64,${img.toString('base64')}`
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+async function resumeFileToOcrImageDataUri(buffer: Buffer, originalname: string, mimetype: string): Promise<string> {
+  const ext = path.extname(originalname || '').toLowerCase()
+  const mime = String(mimetype || '').toLowerCase()
+  if (ext === '.pdf' || mime === 'application/pdf') return renderPdfFirstPageToPngDataUri(buffer)
+  if (mime.startsWith('image/')) return `data:${mime};base64,${buffer.toString('base64')}`
+  if (['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) {
+    const byExt = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg'
+    return `data:${byExt};base64,${buffer.toString('base64')}`
+  }
+  return ''
+}
+
+function parseResumeOcrIdentity(raw: unknown): ResumeOcrIdentity | null {
+  const text = String(raw || '')
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+  if (!text) return null
+  try {
+    const obj = JSON.parse(text) as Record<string, unknown>
+    const candidateName = sanitizeCandidateName(obj.candidateName ?? obj.name ?? obj['姓名'])
+    const candidatePhone = normalizeCnMobile(String(obj.candidatePhone ?? obj.phone ?? obj.mobile ?? obj['手机'] ?? ''))
+    const email = pickProfileStr(obj.email ?? obj.mail ?? obj['邮箱']) || ''
+    const genderRaw = pickProfileStr(obj.gender ?? obj['性别'])
+    const gender = genderRaw === '男' || genderRaw === '女' ? genderRaw : ''
+    const rawText = pickProfileStr(obj.rawText ?? obj.text ?? obj['原文']) || ''
+    if (!candidateName && !candidatePhone && !email && !gender && !rawText) return null
+    return {
+      ...(candidateName ? { candidateName } : {}),
+      ...(candidatePhone ? { candidatePhone } : {}),
+      ...(email ? { email: email.slice(0, 128) } : {}),
+      ...(gender ? { gender } : {}),
+      ...(rawText ? { rawText: rawText.slice(0, 3000) } : {})
+    }
+  } catch {
+    return null
+  }
+}
+
+async function extractResumeIdentityByOcr(
+  buffer: Buffer,
+  originalname: string,
+  mimetype: string
+): Promise<ResumeOcrIdentity | null> {
+  if (!resumeOcrEnabled() || !process.env.DASHSCOPE_API_KEY?.trim()) return null
+  const imageUrl = await resumeFileToOcrImageDataUri(buffer, originalname, mimetype)
+  if (!imageUrl) return null
+  const data = await dashScopeChatCompletions(
+    {
+      model: resumeOcrModel(),
+      temperature: 0,
+      max_tokens: 800,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content:
+            '你是简历首页 OCR 信息抽取器。只抽取图片中明确出现的信息，不要猜测，不要补全。只输出 JSON。'
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text:
+                '请从这张简历首页提取候选人身份信息。输出字段：candidateName,candidatePhone,email,gender,rawText。candidateName 只保留姓名本身，不要包含性别、年龄、职位；无法识别则为空字符串。'
+            },
+            {
+              type: 'image_url',
+              image_url: { url: imageUrl }
+            }
+          ]
+        }
+      ]
+    },
+    { timeoutMs: resumeOcrTimeoutMs() }
+  )
+  return parseResumeOcrIdentity(data?.choices?.[0]?.message?.content)
+}
+
 async function extractResumePlainText(buffer: Buffer, originalname: string, mimetype: string): Promise<string> {
   const ext = path.extname(originalname || '').toLowerCase()
   if (ext === '.txt' || mimetype === 'text/plain') {
     return buffer.toString('utf8')
   }
   if (ext === '.pdf' || mimetype === 'application/pdf') {
+    const PDFParse = await getPdfParseCtor()
     const parser = new PDFParse({ data: buffer })
     try {
       const tr = await parser.getText()
@@ -7286,8 +7437,10 @@ async function processResumeScreenTask(params: {
   jobCode: string
   file: UploadedResumeMemoryFile
   actorToken: string
+  candidateNameOverride?: string
 }): Promise<void> {
   const { taskId, jobCode, file, actorToken } = params
+  const manualCandidateName = sanitizeCandidateName(params.candidateNameOverride)
   try {
     patchResumeScreenTask(taskId, {
       status: 'running',
@@ -7306,6 +7459,7 @@ async function processResumeScreenTask(params: {
       if (!jobRows.length) throw new ResumeScreenTaskError('job not found', 404)
       const job = jobRows[0] as { title: string; department: string | null; jd_text: string | null }
       let plain: string
+      let ocrIdentity: ResumeOcrIdentity | null = null
       try {
         patchResumeScreenTask(taskId, { uploadProgress: 18, uploadStage: '提取原始简历文本' })
         plain = await extractResumePlainText(file.buffer, uploadFileName, file.mimetype || '')
@@ -7313,7 +7467,27 @@ async function processResumeScreenTask(params: {
         const msg = ex instanceof Error ? ex.message : 'parse failed'
         throw new ResumeScreenTaskError(msg, 415)
       }
-      if (!plain.trim()) throw new ResumeScreenTaskError('未能从文件中提取可读文本', 422)
+      if (!plain.trim()) {
+        patchResumeScreenTask(taskId, { uploadProgress: 24, uploadStage: '文本为空，尝试 OCR 识别首页姓名' })
+        try {
+          ocrIdentity = await extractResumeIdentityByOcr(file.buffer, uploadFileName, file.mimetype || '')
+        } catch (ocrErr) {
+          console.warn('[resume-screen] OCR fallback failed:', ocrErr instanceof Error ? ocrErr.message : ocrErr)
+        }
+        if (ocrIdentity?.candidateName || ocrIdentity?.candidatePhone || ocrIdentity?.rawText) {
+          plain = [
+            ocrIdentity.candidateName ? `姓名：${ocrIdentity.candidateName}` : '',
+            ocrIdentity.candidatePhone ? `手机：${ocrIdentity.candidatePhone}` : '',
+            ocrIdentity.email ? `邮箱：${ocrIdentity.email}` : '',
+            ocrIdentity.gender ? `性别：${ocrIdentity.gender}` : '',
+            ocrIdentity.rawText || ''
+          ]
+            .filter(Boolean)
+            .join('\n')
+        } else {
+          throw new ResumeScreenTaskError('未能从文件中提取可读文本，OCR 也未识别到首页姓名。请改用可复制文字的 PDF/DOCX 后再上传。', 422)
+        }
+      }
       patchResumeScreenTask(taskId, { uploadProgress: 30, uploadStage: '完成文本提取，开始去重' })
 
       const plainStore = plain.slice(0, RESUME_PLAINTEXT_MAX_SAVE)
@@ -7374,12 +7548,23 @@ async function processResumeScreenTask(params: {
         result = fallbackResumeScreening(plain, String(job.jd_text || ''), String(job.title || ''))
       }
 
-      const candidateName = chooseCandidateName(result.candidateName, nameGuessEarly, nameGuessFromFilename)
+      const candidateNameAuto = chooseCandidateName(result.candidateName, nameGuessEarly, nameGuessFromFilename)
+      if (!manualCandidateName && (!candidateNameAuto || candidateNameAuto === '候选人' || isLikelyBadCandidateName(candidateNameAuto))) {
+        patchResumeScreenTask(taskId, { uploadProgress: 62, uploadStage: '姓名不可靠，尝试 OCR 识别首页姓名' })
+        try {
+          ocrIdentity = ocrIdentity || (await extractResumeIdentityByOcr(file.buffer, uploadFileName, file.mimetype || ''))
+        } catch (ocrErr) {
+          console.warn('[resume-screen] OCR identity fallback failed:', ocrErr instanceof Error ? ocrErr.message : ocrErr)
+        }
+      }
+      const candidateName =
+        manualCandidateName || sanitizeCandidateName(ocrIdentity?.candidateName) || candidateNameAuto
       if (candidateName && result.evaluationJson) {
         result.evaluationJson = rewriteEvaluationCandidateName(result.evaluationJson, candidateName)
       }
       const phoneFromResult = normalizeCnMobile(String(result.candidatePhone || ''))
-      const candidatePhone: string | null = phoneFromResult || normPhoneEarly || null
+      const phoneFromOcr = normalizeCnMobile(String(ocrIdentity?.candidatePhone || ''))
+      const candidatePhone: string | null = phoneFromResult || normPhoneEarly || phoneFromOcr || null
       const normForCandidate = normalizeCnMobile(String(candidatePhone || ''))
       if (normForCandidate && !preResolveCandidateId) {
         try {
@@ -7849,8 +8034,13 @@ app.post(
   async (req, res) => {
     if (!(await assertAdminToken(req, res))) return
     const jobCode = String(req.body?.jobCode || '').trim().toUpperCase()
+    const candidateNameOverrideRaw = String(req.body?.candidateName || req.body?.candidateNameOverride || '').trim()
+    const candidateNameOverride = sanitizeCandidateName(candidateNameOverrideRaw)
     if (!jobCode) return res.status(400).json({ message: 'jobCode required' })
     if (!req.file?.buffer?.length) return res.status(400).json({ message: 'file required' })
+    if (candidateNameOverrideRaw && !candidateNameOverride) {
+      return res.status(400).json({ message: '候选人姓名格式不正确，请填写 2-4 个中文姓名或有效英文名' })
+    }
     pruneResumeScreenTasks()
     const taskId = crypto.randomUUID()
     const now = Date.now()
@@ -7875,7 +8065,7 @@ app.post(
       size: Number(req.file.size || req.file.buffer.length || 0)
     }
     const actorToken = extractAdminRequestToken(req)
-    void processResumeScreenTask({ taskId, jobCode, file, actorToken })
+    void processResumeScreenTask({ taskId, jobCode, file, actorToken, candidateNameOverride })
     res.status(202).json({ data: snapshotResumeScreenTask(task) })
   }
 )
