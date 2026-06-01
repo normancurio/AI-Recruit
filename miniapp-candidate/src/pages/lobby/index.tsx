@@ -2,7 +2,6 @@ import Taro, { useDidShow } from '@tarojs/taro'
 import { useState } from 'react'
 import { Button, Text, View } from '@tarojs/components'
 import { CandidateProfile, JobInfo } from '../../types/interview'
-import { waitForInterviewQuestionsPrefetch } from '../../services/interviewApi'
 import { flowLogInfo } from '../../utils/flowLog'
 import { preloadDigitalHumanVideos } from '../../utils/digitalHumanPreload'
 import { prefetchInterviewWarmup } from '../../utils/interviewWarmup'
@@ -12,8 +11,6 @@ import './index.scss'
 export default function LobbyPage() {
   const [profile, setProfile] = useState<CandidateProfile | null>(null)
   const [job, setJob] = useState<JobInfo | null>(null)
-  const [entering, setEntering] = useState(false)
-  const [questionsReady, setQuestionsReady] = useState(false)
 
   useDidShow(() => {
     const p = Taro.getStorageSync('candidate_profile') as CandidateProfile | undefined
@@ -26,22 +23,15 @@ export default function LobbyPage() {
     flowLogInfo('等候区', `岗位 ${j.title} session=${(Taro.getStorageSync('session_id') as string) || ''}`)
     setProfile(p)
     setJob(j)
-    setQuestionsReady(false)
     preloadDigitalHumanVideos()
     const rs = typeof p.resumeScreeningId === 'number' ? p.resumeScreeningId : undefined
-    void prefetchInterviewWarmup({ jobId: j.id, candidateName: p.name, resumeScreeningId: rs }).then(
-      (list) => {
-        if (Array.isArray(list) && list.length) setQuestionsReady(true)
-      },
-      () => {
-        /* 失败时进入面试页会再拉 */
-      }
-    )
+    // 静默预热：不在候场页暴露“加载中”，进入面试页后若还没完成，由面试页继续显示题目加载中。
+    void prefetchInterviewWarmup({ jobId: j.id, candidateName: p.name, resumeScreeningId: rs })
   })
 
-  /** 答题页会拉题、建会话；进入前尽量等预取完成，避免面试页长时间「正在准备题目」 */
+  /** 答题页会拉题、建会话；候场页只静默预热，不拦截用户进入 */
   const handleEnterInterview = async () => {
-    if (!profile || !job || entering) return
+    if (!profile || !job) return
     const cachedSid = (Taro.getStorageSync('session_id') as string) || ''
     const sid = cachedSid || `${job.id}-${profile.openid || profile.phone || 'unknown'}`
     Taro.setStorageSync('session_id', sid)
@@ -53,23 +43,6 @@ export default function LobbyPage() {
     } catch {
       /* 用户拒绝或未配置仍允许进入，面试页内会再提示 */
     }
-
-    if (!questionsReady) {
-      setEntering(true)
-      Taro.showLoading({ title: '题目生成中…', mask: true })
-      try {
-        const rs = typeof profile.resumeScreeningId === 'number' ? profile.resumeScreeningId : undefined
-        await waitForInterviewQuestionsPrefetch(job.id, profile.name, rs, { timeoutMs: 120_000 })
-        setQuestionsReady(true)
-      } catch {
-        Taro.showToast({ title: '题目仍在生成，请稍后再试', icon: 'none' })
-        return
-      } finally {
-        Taro.hideLoading()
-        setEntering(false)
-      }
-    }
-
     Taro.navigateTo({ url: '/pages/interview/index' })
   }
 
@@ -95,15 +68,10 @@ export default function LobbyPage() {
           <Text className='tip-line'>
             4. 题目由服务端大模型根据 JD 与简历生成；在本页停留时已后台准备，进入答题页后通常更快出现
           </Text>
-          {questionsReady ? (
-            <Text className='tip-line tip-line--ready'>✓ 面试题目已就绪，可直接进入</Text>
-          ) : (
-            <Text className='tip-line tip-line--pending'>正在后台生成面试题目…</Text>
-          )}
         </View>
 
-        <Button className='primary-btn' loading={entering} onClick={() => void handleEnterInterview()}>
-          {entering ? '请稍候…' : questionsReady ? '进入 AI 面试' : '进入 AI 面试（题目准备中）'}
+        <Button className='primary-btn' onClick={() => void handleEnterInterview()}>
+          进入 AI 面试
         </Button>
       </View>
     </View>

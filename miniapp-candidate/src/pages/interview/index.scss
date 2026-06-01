@@ -213,6 +213,26 @@
   box-shadow: 0 10rpx 28rpx rgba(30, 58, 95, 0.22);
 }
 
+@keyframes interviewer-avatar-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.035);
+  }
+}
+
+/* 数字人视频层：沿用旧版静态头像的轻微呼吸缩放 */
+.interviewer-circle-video-layer {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  transform-origin: center center;
+  animation: interviewer-avatar-breathe 3.2s ease-in-out infinite;
+}
+
 /* 数字人面试官视频：开场/嗯 两个视频叠放，通过透明度切换避免重新挂载导致卡顿 */
 .interviewer-circle-video {
   position: absolute;

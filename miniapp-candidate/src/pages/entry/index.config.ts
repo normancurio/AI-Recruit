@@ -1,4 +1,5 @@
 export default definePageConfig({
-  navigationBarTitleText: 'AI 面试'
+  navigationBarTitleText: '加载中',
+  navigationBarBackgroundColor: '#f8fafc'
 })
 

@@ -1130,39 +1130,41 @@ export default function InterviewPage() {
             <View className='interviewer-avatar-stack'>
               <View className='interviewer-circle-cluster'>
                 <View className='interviewer-circle-frame'>
-                  <Video
-                    id={OPENING_VIDEO_ID}
-                    className={`interviewer-circle-video${dhMode === 'speaking' ? ' interviewer-circle-video--active' : ''}`}
-                    src={openingVideoSrc}
-                    poster={AI_INTERVIEWER_IMG_URL || ''}
-                    loop
-                    muted
-                    autoplay={false}
-                    controls={false}
-                    showCenterPlayBtn={false}
-                    showPlayBtn={false}
-                    showProgress={false}
-                    showFullscreenBtn={false}
-                    enableProgressGesture={false}
-                    objectFit='cover'
-                  />
-                  <Video
-                    id={UMM_VIDEO_ID}
-                    className={`interviewer-circle-video${dhMode === 'listening' ? ' interviewer-circle-video--active' : ''}`}
-                    src={ummVideoSrc}
-                    poster={AI_INTERVIEWER_IMG_URL || ''}
-                    loop={false}
-                    muted
-                    autoplay={false}
-                    controls={false}
-                    showCenterPlayBtn={false}
-                    showPlayBtn={false}
-                    showProgress={false}
-                    showFullscreenBtn={false}
-                    enableProgressGesture={false}
-                    objectFit='cover'
-                    onEnded={handleUmmVideoEnded}
-                  />
+                  <View className='interviewer-circle-video-layer'>
+                    <Video
+                      id={OPENING_VIDEO_ID}
+                      className={`interviewer-circle-video${dhMode === 'speaking' ? ' interviewer-circle-video--active' : ''}`}
+                      src={openingVideoSrc}
+                      poster={AI_INTERVIEWER_IMG_URL || ''}
+                      loop
+                      muted
+                      autoplay={false}
+                      controls={false}
+                      showCenterPlayBtn={false}
+                      showPlayBtn={false}
+                      showProgress={false}
+                      showFullscreenBtn={false}
+                      enableProgressGesture={false}
+                      objectFit='cover'
+                    />
+                    <Video
+                      id={UMM_VIDEO_ID}
+                      className={`interviewer-circle-video${dhMode === 'listening' ? ' interviewer-circle-video--active' : ''}`}
+                      src={ummVideoSrc}
+                      poster={AI_INTERVIEWER_IMG_URL || ''}
+                      loop={false}
+                      muted
+                      autoplay={false}
+                      controls={false}
+                      showCenterPlayBtn={false}
+                      showPlayBtn={false}
+                      showProgress={false}
+                      showFullscreenBtn={false}
+                      enableProgressGesture={false}
+                      objectFit='cover'
+                      onEnded={handleUmmVideoEnded}
+                    />
+                  </View>
                   <View className='interviewer-circle-badge'>
                     <Text className='interviewer-circle-badge-text'>AI 面试官</Text>
                   </View>
