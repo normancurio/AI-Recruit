@@ -10,3 +10,5 @@ storage/resumes/
 server/storage/resumes/
 1#
 .local-dumps/
+miniapp-candidate/.swc/
+miniapp-candidate/preview-qr/
