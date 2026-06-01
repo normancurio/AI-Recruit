@@ -213,27 +213,27 @@
   box-shadow: 0 10rpx 28rpx rgba(30, 58, 95, 0.22);
 }
 
-@keyframes interviewer-avatar-breathe {
-  0%,
-  100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.035);
-  }
-}
-
-/* cover + 顶部对齐；轻微呼吸仅作用在头像层，外圈装饰环保持对齐 */
-.interviewer-circle-fill {
+/* 数字人面试官视频：开场/嗯 两个视频叠放，通过透明度切换避免重新挂载导致卡顿 */
+.interviewer-circle-video {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
   border-radius: 50%;
+  overflow: hidden;
   background-color: #94b8e8;
-  background-repeat: no-repeat;
-  background-size: cover;
-  background-position: center top;
-  transform-origin: center center;
-  animation: interviewer-avatar-breathe 3.2s ease-in-out infinite;
+  opacity: 0;
+  transition: opacity 220ms ease;
+  pointer-events: none;
+}
+
+.interviewer-circle-video--active {
+  opacity: 1;
+}
+
+/* 播报结束切到作答：开场层立刻隐藏，不等多余过渡 */
+.interviewer-circle-video:not(.interviewer-circle-video--active) {
+  transition: opacity 80ms ease;
 }
 
 /* 圆内底部胶囊标签 */

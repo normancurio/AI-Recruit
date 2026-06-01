@@ -3390,7 +3390,7 @@ function sanitizeShenpuResumeDocument(raw: unknown, fallback: ShenpuResumeDocume
 function isMentionedInResume(probe: string, resumeNoSpace: string): boolean {
   if (!probe) return false
   // 取实体核心 token（最长连续中文/英数字串）防止"，：（）"等分隔影响匹配
-  const tokens = probe.match(/[\u4e00-\u9fffA-Za-z0-9]+/g) || []
+  const tokens: string[] = probe.match(/[\u4e00-\u9fffA-Za-z0-9]+/g) || []
   if (!tokens.length) return false
   // 找最长的 token 在简历里出现即可（一般是公司名/项目主名）
   const longest = tokens.sort((a, b) => b.length - a.length)[0]
@@ -3414,7 +3414,7 @@ function dropTemplatePlaceholdersFromDoc(
   if (!resumeNoSpace) return doc
   const isFromTemplateOnly = (probe: string): boolean => {
     if (!probe) return false
-    const tokens = probe.match(/[\u4e00-\u9fffA-Za-z0-9]+/g) || []
+    const tokens: string[] = probe.match(/[\u4e00-\u9fffA-Za-z0-9]+/g) || []
     if (!tokens.length) return false
     const longest = tokens.sort((a, b) => b.length - a.length)[0]
     const slice = longest.slice(0, Math.min(longest.length, 8))
@@ -4046,7 +4046,6 @@ function renderShenpuResumeHtml(params: {
       <div class="brand">申朴标准简历</div>
       <div class="name">${escapeHtml(params.candidateName || '候选人')}</div>
       <div class="headline">${escapeHtml(params.doc.headline)}</div>
-      <div class="meta">目标岗位：${escapeHtml(params.jobTitle)}　部门：${escapeHtml(params.department || '—')}　联系电话：${escapeHtml(params.candidatePhone || '—')}</div>
       <div class="grid">
         <div class="card"><h3>职业概述</h3><p>${escapeHtml(params.doc.professionalSummary)}</p></div>
         <div class="card"><h3>岗位匹配摘要</h3><p>${escapeHtml(params.doc.targetMatchSummary)}</p></div>

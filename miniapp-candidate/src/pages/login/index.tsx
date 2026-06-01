@@ -5,6 +5,8 @@ import { loginWithInviteCode } from '../../services/interviewApi'
 import { loginAndGetOpenId } from '../../services/authApi'
 import type { CandidateProfile } from '../../types/interview'
 import { flowLog, flowLogInfo } from '../../utils/flowLog'
+import { preloadDigitalHumanVideos } from '../../utils/digitalHumanPreload'
+import { prefetchInterviewWarmup } from '../../utils/interviewWarmup'
 
 import './index.scss'
 
@@ -20,6 +22,8 @@ export default function LoginPage() {
   }))
 
   useDidShow(async () => {
+    // 邀请码页就提前下载数字人视频，进入面试页时直接走本地缓存，避免视频未就绪卡顿。
+    preloadDigitalHumanVideos()
     try {
       let oid = (Taro.getStorageSync('wx_openid') as string) || ''
       if (!oid) {
@@ -95,6 +99,15 @@ export default function LoginPage() {
       Taro.setStorageSync('candidate_profile', profile)
       Taro.setStorageSync('candidate_job', data.job)
       flowLog('登录 login-invite', true, `session=${data.sessionId} trtc=${data.trtc ? 'yes' : 'no'}`)
+      // 登录成功即后台出题（候场阅读说明时通常已生成完），缩短进入面试页等待
+      void prefetchInterviewWarmup({
+        jobId: data.job.id,
+        candidateName: data.name,
+        resumeScreeningId:
+          typeof data.resumeScreeningId === 'number' && data.resumeScreeningId > 0
+            ? data.resumeScreeningId
+            : undefined
+      })
       Taro.navigateTo({ url: '/pages/lobby/index' })
     } catch (e) {
       const msg = e instanceof Error ? e.message : '登录或邀请码校验失败'

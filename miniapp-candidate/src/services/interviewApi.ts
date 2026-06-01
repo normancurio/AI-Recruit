@@ -119,7 +119,11 @@ export async function fetchInterviewQuestions(
 
 const QUESTIONS_PREFETCH_STORAGE_KEY = 'interview_questions_prefetch_v1'
 
-function cacheKeyForInterviewQuestions(jobId: string, candidateName: string, resumeScreeningId?: number) {
+export function buildInterviewQuestionsCacheKey(
+  jobId: string,
+  candidateName: string,
+  resumeScreeningId?: number
+) {
   const jid = String(jobId || '').trim().toUpperCase()
   const name = String(candidateName || '').trim()
   const rs =
@@ -132,40 +136,113 @@ function cacheKeyForInterviewQuestions(jobId: string, candidateName: string, res
 const inflightQuestionsByKey = new Map<string, Promise<InterviewQuestion[]>>()
 /** 预取成功但 Storage 写入失败时仍可供面试页消费，避免再次打大模型 */
 const resolvedQuestionsMemory = new Map<string, InterviewQuestion[]>()
+/** 预取已完成、in-flight 已清理时，避免面试页重复请求大模型 */
+const settledQuestionsByKey = new Map<string, InterviewQuestion[]>()
+
+function persistPrefetchedQuestions(key: string, questions: InterviewQuestion[]) {
+  resolvedQuestionsMemory.set(key, questions)
+  settledQuestionsByKey.set(key, questions)
+  try {
+    Taro.setStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY, {
+      cacheKey: key,
+      questions,
+      at: Date.now()
+    })
+  } catch {
+    /* 存储配额等；仍保留内存 / settled 供面试页读取 */
+  }
+}
+
+function readPrefetchedQuestions(key: string, consume: boolean): InterviewQuestion[] | null {
+  try {
+    const raw = Taro.getStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY) as
+      | { cacheKey?: string; questions?: InterviewQuestion[] }
+      | undefined
+    if (raw?.cacheKey === key && Array.isArray(raw.questions) && raw.questions.length) {
+      if (consume) {
+        Taro.removeStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY)
+        resolvedQuestionsMemory.delete(key)
+        settledQuestionsByKey.delete(key)
+      }
+      return raw.questions
+    }
+  } catch {
+    /* ignore */
+  }
+  const mem = resolvedQuestionsMemory.get(key) || settledQuestionsByKey.get(key)
+  if (!mem?.length) return null
+  if (consume) {
+    resolvedQuestionsMemory.delete(key)
+    settledQuestionsByKey.delete(key)
+    try {
+      Taro.removeStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY)
+    } catch {
+      /* ignore */
+    }
+  }
+  return mem
+}
 
 /**
- * 等候页可调用：在候选人阅读说明时后台请求大模型出题，缩短进入答题页的等待。
- * 与 fetchInterviewQuestionsOrPrefetched 共享同一 in-flight Promise，避免重复请求。
+ * 登录/候场可调用：后台请求大模型出题，与 fetchInterviewQuestionsOrPrefetched 共享 in-flight。
+ * @returns 进行中的或新发起的预取 Promise；mock 模式下为已 resolve 的空结果。
  */
 export function prefetchInterviewQuestions(
   jobId: string,
   candidateName?: string,
   resumeScreeningId?: number
-): void {
-  if (useMock()) return
-  const key = cacheKeyForInterviewQuestions(jobId, String(candidateName || ''), resumeScreeningId)
-  if (inflightQuestionsByKey.has(key)) return
+): Promise<InterviewQuestion[]> {
+  if (useMock()) return Promise.resolve([])
+  const key = buildInterviewQuestionsCacheKey(jobId, String(candidateName || ''), resumeScreeningId)
+  const cached = readPrefetchedQuestions(key, false)
+  if (cached?.length) return Promise.resolve(cached)
 
-  const p = fetchInterviewQuestions(jobId, candidateName, resumeScreeningId).then((questions) => {
-    resolvedQuestionsMemory.set(key, questions)
-    try {
-      Taro.setStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY, {
-        cacheKey: key,
-        questions,
-        at: Date.now()
-      })
-    } catch {
-      /* 存储配额等；仍保留内存供面试页读取 */
-    }
-    return questions
-  })
+  const existing = inflightQuestionsByKey.get(key)
+  if (existing) return existing
+
+  const p = fetchInterviewQuestions(jobId, candidateName, resumeScreeningId)
+    .then((questions) => {
+      persistPrefetchedQuestions(key, questions)
+      return questions
+    })
+    .finally(() => {
+      inflightQuestionsByKey.delete(key)
+    })
 
   inflightQuestionsByKey.set(key, p)
-  p.catch(() => {
-    /* 预取失败时用户仍可在面试页重新拉题 */
-  }).finally(() => {
-    inflightQuestionsByKey.delete(key)
-  })
+  return p
+}
+
+/**
+ * 进入答题前等待预取完成（已有缓存则立刻返回），避免面试页卡在「正在准备题目」。
+ */
+export async function waitForInterviewQuestionsPrefetch(
+  jobId: string,
+  candidateName?: string,
+  resumeScreeningId?: number,
+  opts?: { timeoutMs?: number }
+): Promise<InterviewQuestion[]> {
+  const timeoutMs = opts?.timeoutMs ?? 120_000
+  const key = buildInterviewQuestionsCacheKey(jobId, String(candidateName || ''), resumeScreeningId)
+  const hit = readPrefetchedQuestions(key, false)
+  if (hit?.length) return hit
+
+  let p = inflightQuestionsByKey.get(key)
+  if (!p) {
+    p = prefetchInterviewQuestions(jobId, candidateName, resumeScreeningId)
+  }
+
+  let timer: ReturnType<typeof setTimeout> | null = null
+  try {
+    return await Promise.race([
+      p,
+      new Promise<InterviewQuestion[]>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('prefetch_timeout')), timeoutMs)
+      })
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 /** 优先使用等候页预取 / 进行中的预取，再回落到实时请求 */
@@ -177,31 +254,10 @@ export async function fetchInterviewQuestionsOrPrefetched(
   if (useMock()) {
     return fetchInterviewQuestions(jobId, candidateName, resumeScreeningId)
   }
-  const key = cacheKeyForInterviewQuestions(jobId, String(candidateName || ''), resumeScreeningId)
+  const key = buildInterviewQuestionsCacheKey(jobId, String(candidateName || ''), resumeScreeningId)
 
-  try {
-    const raw = Taro.getStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY) as
-      | { cacheKey?: string; questions?: InterviewQuestion[] }
-      | undefined
-    if (raw?.cacheKey === key && Array.isArray(raw.questions) && raw.questions.length) {
-      Taro.removeStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY)
-      resolvedQuestionsMemory.delete(key)
-      return raw.questions
-    }
-  } catch {
-    /* ignore */
-  }
-
-  const memHit = resolvedQuestionsMemory.get(key)
-  if (memHit?.length) {
-    resolvedQuestionsMemory.delete(key)
-    try {
-      Taro.removeStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY)
-    } catch {
-      /* ignore */
-    }
-    return memHit
-  }
+  const cached = readPrefetchedQuestions(key, true)
+  if (cached?.length) return cached
 
   const inflight = inflightQuestionsByKey.get(key)
   if (inflight) {
