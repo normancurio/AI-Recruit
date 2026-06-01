@@ -43,10 +43,11 @@ test('resume upload rejects template/file labels as candidate names', () => {
   assert.match(serverSource, /if \(NON_PERSON_CANDIDATE_NAME_RE\.test\(n\)\) return ''/)
 })
 
-test('resume upload candidate name uses resume content before filename fallback', () => {
+test('resume upload candidate name prefers filename when it contains a plausible name', () => {
   assert.match(serverSource, /const contactBlockName = t\.match/)
   assert.match(serverSource, /\(\?:电话\|手机\|邮箱\|生日\|现居\|院校\)/)
   assert.match(serverSource, /for \(let i = parts\.length - 1; i >= 0; i -= 1\) candidates\.push\(parts\[i\]!\)/)
   assert.doesNotMatch(serverSource, /if \(i > 0\) candidates\.push\(parts\[i - 1\]!\)/)
-  assert.match(serverSource, /return resume \|\| ai \|\| file \|\| '候选人'/)
+  assert.match(serverSource, /if \(file\) return file/)
+  assert.match(serverSource, /[\u4e00-\u9fa5]{2,4}\s*的?\s*(?:个人)?简历/)
 })

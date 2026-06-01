@@ -5,7 +5,7 @@ Use this file as the project-level source of truth for Codex work in this reposi
 ## Module Names
 
 - When the user says `后台`, work in `src/`.
-- When the user says `客户端` or `用户端`, work in `miniapp-candidate/`.
+- When the user says `客户端` or `用户端`, work in `miniapp-candidate/`（微信小程序）或 `web-candidate/`（PC/H5 浏览器版）。
 - When the user says `服务端`, `api`, or `接口`, work in `server/`.
 
 Keep answers and edits scoped to the named module unless the user explicitly asks to cross module boundaries.

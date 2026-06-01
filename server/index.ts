@@ -50,6 +50,7 @@ import {
   buildDeliveryManagerPerformanceReport,
   type DeliveryPerformanceUiRole
 } from './deliveryManagerPerformanceReport.ts'
+import { buildXfyunIatAuthWsUrl, checkXfyunIatEnv } from './xfyunIat.ts'
 
 const requireCjs = createRequire(import.meta.url)
 
@@ -226,7 +227,13 @@ function getRedisClient(): Redis | null {
     return null
   }
   try {
-    const baseOpts = { maxRetriesPerRequest: 2, enableReadyCheck: true }
+    const baseOpts = {
+      maxRetriesPerRequest: 1,
+      enableReadyCheck: true,
+      connectTimeout: 2500,
+      commandTimeout: 2500,
+      lazyConnect: true
+    }
     const client =
       url.length > 0
         ? new Redis(url, baseOpts)
@@ -256,7 +263,13 @@ async function pingRedis(): Promise<boolean> {
   const r = getRedisClient()
   if (!r) return false
   try {
-    return (await r.ping()) === 'PONG'
+    const pong = await Promise.race([
+      r.ping(),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('redis ping timeout')), 2800)
+      })
+    ])
+    return pong === 'PONG'
   } catch {
     return false
   }
@@ -269,6 +282,47 @@ const ADMIN_CAPTCHA_TTL_SEC = Math.min(
   600,
   Math.max(60, Number.parseInt(String(process.env.ADMIN_CAPTCHA_TTL_SEC || '180'), 10) || 180)
 )
+
+type AdminCaptchaMemEntry = { text: string; expiresAt: number }
+const adminCaptchaMemory = new Map<string, AdminCaptchaMemEntry>()
+
+function pruneAdminCaptchaMemory(): void {
+  const now = Date.now()
+  for (const [id, entry] of adminCaptchaMemory) {
+    if (entry.expiresAt <= now) adminCaptchaMemory.delete(id)
+  }
+}
+
+function storeAdminCaptchaInMemory(id: string, text: string): void {
+  pruneAdminCaptchaMemory()
+  adminCaptchaMemory.set(id, {
+    text: text.toLowerCase(),
+    expiresAt: Date.now() + ADMIN_CAPTCHA_TTL_SEC * 1000
+  })
+}
+
+function consumeAdminCaptchaFromMemory(id: string, input: string): boolean {
+  pruneAdminCaptchaMemory()
+  const entry = adminCaptchaMemory.get(id)
+  if (!entry) return false
+  if (entry.text !== input.toLowerCase()) return false
+  adminCaptchaMemory.delete(id)
+  return true
+}
+
+/** Redis 已配置但本机连不上时（常见于本地开发连生产 Redis），验证码改存进程内存 */
+async function storeAdminCaptcha(id: string, text: string): Promise<void> {
+  if (adminRedisConfigured() && (await pingRedis())) {
+    const r = getRedisClient()
+    if (!r) throw new Error('redis client missing')
+    await r.setex(`${ADMIN_CAPTCHA_PREFIX}${id}`, ADMIN_CAPTCHA_TTL_SEC, text.toLowerCase())
+    return
+  }
+  if (adminRedisConfigured()) {
+    flowLog('admin/captcha', false, 'Redis 不可达，使用进程内存验证码（本地开发回退）')
+  }
+  storeAdminCaptchaInMemory(id, text)
+}
 
 function escapeXmlText(s: string): string {
   return String(s)
@@ -318,11 +372,14 @@ function buildAdminCaptchaSvg(text: string): string {
 
 /** 校验通过后删除 key（一次性）；错误输入不删，可继续试同一图 */
 async function verifyAdminCaptchaAndConsume(captchaId: string, captchaCode: string): Promise<boolean> {
-  const r = getRedisClient()
-  if (!r) return false
   const id = String(captchaId || '').trim()
   const input = String(captchaCode || '').trim().toLowerCase()
   if (!id || !input) return false
+  if (adminCaptchaMemory.has(id)) {
+    return consumeAdminCaptchaFromMemory(id, input)
+  }
+  const r = getRedisClient()
+  if (!r) return false
   const key = `${ADMIN_CAPTCHA_PREFIX}${id}`
   try {
     const stored = await r.get(key)
@@ -331,7 +388,7 @@ async function verifyAdminCaptchaAndConsume(captchaId: string, captchaCode: stri
     await r.del(key)
     return true
   } catch {
-    return false
+    return consumeAdminCaptchaFromMemory(id, input)
   }
 }
 
@@ -2090,6 +2147,17 @@ function guessCandidateNameFromFilename(filename: string): string {
     return normalizeChineseNameToken(yearName[1])
   }
 
+  const resumeLabelName = base.match(/([\u4e00-\u9fa5]{2,4})\s*的?\s*(?:个人)?简历/)
+  if (resumeLabelName?.[1] && isPlausibleFilenameCandidateName(resumeLabelName[1])) {
+    return normalizeChineseNameToken(resumeLabelName[1])
+  }
+
+  const enLead = base.match(/^([A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+){0,2})(?:\s|[-_.]|$)/)
+  if (enLead?.[1]) {
+    const en = sanitizeCandidateName(enLead[1])
+    if (en) return en
+  }
+
   const parts = base
     .split(/[-\s]+/)
     .map((p) => normalizeChineseNameToken(p))
@@ -2123,7 +2191,11 @@ function chooseCandidateName(aiName: string, resumeName: string, filenameName: s
   const ai = sanitizeCandidateName(aiName)
   const resume = sanitizeCandidateName(resumeName)
   const file = sanitizeCandidateName(filenameName)
-  return resume || ai || file || '候选人'
+  /** 招聘侧习惯在文件名写真实姓名；正文首行猜测易误判为职位/公司 */
+  if (file) return file
+  if (ai && !isLikelyBadCandidateName(aiName)) return ai
+  if (resume && !isLikelyBadCandidateName(resumeName)) return resume
+  return ai || resume || '候选人'
 }
 
 function rewriteEvaluationCandidateName(evaluationJson: string, candidateName: string): string {
@@ -2678,34 +2750,135 @@ function resumeOcrTimeoutMs(): number {
   return 30000
 }
 
-async function renderPdfFirstPageToPngDataUri(buffer: Buffer): Promise<string> {
+function resumeOcrMaxPages(): number {
+  const n = Number(process.env.RESUME_OCR_MAX_PAGES)
+  if (Number.isFinite(n) && n >= 1) return Math.min(5, Math.floor(n))
+  return 3
+}
+
+function resumeOcrRawTextMaxChars(): number {
+  const n = Number(process.env.RESUME_OCR_RAWTEXT_MAX)
+  if (Number.isFinite(n) && n >= 1000) return Math.min(30000, Math.floor(n))
+  return 15000
+}
+
+function resumePlaintextMeaningfulLength(text: string): number {
+  const t = String(text || '').replace(/\s+/g, '')
+  let n = 0
+  for (const ch of t) {
+    if (/[\u4e00-\u9fa5A-Za-z0-9]/.test(ch) || '@.+/-'.includes(ch)) n += 1
+  }
+  return n
+}
+
+/** 扫描 PDF / 图片简历常见：正文极短、中文占比低、缺少简历关键词 */
+function isResumePlaintextLowQuality(text: string, fileSizeBytes: number): boolean {
+  const t = String(text || '').trim()
+  if (!t) return true
+  const meaningful = resumePlaintextMeaningfulLength(t)
+  if (meaningful < 60) return true
+  if (fileSizeBytes > 180_000 && meaningful < 220) return true
+  const cn = (t.match(/[\u4e00-\u9fa5]/g) || []).length
+  const letters = (t.match(/[A-Za-z]/g) || []).length
+  const signalChars = cn + letters
+  if (meaningful > 80 && signalChars / Math.max(1, meaningful) < 0.12) return true
+  const hasResumeSignal =
+    /(?:工作经|项目经|教育|技能|电话|手机|邮箱|大学|学院|本科|硕士|职责|公司|求职)/.test(t)
+  const hasPhone = /1[3-9]\d{9}/.test(t.replace(/\s/g, ''))
+  const hasEmail = /@/.test(t)
+  if (meaningful < 450 && !hasResumeSignal && !hasPhone && !hasEmail) return true
+  return false
+}
+
+function resumeFileSupportsOcr(originalname: string, mimetype: string): boolean {
+  const ext = path.extname(originalname || '').toLowerCase()
+  const mime = String(mimetype || '').toLowerCase()
+  if (ext === '.pdf' || mime === 'application/pdf') return true
+  if (mime.startsWith('image/')) return true
+  return ['.png', '.jpg', '.jpeg', '.webp'].includes(ext)
+}
+
+function buildPlainFromOcrIdentity(ocr: ResumeOcrIdentity): string {
+  const header = [
+    ocr.candidateName ? `姓名：${ocr.candidateName}` : '',
+    ocr.candidatePhone ? `手机：${ocr.candidatePhone}` : '',
+    ocr.email ? `邮箱：${ocr.email}` : '',
+    ocr.gender ? `性别：${ocr.gender}` : ''
+  ]
+    .filter(Boolean)
+    .join('\n')
+  const body = String(ocr.rawText || '').trim()
+  if (header && body) {
+    const headName = ocr.candidateName || ''
+    if (headName && body.includes(headName)) return body
+    return `${header}\n\n${body}`
+  }
+  return header || body
+}
+
+function shouldPreferOcrPlaintext(extracted: string, ocr: ResumeOcrIdentity): boolean {
+  const ocrPlain = buildPlainFromOcrIdentity(ocr)
+  const ocrLen = resumePlaintextMeaningfulLength(ocrPlain)
+  const extLen = resumePlaintextMeaningfulLength(extracted)
+  return ocrLen > extLen + 80
+}
+
+async function renderPdfPagesToPngDataUris(buffer: Buffer, maxPages: number): Promise<string[]> {
   const dir = fs.mkdtempSync(path.join('/tmp', 'resume-ocr-'))
   const pdfPath = path.join(dir, 'input.pdf')
   const outPrefix = path.join(dir, 'page')
-  const outPath = `${outPrefix}.png`
   try {
     fs.writeFileSync(pdfPath, buffer)
-    await execFileAsync('pdftoppm', ['-f', '1', '-l', '1', '-png', '-singlefile', '-r', '160', pdfPath, outPrefix], {
-      timeout: 20000,
-      maxBuffer: 1024 * 1024 * 2
+    await execFileAsync(
+      'pdftoppm',
+      ['-f', '1', '-l', String(Math.max(1, maxPages)), '-png', '-r', '160', pdfPath, outPrefix],
+      { timeout: 25000, maxBuffer: 1024 * 1024 * 4 }
+    )
+    const files = fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.png'))
+      .sort()
+    return files.map((f) => {
+      const img = fs.readFileSync(path.join(dir, f))
+      return `data:image/png;base64,${img.toString('base64')}`
     })
-    const img = fs.readFileSync(outPath)
-    return `data:image/png;base64,${img.toString('base64')}`
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 }
 
-async function resumeFileToOcrImageDataUri(buffer: Buffer, originalname: string, mimetype: string): Promise<string> {
+async function resumeFileToOcrImageDataUris(
+  buffer: Buffer,
+  originalname: string,
+  mimetype: string
+): Promise<string[]> {
   const ext = path.extname(originalname || '').toLowerCase()
   const mime = String(mimetype || '').toLowerCase()
-  if (ext === '.pdf' || mime === 'application/pdf') return renderPdfFirstPageToPngDataUri(buffer)
-  if (mime.startsWith('image/')) return `data:${mime};base64,${buffer.toString('base64')}`
+  if (ext === '.pdf' || mime === 'application/pdf') {
+    try {
+      const pages = await renderPdfPagesToPngDataUris(buffer, resumeOcrMaxPages())
+      if (pages.length) return pages
+    } catch (e) {
+      console.warn('[resume-ocr] pdftoppm failed, skip PDF OCR:', e instanceof Error ? e.message : e)
+      return []
+    }
+  }
+  if (mime.startsWith('image/')) return [`data:${mime};base64,${buffer.toString('base64')}`]
   if (['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) {
     const byExt = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg'
-    return `data:${byExt};base64,${buffer.toString('base64')}`
+    return [`data:${byExt};base64,${buffer.toString('base64')}`]
   }
-  return ''
+  return []
+}
+
+async function renderPdfFirstPageToPngDataUri(buffer: Buffer): Promise<string> {
+  const pages = await renderPdfPagesToPngDataUris(buffer, 1)
+  return pages[0] || ''
+}
+
+async function resumeFileToOcrImageDataUri(buffer: Buffer, originalname: string, mimetype: string): Promise<string> {
+  const pages = await resumeFileToOcrImageDataUris(buffer, originalname, mimetype)
+  return pages[0] || ''
 }
 
 function parseResumeOcrIdentity(raw: unknown): ResumeOcrIdentity | null {
@@ -2728,11 +2901,51 @@ function parseResumeOcrIdentity(raw: unknown): ResumeOcrIdentity | null {
       ...(candidatePhone ? { candidatePhone } : {}),
       ...(email ? { email: email.slice(0, 128) } : {}),
       ...(gender ? { gender } : {}),
-      ...(rawText ? { rawText: rawText.slice(0, 3000) } : {})
+      ...(rawText ? { rawText: rawText.slice(0, resumeOcrRawTextMaxChars()) } : {})
     }
   } catch {
     return null
   }
+}
+
+async function extractResumeByOcr(
+  buffer: Buffer,
+  originalname: string,
+  mimetype: string,
+  mode: 'identity' | 'full'
+): Promise<ResumeOcrIdentity | null> {
+  if (!resumeOcrEnabled() || !process.env.DASHSCOPE_API_KEY?.trim()) return null
+  const imageUrls = await resumeFileToOcrImageDataUris(buffer, originalname, mimetype)
+  if (!imageUrls.length) return null
+  const isFull = mode === 'full'
+  const userParts: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
+    {
+      type: 'text',
+      text: isFull
+        ? `共 ${imageUrls.length} 张简历页面。请按页顺序逐字转写全部可见文字到 rawText（不要总结、不要省略）。同时提取 candidateName,candidatePhone,email,gender；姓名只保留人名本身。无法识别用空字符串。只输出 JSON。`
+        : '请从这张简历首页提取候选人身份信息。输出字段：candidateName,candidatePhone,email,gender,rawText。candidateName 只保留姓名本身，不要包含性别、年龄、职位；无法识别则为空字符串。'
+    },
+    ...imageUrls.map((url) => ({ type: 'image_url', image_url: { url } }))
+  ]
+  const data = await dashScopeChatCompletions(
+    {
+      model: resumeOcrModel(),
+      temperature: 0,
+      max_tokens: isFull ? 3800 : 800,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: isFull
+            ? '你是简历 OCR 转写器。只输出 JSON，rawText 尽量完整保留原文。'
+            : '你是简历首页 OCR 信息抽取器。只抽取图片中明确出现的信息，不要猜测，不要补全。只输出 JSON。'
+        },
+        { role: 'user', content: userParts }
+      ]
+    },
+    { timeoutMs: isFull ? Math.max(resumeOcrTimeoutMs(), 45000) : resumeOcrTimeoutMs() }
+  )
+  return parseResumeOcrIdentity(data?.choices?.[0]?.message?.content)
 }
 
 async function extractResumeIdentityByOcr(
@@ -2740,40 +2953,72 @@ async function extractResumeIdentityByOcr(
   originalname: string,
   mimetype: string
 ): Promise<ResumeOcrIdentity | null> {
-  if (!resumeOcrEnabled() || !process.env.DASHSCOPE_API_KEY?.trim()) return null
-  const imageUrl = await resumeFileToOcrImageDataUri(buffer, originalname, mimetype)
-  if (!imageUrl) return null
-  const data = await dashScopeChatCompletions(
-    {
-      model: resumeOcrModel(),
-      temperature: 0,
-      max_tokens: 800,
-      response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'system',
-          content:
-            '你是简历首页 OCR 信息抽取器。只抽取图片中明确出现的信息，不要猜测，不要补全。只输出 JSON。'
-        },
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text:
-                '请从这张简历首页提取候选人身份信息。输出字段：candidateName,candidatePhone,email,gender,rawText。candidateName 只保留姓名本身，不要包含性别、年龄、职位；无法识别则为空字符串。'
-            },
-            {
-              type: 'image_url',
-              image_url: { url: imageUrl }
-            }
-          ]
-        }
-      ]
-    },
-    { timeoutMs: resumeOcrTimeoutMs() }
+  return extractResumeByOcr(buffer, originalname, mimetype, 'identity')
+}
+
+async function resolveResumePlaintextForScreening(params: {
+  buffer: Buffer
+  originalname: string
+  mimetype: string
+  onStage?: (stage: string, progress: number) => void
+}): Promise<{ plain: string; ocrIdentity: ResumeOcrIdentity | null }> {
+  const { buffer, originalname, mimetype, onStage } = params
+  const fileSize = buffer.length
+  let extracted = ''
+  try {
+    extracted = await extractResumePlainText(buffer, originalname, mimetype)
+  } catch (ex) {
+    if (!resumeFileSupportsOcr(originalname, mimetype)) throw ex
+    extracted = ''
+  }
+  let ocrIdentity: ResumeOcrIdentity | null = null
+  const needOcr = isResumePlaintextLowQuality(extracted, fileSize)
+  if (!needOcr) {
+    return { plain: extracted.trim(), ocrIdentity: null }
+  }
+  if (!resumeFileSupportsOcr(originalname, mimetype)) {
+    const ext = path.extname(originalname || '').toLowerCase()
+    if (!extracted.trim()) {
+      if (ext === '.docx' || mimetype.includes('wordprocessingml')) {
+        throw new ResumeScreenTaskError(
+          '未能从 Word 文档提取文本（可能为扫描件嵌入图）。请另存为可复制文字的 DOCX 或 PDF 后重试。',
+          422
+        )
+      }
+      throw new ResumeScreenTaskError('未能从文件中提取可读文本。请改用可复制文字的 PDF/DOCX 后上传。', 422)
+    }
+    return { plain: extracted.trim(), ocrIdentity: null }
+  }
+  onStage?.(
+    extracted.trim() ? '正文质量偏低，尝试 OCR 转写' : '文本为空，尝试 OCR 转写',
+    extracted.trim() ? 26 : 24
   )
-  return parseResumeOcrIdentity(data?.choices?.[0]?.message?.content)
+  try {
+    ocrIdentity = await extractResumeByOcr(buffer, originalname, mimetype, 'full')
+  } catch (ocrErr) {
+    console.warn('[resume-screen] OCR full failed:', ocrErr instanceof Error ? ocrErr.message : ocrErr)
+    try {
+      ocrIdentity = await extractResumeByOcr(buffer, originalname, mimetype, 'identity')
+    } catch (ocrErr2) {
+      console.warn('[resume-screen] OCR identity fallback failed:', ocrErr2 instanceof Error ? ocrErr2.message : ocrErr2)
+    }
+  }
+  if (ocrIdentity && (ocrIdentity.rawText || ocrIdentity.candidateName || ocrIdentity.candidatePhone)) {
+    const ocrPlain = buildPlainFromOcrIdentity(ocrIdentity)
+    if (ocrPlain.trim() && shouldPreferOcrPlaintext(extracted, ocrIdentity)) {
+      return { plain: ocrPlain.trim(), ocrIdentity }
+    }
+    if (!extracted.trim() && ocrPlain.trim()) {
+      return { plain: ocrPlain.trim(), ocrIdentity }
+    }
+  }
+  if (!extracted.trim()) {
+    throw new ResumeScreenTaskError(
+      '未能从文件中提取可读文本，OCR 也未识别到有效内容。请确认已安装 poppler（pdftoppm）并配置 DASHSCOPE_API_KEY，或改用可复制文字的 PDF/DOCX。',
+      422
+    )
+  }
+  return { plain: extracted.trim(), ocrIdentity }
 }
 
 async function extractResumePlainText(buffer: Buffer, originalname: string, mimetype: string): Promise<string> {
@@ -2795,7 +3040,10 @@ async function extractResumePlainText(buffer: Buffer, originalname: string, mime
     const r = await mammoth.extractRawText({ buffer })
     return (r.value || '').trim()
   }
-  throw new Error('仅支持 TXT、PDF、DOCX；旧版 .doc 请另存为 DOCX 后上传')
+  if (String(mimetype || '').toLowerCase().startsWith('image/') || ['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) {
+    return ''
+  }
+  throw new Error('仅支持 TXT、PDF、DOCX、PNG/JPG；旧版 .doc 请另存为 DOCX 后上传')
 }
 
 function resumeAiMaxAttempts(): number {
@@ -5056,6 +5304,19 @@ function guessAudioMimeFromName(name: string): string {
   return 'audio/mpeg'
 }
 
+/** 百炼 Qwen-ASR 有时返回 language/emotion/<asr_text> 包裹，提取纯文本 */
+function extractQwenAsrPlainText(raw: unknown): string {
+  if (typeof raw !== 'string') return ''
+  let t = raw.trim()
+  const m = t.match(/<asr_text>\s*([\s\S]*?)\s*<\/asr_text>/i)
+  if (m) t = m[1].trim()
+  t = t
+    .replace(/<\/?asr_text>/gi, '')
+    .replace(/\b(language|emotion)\s*[:：]\s*[^\n.]*/gi, '')
+    .replace(/\b(language|emotion)\s+\w+/gi, '')
+  return t.replace(/\s+/g, ' ').trim()
+}
+
 /** TRTC userId：仅字母数字与 _-，最长 32 */
 function sanitizeTrtcUserId(raw: string): string {
   const s = raw.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 32)
@@ -5609,6 +5870,23 @@ async function markInvitationConsumedAfterInterviewSubmit(externalSessionId: str
   }
 }
 
+async function resolveCandidateUserIdByOpenId(
+  candidateOpenId: string,
+  primaryAppid: string
+): Promise<number | null> {
+  const oid = String(candidateOpenId || '').trim()
+  if (!oid) return null
+  const appids = oid.startsWith('h5_') ? ['h5-web', primaryAppid] : [primaryAppid]
+  for (const aid of appids) {
+    const [uRows] = await mysqlPool.query<any[]>(
+      'SELECT user_id FROM wechat_accounts WHERE appid=? AND openid=? LIMIT 1',
+      [aid, oid]
+    )
+    if (uRows.length) return Number(uRows[0].user_id) || null
+  }
+  return null
+}
+
 async function upsertSessionBase(params: {
   sessionId: string
   jobId: string
@@ -5624,14 +5902,10 @@ async function upsertSessionBase(params: {
   if (!jobRows.length) throw new Error('job not found')
   const jobDbId = jobRows[0].id
 
-  // candidate user id（仅新建会话时强制要求已登录过小程序并写入 wechat_accounts）
+  // candidate user id（H5 账号写在 appid=h5-web；小程序写在微信 appid）
   let candidateUserId: number | null = null
   if (params.candidateOpenId) {
-    const [uRows] = await mysqlPool.query<any[]>(
-      'SELECT user_id FROM wechat_accounts WHERE appid=? AND openid=? LIMIT 1',
-      [appid, params.candidateOpenId]
-    )
-    candidateUserId = uRows.length ? uRows[0].user_id : null
+    candidateUserId = await resolveCandidateUserIdByOpenId(params.candidateOpenId, appid)
   }
 
   const [existing] = await mysqlPool.query<any[]>(
@@ -5971,15 +6245,13 @@ app.get('/api/admin/auth-status', async (_req, res) => {
 
 /** 获取登录图形验证码（需 Redis）；返回 SVG 由前端以 data URL 展示 */
 app.get('/api/admin/captcha', async (_req, res) => {
-  const r = getRedisClient()
-  if (!r) {
+  if (!adminRedisConfigured()) {
     return res.status(503).json({ message: '验证码需要 Redis：请配置 REDIS_HOST 或 REDIS_URL' })
   }
   const text = randomAdminCaptchaText(4)
   const id = crypto.randomBytes(16).toString('hex')
-  const key = `${ADMIN_CAPTCHA_PREFIX}${id}`
   try {
-    await r.setex(key, ADMIN_CAPTCHA_TTL_SEC, text.toLowerCase())
+    await storeAdminCaptcha(id, text)
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'redis set failed'
     flowLog('admin/captcha', false, msg)
@@ -9163,31 +9435,18 @@ async function processResumeScreenTask(params: {
       let ocrIdentity: ResumeOcrIdentity | null = null
       try {
         patchResumeScreenTask(taskId, { uploadProgress: 18, uploadStage: '提取原始简历文本' })
-        plain = await extractResumePlainText(file.buffer, uploadFileName, file.mimetype || '')
+        const resolved = await resolveResumePlaintextForScreening({
+          buffer: file.buffer,
+          originalname: uploadFileName,
+          mimetype: file.mimetype || '',
+          onStage: (stage, progress) => patchResumeScreenTask(taskId, { uploadProgress: progress, uploadStage: stage })
+        })
+        plain = resolved.plain
+        ocrIdentity = resolved.ocrIdentity
       } catch (ex) {
+        if (ex instanceof ResumeScreenTaskError) throw ex
         const msg = ex instanceof Error ? ex.message : 'parse failed'
         throw new ResumeScreenTaskError(msg, 415)
-      }
-      if (!plain.trim()) {
-        patchResumeScreenTask(taskId, { uploadProgress: 24, uploadStage: '文本为空，尝试 OCR 识别首页姓名' })
-        try {
-          ocrIdentity = await extractResumeIdentityByOcr(file.buffer, uploadFileName, file.mimetype || '')
-        } catch (ocrErr) {
-          console.warn('[resume-screen] OCR fallback failed:', ocrErr instanceof Error ? ocrErr.message : ocrErr)
-        }
-        if (ocrIdentity?.candidateName || ocrIdentity?.candidatePhone || ocrIdentity?.rawText) {
-          plain = [
-            ocrIdentity.candidateName ? `姓名：${ocrIdentity.candidateName}` : '',
-            ocrIdentity.candidatePhone ? `手机：${ocrIdentity.candidatePhone}` : '',
-            ocrIdentity.email ? `邮箱：${ocrIdentity.email}` : '',
-            ocrIdentity.gender ? `性别：${ocrIdentity.gender}` : '',
-            ocrIdentity.rawText || ''
-          ]
-            .filter(Boolean)
-            .join('\n')
-        } else {
-          throw new ResumeScreenTaskError('未能从文件中提取可读文本，OCR 也未识别到首页姓名。请改用可复制文字的 PDF/DOCX 后再上传。', 422)
-        }
       }
       patchResumeScreenTask(taskId, { uploadProgress: 30, uploadStage: '完成文本提取，开始去重' })
 
@@ -9249,7 +9508,11 @@ async function processResumeScreenTask(params: {
         result = fallbackResumeScreening(plain, String(job.jd_text || ''), String(job.title || ''))
       }
 
-      const candidateNameAuto = chooseCandidateName(result.candidateName, nameGuessEarly, nameGuessFromFilename)
+      const candidateNameAuto = chooseCandidateName(
+        sanitizeCandidateName(ocrIdentity?.candidateName) || result.candidateName,
+        nameGuessEarly,
+        nameGuessFromFilename
+      )
       if (!manualCandidateName && (!candidateNameAuto || candidateNameAuto === '候选人' || isLikelyBadCandidateName(candidateNameAuto))) {
         patchResumeScreenTask(taskId, { uploadProgress: 62, uploadStage: '姓名不可靠，尝试 OCR 识别首页姓名' })
         try {
@@ -9259,7 +9522,12 @@ async function processResumeScreenTask(params: {
         }
       }
       const candidateName =
-        manualCandidateName || sanitizeCandidateName(ocrIdentity?.candidateName) || candidateNameAuto
+        manualCandidateName ||
+        chooseCandidateName(
+          sanitizeCandidateName(ocrIdentity?.candidateName) || result.candidateName,
+          nameGuessEarly,
+          nameGuessFromFilename
+        )
       if (candidateName && result.evaluationJson) {
         result.evaluationJson = rewriteEvaluationCandidateName(result.evaluationJson, candidateName)
       }
@@ -9289,6 +9557,35 @@ async function processResumeScreenTask(params: {
           if (dupCandErr instanceof ResumeScreenTaskError) throw dupCandErr
           console.error('[resume-screen] duplicate job+candidate check failed:', dupCandErr)
           throw new ResumeScreenTaskError('候选人去重校验失败，请稍后重试', 500)
+        }
+      }
+
+      if (
+        !preResolveCandidateId &&
+        !normForCandidate &&
+        candidateName &&
+        candidateName !== '候选人' &&
+        !isLikelyBadCandidateName(candidateName)
+      ) {
+        try {
+          const [dupByName] = await mysqlPool.query<RowDataPacket[]>(
+            `SELECT id FROM resume_screenings
+             WHERE job_code = ?
+               AND candidate_name = ?
+               AND (candidate_phone IS NULL OR TRIM(candidate_phone) = '')
+             LIMIT 1`,
+            [jobCode, candidateName]
+          )
+          if (Array.isArray(dupByName) && dupByName.length) {
+            throw new ResumeScreenTaskError(
+              '该姓名在该岗位下已有投递记录（未识别到手机号），请勿重复上传或在表单中填写手机号。',
+              409,
+              { existingId: Number((dupByName[0] as { id?: unknown }).id) }
+            )
+          }
+        } catch (dupNameErr) {
+          if (dupNameErr instanceof ResumeScreenTaskError) throw dupNameErr
+          console.error('[resume-screen] duplicate job+name check failed:', dupNameErr)
         }
       }
 
@@ -10193,6 +10490,139 @@ app.post('/api/candidate/validate-invite', async (req, res) => {
   }
 })
 
+function h5OpenIdFromPhone(phone: string): string {
+  const norm = String(phone || '').replace(/\D/g, '')
+  const hash = crypto.createHash('sha256').update(`h5-candidate:${norm}`).digest('hex').slice(0, 28)
+  return `h5_${hash}`
+}
+
+async function handleCandidateLoginInvite(params: {
+  inviteCodeRaw: string
+  name: string
+  phone: string
+  openid: string
+  appid: string
+  sessionKey?: string
+}): Promise<{
+  openid: string
+  sessionId: string
+  name: string
+  job: { id: string; title: string; department: string }
+  trtc: { sdkAppId: number; userId: string; userSig: string; roomId: number } | null
+  resumeScreeningId: number | null
+}> {
+  const { inviteCodeRaw, name, phone, openid, appid, sessionKey } = params
+  await ensureUserAndWechatAccount({ appid, openid, sessionKey })
+  if (phone) {
+    try {
+      await bindUserPhoneAndRole({ appid, openid, phone })
+    } catch {
+      /* 手机号格式或未过白名单时不阻断登录 */
+    }
+  }
+  const me = await getUserProfileByOpenId({ appid, openid })
+  if (!me.userId) throw new Error('USER_NOT_FOUND')
+
+  const resolved = await resolveInviteCode(inviteCodeRaw)
+  if (!resolved) throw new Error('INVALID_INVITE')
+
+  let sessionId = `${resolved.jobCode}-${openid}`
+  const job = { id: resolved.jobCode, title: resolved.title, department: resolved.department }
+  let resumeScreeningId: number | null = null
+
+  if (resolved.invitationId) {
+    const inviteIdUpper = inviteCodeRaw.trim().toUpperCase()
+    const conn = await mysqlPool.getConnection()
+    try {
+      await conn.beginTransaction()
+      const [invRows] = await conn.query<any[]>(
+        `SELECT inv.id AS id,
+                inv.resume_screening_id AS resumeScreeningId,
+                inv.interviewer_user_id AS interviewerUserId,
+                inv.interviewer_openid AS interviewerOpenId,
+                j.id AS jobDbId,
+                j.job_code AS jobCode,
+                j.title AS title,
+                j.department AS department
+         FROM interview_invitations inv
+         JOIN jobs j ON j.id = inv.job_id
+         WHERE inv.invite_code = ?
+           AND inv.id = ?
+           AND inv.status='pending'
+           AND (inv.expires_at IS NULL OR inv.expires_at > NOW())
+           AND (
+                (inv.candidate_user_id IS NULL OR inv.candidate_user_id = ?)
+             AND (NULLIF(TRIM(inv.candidate_openid), '') IS NULL OR inv.candidate_openid = ?)
+           )
+         LIMIT 1
+         FOR UPDATE`,
+        [inviteIdUpper, resolved.invitationId, me.userId, openid]
+      )
+      if (!invRows.length) {
+        await conn.rollback()
+        throw new Error('INVITE_USED')
+      }
+
+      const inv = invRows[0]
+      const rsidRow = inv.resumeScreeningId
+      resumeScreeningId =
+        rsidRow != null && Number(rsidRow) > 0 ? Math.floor(Number(rsidRow)) : null
+      const [updHeader] = await conn.query<ResultSetHeader>(
+        `UPDATE interview_invitations
+         SET candidate_user_id=COALESCE(candidate_user_id, ?),
+             candidate_openid=COALESCE(NULLIF(candidate_openid, ''), ?),
+             updated_at=NOW()
+         WHERE id=? AND status='pending'`,
+        [me.userId, openid, inv.id]
+      )
+      if (updHeader.affectedRows !== 1) {
+        await conn.rollback()
+        throw new Error('INVITE_CONFLICT')
+      }
+
+      sessionId = `${inv.jobCode}-${openid}`
+      const [sessRows] = await conn.query<any[]>(
+        'SELECT id FROM interview_sessions WHERE session_id=? LIMIT 1',
+        [sessionId]
+      )
+      if (!sessRows.length) {
+        await conn.query(
+          `INSERT INTO interview_sessions(session_id, invitation_id, job_id, candidate_user_id, interviewer_user_id, candidate_openid, interviewer_openid, status, voip_status)
+           VALUES (?,?,?,?,?,?,?, 'created','not_started')`,
+          [
+            sessionId,
+            inv.id,
+            inv.jobDbId,
+            me.userId,
+            inv.interviewerUserId || null,
+            openid,
+            String(inv.interviewerOpenId || '')
+          ]
+        )
+      }
+
+      await conn.commit()
+    } catch (e) {
+      await conn.rollback()
+      throw e
+    } finally {
+      conn.release()
+    }
+  }
+
+  let trtc: { sdkAppId: number; userId: string; userSig: string; roomId: number } | null = null
+  const sdkAppId = Number(process.env.TRTC_SDK_APP_ID || 0)
+  const secretKey = process.env.TRTC_SDK_SECRET_KEY?.trim()
+  if (sdkAppId && secretKey) {
+    const userId = sanitizeTrtcUserId(openid)
+    const roomId = trtcRoomIdFromSession(sessionId)
+    const expireSec = Number(process.env.TRTC_USER_SIG_EXPIRE_SEC || 86400)
+    const userSig = genTrtcUserSig(sdkAppId, secretKey, userId, expireSec)
+    trtc = { sdkAppId, userId, userSig, roomId }
+  }
+  return { openid, sessionId, name, job, trtc, resumeScreeningId }
+}
+
 /** 候选人：wx.login 的 code + 邀请码 + 姓名，一次换 openid、校验岗位，并返回 TRTC UserSig（若已配置） */
 app.post('/api/candidate/login-invite', async (req, res) => {
   const code = String(req.body?.code || '').trim()
@@ -10206,120 +10636,32 @@ app.post('/api/candidate/login-invite', async (req, res) => {
     flowLog('login-invite 开始', true, `invite=${inviteCodeRaw} name=${name}`)
     const { openid, sessionKey, appid } = await resolveLoginCode(code)
     flowLog('login-invite code2Session', true, maskOpenidLite(openid))
-    await ensureUserAndWechatAccount({ appid, openid, sessionKey })
-    if (phone) {
-      try {
-        await bindUserPhoneAndRole({ appid, openid, phone })
-      } catch {
-        /* 手机号格式或未过白名单时不阻断登录 */
-      }
-    }
-    const me = await getUserProfileByOpenId({ appid, openid })
-    if (!me.userId) return res.status(400).json({ message: '未找到用户' })
-
-    const resolved = await resolveInviteCode(inviteCodeRaw)
-    if (!resolved) return res.status(400).json({ message: '邀请码无效' })
-
-    let sessionId = `${resolved.jobCode}-${openid}`
-    const job = { id: resolved.jobCode, title: resolved.title, department: resolved.department }
-    let resumeScreeningId: number | null = null
-
-    if (resolved.invitationId) {
-      const inviteIdUpper = inviteCodeRaw.trim().toUpperCase()
-      const conn = await mysqlPool.getConnection()
-      try {
-        await conn.beginTransaction()
-        const [invRows] = await conn.query<any[]>(
-          `SELECT inv.id AS id,
-                  inv.resume_screening_id AS resumeScreeningId,
-                  inv.interviewer_user_id AS interviewerUserId,
-                  inv.interviewer_openid AS interviewerOpenId,
-                  j.id AS jobDbId,
-                  j.job_code AS jobCode,
-                  j.title AS title,
-                  j.department AS department
-           FROM interview_invitations inv
-           JOIN jobs j ON j.id = inv.job_id
-           WHERE inv.invite_code = ?
-             AND inv.id = ?
-             AND inv.status='pending'
-             AND (inv.expires_at IS NULL OR inv.expires_at > NOW())
-             AND (
-                  (inv.candidate_user_id IS NULL OR inv.candidate_user_id = ?)
-               AND (NULLIF(TRIM(inv.candidate_openid), '') IS NULL OR inv.candidate_openid = ?)
-             )
-           LIMIT 1
-           FOR UPDATE`,
-          [inviteIdUpper, resolved.invitationId, me.userId, openid]
-        )
-        if (!invRows.length) {
-          await conn.rollback()
-          return res.status(400).json({ message: '邀请码无效或已使用' })
-        }
-
-        const inv = invRows[0]
-        const rsidRow = inv.resumeScreeningId
-        resumeScreeningId =
-          rsidRow != null && Number(rsidRow) > 0 ? Math.floor(Number(rsidRow)) : null
-        const [updHeader] = await conn.query<ResultSetHeader>(
-          `UPDATE interview_invitations
-           SET candidate_user_id=COALESCE(candidate_user_id, ?),
-               candidate_openid=COALESCE(NULLIF(candidate_openid, ''), ?),
-               updated_at=NOW()
-           WHERE id=? AND status='pending'`,
-          [me.userId, openid, inv.id]
-        )
-        if (updHeader.affectedRows !== 1) {
-          await conn.rollback()
-          return res.status(409).json({ message: '邀请已处理' })
-        }
-
-        sessionId = `${inv.jobCode}-${openid}`
-        const [sessRows] = await conn.query<any[]>(
-          'SELECT id FROM interview_sessions WHERE session_id=? LIMIT 1',
-          [sessionId]
-        )
-        if (!sessRows.length) {
-          await conn.query(
-            `INSERT INTO interview_sessions(session_id, invitation_id, job_id, candidate_user_id, interviewer_user_id, candidate_openid, interviewer_openid, status, voip_status)
-             VALUES (?,?,?,?,?,?,?, 'created','not_started')`,
-            [
-              sessionId,
-              inv.id,
-              inv.jobDbId,
-              me.userId,
-              inv.interviewerUserId || null,
-              openid,
-              String(inv.interviewerOpenId || '')
-            ]
-          )
-        }
-
-        await conn.commit()
-      } catch (e) {
-        await conn.rollback()
-        throw e
-      } finally {
-        conn.release()
-      }
-    }
-
-    let trtc: { sdkAppId: number; userId: string; userSig: string; roomId: number } | null = null
-    const sdkAppId = Number(process.env.TRTC_SDK_APP_ID || 0)
-    const secretKey = process.env.TRTC_SDK_SECRET_KEY?.trim()
-    if (sdkAppId && secretKey) {
-      const userId = sanitizeTrtcUserId(openid)
-      const roomId = trtcRoomIdFromSession(sessionId)
-      const expireSec = Number(process.env.TRTC_USER_SIG_EXPIRE_SEC || 86400)
-      const userSig = genTrtcUserSig(sdkAppId, secretKey, userId, expireSec)
-      trtc = { sdkAppId, userId, userSig, roomId }
-    }
-    flowLog('login-invite TRTC', Boolean(trtc), trtc ? `room=${trtc.roomId}` : '未配置或密钥为空')
-    flowLog('login-invite 完成', true, `sessionId=${sessionId} resumeScreeningId=${resumeScreeningId ?? '—'}`)
-    res.json({ data: { openid, sessionId, name, job, trtc, resumeScreeningId } })
+    const data = await handleCandidateLoginInvite({
+      inviteCodeRaw,
+      name,
+      phone,
+      openid,
+      appid,
+      sessionKey
+    })
+    flowLog('login-invite TRTC', Boolean(data.trtc), data.trtc ? `room=${data.trtc.roomId}` : '未配置或密钥为空')
+    flowLog('login-invite 完成', true, `sessionId=${data.sessionId} resumeScreeningId=${data.resumeScreeningId ?? '—'}`)
+    res.json({ data })
   } catch (e) {
     const err = e as Error & { wechat?: unknown }
     flowLog('login-invite 异常', false, err.message)
+    if (err.message === 'USER_NOT_FOUND') {
+      return res.status(400).json({ message: '未找到用户' })
+    }
+    if (err.message === 'INVALID_INVITE') {
+      return res.status(400).json({ message: '邀请码无效' })
+    }
+    if (err.message === 'INVITE_USED') {
+      return res.status(400).json({ message: '邀请码无效或已使用' })
+    }
+    if (err.message === 'INVITE_CONFLICT') {
+      return res.status(409).json({ message: '邀请已处理' })
+    }
     if (err.message === 'WECHAT_ENV') {
       return res.status(500).json({ message: '未配置微信小程序 AppID 或 AppSecret（WECHAT_APPID / WECHAT_SECRET）' })
     }
@@ -10328,6 +10670,50 @@ app.post('/api/candidate/login-invite', async (req, res) => {
         message: '微信服务端返回异常，请稍后重试或核对 AppSecret 与网络环境。',
         wechat: err.wechat
       })
+    }
+    res.status(500).json({ message: '邀请登录失败，请稍后重试' })
+  }
+})
+
+/** 候选人 PC/H5：手机号 + 邀请码 + 姓名登录（无需微信 code） */
+app.post('/api/candidate/login-invite-h5', async (req, res) => {
+  const inviteCodeRaw = String(req.body?.inviteCode || '').trim()
+  const name = String(req.body?.name || '').trim()
+  const phoneRaw = String(req.body?.phone || '').trim()
+  const phone = phoneRaw.replace(/\D/g, '')
+  if (!inviteCodeRaw || !name || !phone) {
+    return res.status(400).json({ message: '请填写邀请码、姓名与手机号' })
+  }
+  if (!/^1[3-9]\d{9}$/.test(phone)) {
+    return res.status(400).json({ message: '请输入本人11位手机号' })
+  }
+  try {
+    flowLog('login-invite-h5 开始', true, `invite=${inviteCodeRaw} name=${name}`)
+    const openid = h5OpenIdFromPhone(phone)
+    const appid = 'h5-web'
+    const data = await handleCandidateLoginInvite({
+      inviteCodeRaw,
+      name,
+      phone,
+      openid,
+      appid
+    })
+    flowLog('login-invite-h5 完成', true, `sessionId=${data.sessionId} openid=${maskOpenidLite(openid)}`)
+    res.json({ data })
+  } catch (e) {
+    const err = e as Error
+    flowLog('login-invite-h5 异常', false, err.message)
+    if (err.message === 'USER_NOT_FOUND') {
+      return res.status(400).json({ message: '未找到用户' })
+    }
+    if (err.message === 'INVALID_INVITE') {
+      return res.status(400).json({ message: '邀请码无效' })
+    }
+    if (err.message === 'INVITE_USED') {
+      return res.status(400).json({ message: '邀请码无效或已使用' })
+    }
+    if (err.message === 'INVITE_CONFLICT') {
+      return res.status(409).json({ message: '邀请已处理' })
     }
     res.status(500).json({ message: '邀请登录失败，请稍后重试' })
   }
@@ -10574,6 +10960,23 @@ app.post('/api/candidate/interview-questions-rest', async (req, res) => {
   }
 })
 
+/** H5 讯飞语音听写（流式版）：签发 WebSocket 鉴权 URL（密钥不出端） */
+app.get('/api/candidate/xfyun/iat-auth', (_req, res) => {
+  const xfyun = checkXfyunIatEnv()
+  if (!xfyun.ok) {
+    return res.status(503).json({
+      message: '未配置讯飞语音听写（XFYUN_APP_ID / XFYUN_API_KEY / XFYUN_API_SECRET）'
+    })
+  }
+  try {
+    const wsUrl = buildXfyunIatAuthWsUrl(xfyun.env)
+    res.json({ data: { wsUrl, appId: xfyun.env.appId } })
+  } catch (e) {
+    flowLog('xfyun/iat-auth', false, e instanceof Error ? e.message : 'auth failed')
+    res.status(500).json({ message: '讯飞鉴权签发失败' })
+  }
+})
+
 /** 小程序分段上传音频，服务端用百炼 Qwen-ASR（Data URL）转写 */
 app.post(
   '/api/candidate/ai-interview/asr',
@@ -10619,7 +11022,7 @@ app.post(
         }
       })
       const raw = data?.choices?.[0]?.message?.content
-      const text = typeof raw === 'string' ? raw.trim() : ''
+      const text = extractQwenAsrPlainText(raw)
       res.json({ data: { sessionId, questionId, segmentIndex, text } })
     } catch (e) {
       flowLog('ai-interview/asr', false, e instanceof Error ? e.message : 'asr failed')
@@ -10691,7 +11094,14 @@ app.post('/api/live/session/start', async (req, res) => {
     flowLog('live/session/start 完成', true, sessionId)
     res.json({ ok: true })
   } catch (e) {
-    flowLog('live/session/start 异常', false, e instanceof Error ? e.message : 'db error')
+    const msg = e instanceof Error ? e.message : 'db error'
+    flowLog('live/session/start 异常', false, msg)
+    if (msg === 'candidate user not found for openid') {
+      return res.status(400).json({ message: '候选人账号未就绪，请退出后重新登录再试' })
+    }
+    if (msg === 'job not found') {
+      return res.status(404).json({ message: '岗位不存在' })
+    }
     res.status(500).json({ message: '数据库访问失败，请稍后重试或联系管理员。' })
   }
 })
@@ -11349,6 +11759,12 @@ app.listen(port, listenHost, () => {
   console.log(
     `[startup-check] TRTC env: ${trtcOk ? 'OK' : 'MISSING'} | TRTC_SDK_APP_ID=${trtcSdkAppId || 0} | TRTC_SDK_SECRET_KEY=${maskSecret(
       trtcSecret
+    )}`
+  )
+  const xfyunOk = checkXfyunIatEnv().ok
+  console.log(
+    `[startup-check] XFYUN IAT env: ${xfyunOk ? 'OK' : 'MISSING'} | XFYUN_APP_ID=${maskSecret(
+      process.env.XFYUN_APP_ID || ''
     )}`
   )
   void refreshStandardJobRoleBasesCache().catch((e) =>

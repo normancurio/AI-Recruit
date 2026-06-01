@@ -6,6 +6,8 @@
   "scripts": {
     "build:weapp": "npm run build:weapp --prefix miniapp-candidate",
     "build:weapp:clean": "npm run build:weapp:clean --prefix miniapp-candidate",
+    "dev:web-candidate": "npm run dev --prefix web-candidate",
+    "build:web-candidate": "npm run build --prefix web-candidate",
     "predev:api": "node scripts/ensure-dev-ports-free.mjs --api",
     "dev:api": "tsx watch server/index.ts",
     "predev:full": "node scripts/ensure-dev-ports-free.mjs --all",

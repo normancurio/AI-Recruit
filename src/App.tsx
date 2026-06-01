@@ -8230,7 +8230,6 @@ const RESUME_SCREENING_COLUMNS: ColumnSpec[] = [
   { id: 'phone', defaultWidth: 150, minWidth: 120, maxWidth: 220 },
   { id: 'job', defaultWidth: 220, minWidth: 170, maxWidth: 420 },
   { id: 'score', defaultWidth: 100, minWidth: 82, maxWidth: 140 },
-  { id: 'conclusion', defaultWidth: 130, minWidth: 100, maxWidth: 240 },
   { id: 'stage', defaultWidth: 180, minWidth: 140, maxWidth: 300 },
   { id: 'uploader', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
   { id: 'uploadTime', defaultWidth: 150, minWidth: 120, maxWidth: 220 },
@@ -9585,7 +9584,6 @@ function ResumeScreeningView({
                         <ResizableTh col={cols.byId.phone} className="px-1 py-3 font-medium">手机</ResizableTh>
                         <ResizableTh col={cols.byId.job} className="py-3 pl-1 pr-2 font-medium">匹配岗位</ResizableTh>
                         <ResizableTh col={cols.byId.score} className="py-3 pl-0 pr-1 text-center font-medium">匹配分</ResizableTh>
-                        <ResizableTh col={cols.byId.conclusion} className="px-1 py-3 font-medium">AI 结论</ResizableTh>
                         <ResizableTh col={cols.byId.stage} className="px-2 py-3 font-medium">流程</ResizableTh>
                         <ResizableTh col={cols.byId.uploader} className="px-2 py-3 font-medium">上传人</ResizableTh>
                         <ResizableTh col={cols.byId.uploadTime} className="px-1 py-3 font-medium whitespace-nowrap">上传时间</ResizableTh>
@@ -9699,14 +9697,6 @@ function ResumeScreeningView({
                                     {resume.matchScore}
                                   </span>
                                 )}
-                              </td>
-                              <td className="max-w-0 min-w-0 px-1 py-2.5 text-[10px] leading-tight text-slate-600">
-                                <span
-                                  className="block w-full truncate rounded bg-slate-100 px-1 py-0.5 text-center font-medium text-slate-700"
-                                  title={resume.uploadTaskStage || resume.status}
-                                >
-                                  {resume.uploadTaskStage || (isUploadPlaceholder ? '简历处理中' : resume.status)}
-                                </span>
                               </td>
                               <td className="max-w-0 px-2 py-3 text-xs">
                                 {resume.flowStage ? (
@@ -9882,18 +9872,16 @@ function ResumeScreeningView({
                                       >
                                         <UserPen className="h-4 w-4" aria-hidden />
                                       </button>
-                                      {resume.matchScore >= 60 ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => handleInviteFromResume(resume)}
-                                      disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
-                                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-40"
-                                      title="发起面试"
-                                      aria-label="发起面试"
-                                    >
-                                      <CalendarCheck className="h-4 w-4" aria-hidden />
-                                    </button>
-                                      ) : null}
+                                      <button
+                                        type="button"
+                                        onClick={() => handleInviteFromResume(resume)}
+                                        disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
+                                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-40"
+                                        title="发起面试"
+                                        aria-label="发起面试"
+                                      >
+                                        <CalendarCheck className="h-4 w-4" aria-hidden />
+                                      </button>
                                       {resume.hasOriginalFile ? (
                                         <>
                                       <button

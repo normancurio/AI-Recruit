@@ -18,7 +18,7 @@ export default defineConfig(({mode}) => {
     server: {
       hmr: process.env.DISABLE_HMR !== 'true',
       watch: {
-        ignored: ['**/storage/**', '**/.logs/**', '**/.pids/**', '**/miniapp-candidate/dist/**'],
+        ignored: ['**/storage/**', '**/.logs/**', '**/.pids/**', '**/miniapp-candidate/dist/**', '**/web-candidate/dist/**'],
       },
     },
   };
