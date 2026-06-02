@@ -352,6 +352,34 @@
   transition: opacity 40ms ease;
 }
 
+/* 视频未加载完成时的 loading 遮罩 */
+.interviewer-circle-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(148, 184, 232, 0.55);
+  pointer-events: none;
+}
+
+@keyframes interviewer-circle-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.interviewer-circle-spinner {
+  width: 64rpx;
+  height: 64rpx;
+  border-radius: 50%;
+  border: 6rpx solid rgba(255, 255, 255, 0.45);
+  border-top-color: #ffffff;
+  animation: interviewer-circle-spin 0.8s linear infinite;
+}
+
 /* 圆内底部胶囊标签 */
 .interviewer-circle-badge {
   position: absolute;
