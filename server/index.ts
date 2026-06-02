@@ -34,7 +34,7 @@ import {
   sanitizeDimensionScoresEvidence
 } from './resumeRiskContradiction'
 import { guessCandidateNameFromFilename, isFilenameEnglishNoiseToken } from './resumeFilenameName'
-import { stripChinesePersonNameSuffix } from './candidateNameNormalize'
+import { stripChinesePersonNameSuffix, isResumeSectionMisidentifiedName } from './candidateNameNormalize'
 
 const execFileAsync = promisify(execFile)
 
@@ -2099,6 +2099,7 @@ function isLikelyBadCandidateName(raw: string): boolean {
   if (/^[A-Za-z]{1,3}$/.test(s)) return true
   if (isFilenameEnglishNoiseToken(s)) return true
   if (s.length > 4 && /^[\u4e00-\u9fa5]+男$/.test(s)) return true
+  if (isResumeSectionMisidentifiedName(s)) return true
   if (/^[\u4e00-\u9fa5]{2,4}(?:男|女)(?:汉|族|汉族)?$/.test(s)) return true
   if (/^[\u4e00-\u9fa5]{2,4}性别$/.test(s)) return true
   return false

@@ -15,6 +15,12 @@ import {
   guessCandidateNameFromFilename,
   isFilenameEnglishNoiseToken
 } from '../resumeFilenameName.ts'
+import { isResumeSectionMisidentifiedName } from '../candidateNameNormalize.ts'
+
+/** 历史错名人工确认（文件名/正文无法自动推断时） */
+const MANUAL_NAME_BY_SCREENING_ID: Record<number, string> = {
+  919: '武超'
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(__dirname, '../..')
@@ -58,6 +64,7 @@ function shouldFixCurrentName(current: string, fixAll: boolean): boolean {
   if (/^[\u4e00-\u9fa5]{2,4}(?:男|女)(?:汉|族|汉族)?$/.test(c)) return true
   if (/^[\u4e00-\u9fa5]{2,4}性别$/.test(c)) return true
   if (/^[\u4e00-\u9fa5]{2,3}[男女]$/.test(c)) return true
+  if (isResumeSectionMisidentifiedName(c)) return true
   return false
 }
 
@@ -95,9 +102,14 @@ async function main(): Promise<void> {
       const id = Number(row.id)
       const current = String(row.candidate_name || '').trim()
       const fileName = String(row.file_name || '').trim()
-      const guessed = guessCandidateNameFromFilename(fileName)
+      const manual = MANUAL_NAME_BY_SCREENING_ID[id]
+      const guessed = manual || guessCandidateNameFromFilename(fileName)
       if (!guessed) continue
       if (guessed === current) continue
+      if (manual) {
+        planned.push({ id, from: current || '（空）', to: guessed, fileName })
+        continue
+      }
       if (!shouldFixCurrentName(current, fixAll)) continue
       if (!fixAll && UNSAFE_GUESSED_NAME.test(guessed)) continue
       planned.push({ id, from: current || '（空）', to: guessed, fileName })
