@@ -17,6 +17,16 @@ test('guessCandidateNameFromFilename still accepts real English names', () => {
   assert.equal(guessCandidateNameFromFilename('John-Smith-resume.pdf'), 'John')
 })
 
+test('guessCandidateNameFromFilename picks person name before city in Shenpu role-name-city pattern', () => {
+  assert.equal(guessCandidateNameFromFilename('申朴-需求分析-侯海洋-郑州.pdf'), '侯海洋')
+  assert.equal(guessCandidateNameFromFilename('申朴-实施交付-李鹏-郑州.pdf'), '李鹏')
+  assert.equal(guessCandidateNameFromFilename('申朴-需求分析-龙云飞-郑州.pdf'), '龙云飞')
+})
+
+test('guessCandidateNameFromFilename ignores generic resume labels without a person name', () => {
+  assert.equal(guessCandidateNameFromFilename('应届毕业生个人简历 (1).docx'), '')
+})
+
 test('isFilenameEnglishNoiseToken blocks common stack keywords', () => {
   assert.equal(isFilenameEnglishNoiseToken('Java'), true)
   assert.equal(isFilenameEnglishNoiseToken('Python'), true)

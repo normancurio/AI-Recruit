@@ -17,11 +17,18 @@ const FILENAME_NAME_STOP_WORDS = new Set([
   '武汉',
   '南京',
   '太仓',
-  '重庆'
+  '郑州',
+  '西安',
+  '天津',
+  '重庆',
+  '应届',
+  '毕业生',
+  '届毕业生',
+  '个人'
 ])
 
 const FILENAME_ROLE_WORD_RE =
-  /^(java|python|javascript|typescript|go|golang|rust|kotlin|swift|android|ios|mes|labview|web|前端|后端|全栈|测试|太仓测试|测试台架|产品|产品经理|项目经理|经理|运维|大数据|数据|建模|数据建模|算法|视觉算法|采购|采购专员|市场|市场专员|开发|开发工程师|工程师|架构师|资深|高级|中级|初级|技术|研发|spring|springboot|nodejs|react|vue|angular|devops|backend|frontend|fullstack|c\+\+|c#|php|ruby|scala)$/i
+  /^(java|python|javascript|typescript|go|golang|rust|kotlin|swift|android|ios|mes|labview|web|前端|后端|全栈|测试|太仓测试|测试台架|产品|产品经理|项目经理|经理|运维|大数据|数据|建模|数据建模|算法|视觉算法|采购|采购专员|市场|市场专员|开发|开发工程师|工程师|架构师|资深|高级|中级|初级|技术|研发|spring|springboot|nodejs|react|vue|angular|devops|backend|frontend|fullstack|c\+\+|c#|php|ruby|scala|需求分析|实施交付|实施|数据开发|java开发工程师)$/i
 
 const FILENAME_EN_NOISE_RE =
   /^(java|python|javascript|typescript|go|golang|rust|kotlin|swift|android|ios|react|vue|angular|spring|springboot|nodejs|node|web|labview|mes|devops|backend|frontend|fullstack|developer|engineer|architect|senior|junior|test|testing|qa|pm|ba|ui|ux|hr|bd|c\+\+|c#|php|ruby|scala|dev)$/i
@@ -98,6 +105,15 @@ export function guessCandidateNameFromFilename(filename: string): string {
     .split(/[-\s]+/)
     .map((p) => normalizeChineseNameToken(p))
     .filter(Boolean)
+
+  // 申朴-岗位-姓名-城市（如 申朴-需求分析-侯海洋-郑州.pdf）
+  if (parts.length >= 4 && parts[0] === '申朴') {
+    const city = parts[parts.length - 1]!
+    const name = parts[parts.length - 2]!
+    if (FILENAME_NAME_STOP_WORDS.has(city) && isPlausibleFilenameCandidateName(name)) {
+      return normalizeChineseNameToken(name)
+    }
+  }
 
   const candidates: string[] = []
   for (let i = parts.length - 1; i >= 0; i -= 1) candidates.push(parts[i]!)
