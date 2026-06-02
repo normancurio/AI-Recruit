@@ -1,3 +1,5 @@
+import { stripChinesePersonNameSuffix } from './candidateNameNormalize.ts'
+
 const FILENAME_NAME_STOP_WORDS = new Set([
   '申朴',
   '简历',
@@ -55,11 +57,7 @@ function normalizeChineseNameToken(raw: string): string {
   let s = String(raw || '')
     .replace(/[^\u4e00-\u9fa5]/g, '')
     .trim()
-  if (s.length >= 3 && /[男女]$/.test(s)) {
-    const withoutGender = s.slice(0, -1)
-    if (withoutGender.length >= 2) s = withoutGender
-  }
-  return s
+  return stripChinesePersonNameSuffix(s)
 }
 
 function sanitizeEnglishFilenameName(raw: string): string {

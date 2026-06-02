@@ -55,6 +55,8 @@ function shouldFixCurrentName(current: string, fixAll: boolean): boolean {
   if (/^[A-Za-z]{2,16}$/.test(c)) return true
   if (JOB_OR_CITY_AS_NAME.test(c)) return true
   if (/[\u4e00-\u9fa5]{2,}[年民族优势框架]/.test(c)) return true
+  if (/^[\u4e00-\u9fa5]{2,4}(?:男|女)(?:汉|族|汉族)?$/.test(c)) return true
+  if (/^[\u4e00-\u9fa5]{2,4}性别$/.test(c)) return true
   if (/^[\u4e00-\u9fa5]{2,3}[男女]$/.test(c)) return true
   return false
 }

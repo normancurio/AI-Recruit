@@ -34,6 +34,7 @@ import {
   sanitizeDimensionScoresEvidence
 } from './resumeRiskContradiction'
 import { guessCandidateNameFromFilename, isFilenameEnglishNoiseToken } from './resumeFilenameName'
+import { stripChinesePersonNameSuffix } from './candidateNameNormalize'
 
 const execFileAsync = promisify(execFile)
 
@@ -2076,9 +2077,7 @@ function sanitizeCandidateName(raw: unknown): string {
   if (/^[\u4e00-\u9fa5·•．\s]+$/.test(n)) {
     n = n.replace(/\s+/g, '')
   }
-  if (/^[\u4e00-\u9fa5]{2,4}[男女]$/.test(n)) {
-    n = n.slice(0, -1)
-  }
+  n = stripChinesePersonNameSuffix(n)
   if (!n || isPlaceholderCandidateName(n)) return ''
   if (n.length < 2 || n.length > 30) return ''
   if (NON_PERSON_CANDIDATE_NAME_RE.test(n)) return ''
@@ -2100,7 +2099,8 @@ function isLikelyBadCandidateName(raw: string): boolean {
   if (/^[A-Za-z]{1,3}$/.test(s)) return true
   if (isFilenameEnglishNoiseToken(s)) return true
   if (s.length > 4 && /^[\u4e00-\u9fa5]+男$/.test(s)) return true
-  if (s.length === 3 && /^[\u4e00-\u9fa5]{2}[男女]$/.test(s)) return true
+  if (/^[\u4e00-\u9fa5]{2,4}(?:男|女)(?:汉|族|汉族)?$/.test(s)) return true
+  if (/^[\u4e00-\u9fa5]{2,4}性别$/.test(s)) return true
   return false
 }
 
