@@ -22,6 +22,17 @@ import {
   matchRoleBaseFromJobTitle
 } from '../shared/jobTaxonomy'
 import { deptNamesMatch } from '../shared/deptMatch'
+import {
+  buildResumeEvalSystemPrompt,
+  buildResumeEvalUserPrompt,
+  detectResumeEvalJobType,
+  detectResumeEvalTechDirection
+} from '../shared/resumeEvalPrompt'
+import { clipResumeTextForAi } from '../shared/resumeTextClip'
+import {
+  filterContradictoryResumeRisks,
+  sanitizeDimensionScoresEvidence
+} from './resumeRiskContradiction'
 
 const execFileAsync = promisify(execFile)
 
@@ -1830,7 +1841,7 @@ function parseResumeScreeningAiJson(raw: string): ResumeScreeningAiResult | null
 
 function resumeAiClipChars(kind: 'resume' | 'jd'): number {
   const envKey = kind === 'resume' ? 'RESUME_AI_RESUME_CHARS' : 'RESUME_AI_JD_CHARS'
-  const def = kind === 'resume' ? 9000 : 3500
+  const def = kind === 'resume' ? 15000 : 3500
   const n = Number(process.env[envKey])
   if (Number.isFinite(n) && n >= 2000) return Math.min(kind === 'resume' ? 20000 : 12000, Math.floor(n))
   return def
@@ -1842,30 +1853,21 @@ function buildResumeEvalPromptForServer(params: {
   jdText: string
   resumeText: string
 }): { userPrompt: string; systemPrompt: string } {
-  const clipResume = params.resumeText.replace(/\s+/g, ' ').slice(0, resumeAiClipChars('resume'))
+  const clipResume = clipResumeTextForAi(params.resumeText, resumeAiClipChars('resume'))
   const clipJd = (params.jdText || '').replace(/\s+/g, ' ').slice(0, resumeAiClipChars('jd'))
-  const isRisk = /风控|反欺诈|信用|催收|合规|授信|风险/.test(
-    `${params.jobTitle} ${params.department} ${params.jdText}`
-  )
-  const userPrompt = [
+  const jobType = detectResumeEvalJobType(params.jobTitle, params.department, params.jdText)
+  const jobJD = [
     `岗位：${params.jobTitle}`,
     `部门：${params.department || '—'}`,
-    `JD：${clipJd || '（无）'}`,
-    `简历：${clipResume}`
+    clipJd ? `JD：${clipJd}` : 'JD：（无）'
   ].join('\n')
-  const riskDimKeys = 'risk_fit,depth,impact,data_skill,stability_growth,communication_business'
-  const engDimKeys = 'tech_fit,engineering_depth,impact,code_quality,stability_growth,communication_business'
-  const dimKeys = isRisk ? riskDimKeys : engDimKeys
-  const systemPrompt =
-    (isRisk ? '招聘评估（风控岗）。' : '招聘评估（研发岗）。') +
-    '只输出一个 JSON 对象，无 markdown。' +
-    '字段：schema_version,job_type,hard_gate,dimension_scores,total_score,strengths,risks,decision,summary,candidate_profile,candidate_name。' +
-    'candidate_name 为简历正文中的真实候选人姓名，无法识别用 ""；禁止把文件名、模板名、项目名、岗位名（如“申朴简历”“测试简历”“JAVA开发工程师”）当姓名。' +
-    'candidate_profile 从简历抽取，无依据 null；尽量填 school,job_title,email,candidate_phone,current_company,gender,age,work_experience_years,major,education；禁止编造。' +
-    `dimension_scores 每项 {"score":0-100,"evidence":["…"]}，须含 ${dimKeys}。` +
-    'risks 为 {"risk","interview_question"} 数组。' +
-    'decision 仅：建议进入面试|建议备选|不建议推进。'
-  return { userPrompt, systemPrompt }
+  const userPrompt = buildResumeEvalUserPrompt({
+    jobType,
+    jobJD,
+    resumeText: clipResume,
+    techDirection: detectResumeEvalTechDirection(params.jobTitle, params.jdText)
+  })
+  return { userPrompt, systemPrompt: buildResumeEvalSystemPrompt() }
 }
 
 function pickProfileStr(v: unknown): string {
@@ -2370,10 +2372,12 @@ function parseResumeEvalToScreeningResult(raw: string, resumePlain?: string): Re
           })
           .filter(Boolean) as Array<{ risk: string; interview_question: string }>
       : []
+    const risksFiltered = filterContradictoryResumeRisks(risks, resumePlain)
+    const dimSanitized = sanitizeDimensionScoresEvidence(dim, resumePlain)
     const mergedSummary = [
       summary || '暂无总结',
       strengths.length ? `优势：${strengths.slice(0, 3).join('；')}` : '',
-      risks.length ? `风险：${risks.slice(0, 3).map((x) => x.risk).join('；')}` : '',
+      risksFiltered.length ? `风险：${risksFiltered.slice(0, 3).map((x) => x.risk).join('；')}` : '',
       `结论：${decision || '建议备选'}`
     ]
       .filter(Boolean)
@@ -2391,8 +2395,8 @@ function parseResumeEvalToScreeningResult(raw: string, resumePlain?: string): Re
         ? { model_total_score_raw: rawTotalScore }
         : {}),
       total_score: totalScore,
-      dimension_scores: dim,
-      risks,
+      dimension_scores: dimSanitized,
+      risks: risksFiltered,
       ...(profileFinal ? { candidate_profile: profileFinal } : {}),
       ...(candidateNameAi ? { candidate_name: candidateNameAi } : {})
     }
@@ -3161,6 +3165,139 @@ async function runResumeScreeningWithAi(params: {
   return null
 }
 
+async function applyResumeScreeningAiResult(
+  screeningId: number,
+  result: ResumeScreeningAiResult,
+  candidateName: string
+): Promise<void> {
+  const evalJson = String(result.evaluationJson || '').trim() || null
+  await mysqlPool.query(
+    `UPDATE resume_screenings SET
+       candidate_name = COALESCE(NULLIF(?, ''), candidate_name),
+       match_score = ?, skill_score = ?, experience_score = ?, education_score = ?, stability_score = ?,
+       status = ?, report_summary = ?, evaluation_json = ?
+     WHERE id = ?`,
+    [
+      candidateName,
+      result.matchScore,
+      result.skillScore,
+      result.experienceScore,
+      result.educationScore,
+      result.stabilityScore,
+      result.status,
+      result.summary,
+      evalJson,
+      screeningId
+    ]
+  )
+  try {
+    const parsedEval =
+      evalJson && String(evalJson).trim() ? (JSON.parse(String(evalJson)) as Record<string, unknown>) : {}
+    const profile = resumeProfileRowFromValues({
+      candidateName,
+      profile: parsedEval?.candidate_profile
+    })
+    await mysqlPool.query(
+      `INSERT INTO resume_screening_profiles
+         (screening_id, candidate_name, gender, age, work_experience_years, job_title, school, candidate_phone,
+          email, current_address, current_company, major, education, current_position, graduation_date, arrival_time, id_number,
+          is_third_party, expected_salary, recruitment_channel, has_degree, is_unified_enrollment,
+          verifiable, resume_uploaded)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE
+         candidate_name=VALUES(candidate_name),
+         gender=VALUES(gender),
+         age=VALUES(age),
+         work_experience_years=VALUES(work_experience_years),
+         job_title=VALUES(job_title),
+         school=VALUES(school),
+         candidate_phone=VALUES(candidate_phone),
+         email=VALUES(email),
+         current_address=VALUES(current_address),
+         current_company=VALUES(current_company),
+         major=VALUES(major),
+         education=VALUES(education),
+         current_position=VALUES(current_position),
+         graduation_date=VALUES(graduation_date),
+         arrival_time=VALUES(arrival_time),
+         id_number=VALUES(id_number),
+         is_third_party=VALUES(is_third_party),
+         expected_salary=VALUES(expected_salary),
+         recruitment_channel=VALUES(recruitment_channel),
+         has_degree=VALUES(has_degree),
+         is_unified_enrollment=VALUES(is_unified_enrollment),
+         verifiable=VALUES(verifiable),
+         resume_uploaded=VALUES(resume_uploaded),
+         updated_at=NOW()`,
+      [
+        screeningId,
+        profile.candidateName,
+        profile.gender,
+        profile.age,
+        profile.workExperienceYears,
+        profile.jobTitle,
+        profile.school,
+        profile.candidatePhone,
+        profile.email,
+        profile.currentAddress,
+        profile.currentCompany,
+        profile.major,
+        profile.education,
+        profile.currentPosition,
+        profile.graduationDate,
+        profile.arrivalTime,
+        profile.idNumber,
+        profile.isThirdParty,
+        profile.expectedSalary,
+        profile.recruitmentChannel,
+        profile.hasDegree,
+        profile.isUnifiedEnrollment,
+        profile.verifiable,
+        profile.resumeUploaded
+      ]
+    )
+  } catch (profileErr) {
+    console.warn('[resume-screen] re-eval profile sync skipped:', profileErr)
+  }
+}
+
+async function reEvaluateResumeScreeningById(screeningId: number): Promise<ResumeScreeningAiResult> {
+  const shenpuJobJoin = resumeScreeningsJobCodeMatchSql('j', 's')
+  const [rows] = await mysqlPool.query<RowDataPacket[]>(
+    `SELECT s.id, s.candidate_name, s.resume_plaintext, j.title AS job_title, j.department, j.jd_text
+     FROM resume_screenings s
+     LEFT JOIN jobs j ON ${shenpuJobJoin}
+     WHERE s.id = ? LIMIT 1`,
+    [screeningId]
+  )
+  if (!rows.length) throw new ResumeScreenTaskError('简历筛查记录不存在', 404)
+  const row = rows[0] as Record<string, unknown>
+  const resumeText = String(row.resume_plaintext || '').trim()
+  if (!resumeText) {
+    throw new ResumeScreenTaskError('该记录缺少简历正文，无法重新评估，请重新上传可解析的简历。', 422)
+  }
+  const jobTitle = String(row.job_title || '').trim()
+  const department = String(row.department || '').trim()
+  const jdText = String(row.jd_text || '').trim()
+  let result: ResumeScreeningAiResult
+  try {
+    const ai = await runResumeScreeningWithAi({ resumeText, jobTitle, department, jdText })
+    result = ai || fallbackResumeScreening(resumeText, jdText, jobTitle)
+  } catch (aiErr) {
+    const msg = aiErr instanceof Error ? aiErr.message : String(aiErr)
+    console.warn('[resume-screen] re-eval AI failed, fallback:', msg)
+    result = fallbackResumeScreening(resumeText, jdText, jobTitle)
+  }
+  const candidateName =
+    String(row.candidate_name || '').trim() ||
+    chooseCandidateName(result.candidateName, guessCandidateNameFromResume(resumeText), '')
+  if (candidateName && result.evaluationJson) {
+    result.evaluationJson = rewriteEvaluationCandidateName(result.evaluationJson, candidateName)
+  }
+  await applyResumeScreeningAiResult(screeningId, result, candidateName)
+  return { ...result, candidateName: candidateName || result.candidateName }
+}
+
 type ShenpuResumeDocument = {
   headline: string
   professionalSummary: string
@@ -3625,10 +3762,23 @@ function fallbackShenpuResumeDocument(params: {
     period: '',
     highlights: []
   }))
+  const decision = String(e.decision || '').trim() || '建议备选'
+  const rawSummary = String(e.summary || '').trim()
+  const matchSummaryParts = [
+    strengths.length ? `优势：${strengths.slice(0, 3).join('；')}` : '',
+    risks.length ? `风险：${risks.slice(0, 3).join('；')}` : '',
+    `结论：${decision}`
+  ].filter(Boolean)
+  const professionalSummary =
+    rawSummary ||
+    (strengths.length ? strengths.slice(0, 2).join('；') : '') ||
+    '候选人信息已完成结构化整理，建议结合原始简历进一步复核。'
+  const targetMatchSummary =
+    matchSummaryParts.join(' | ') || '已根据岗位 JD 与简历完成匹配评估。'
   return {
     headline: `${params.jobTitle || '目标岗位'}候选人`,
-    professionalSummary: params.result.summary || '候选人信息已完成结构化整理，建议结合原始简历进一步复核。',
-    targetMatchSummary: params.result.summary || '已根据岗位 JD 与简历完成匹配评估。',
+    professionalSummary,
+    targetMatchSummary,
     personalInfo: {
       birthDate: '',
       ethnicity: '',
@@ -3718,6 +3868,7 @@ async function runShenpuResumeWithAi(params: {
           `简历全文：${String(params.resumeText || '').replace(/\\s+/g, ' ').slice(0, 20000)}`,
           `已有评估JSON：${JSON.stringify(parsedEval).slice(0, 12000)}`,
           '请输出字段：headline, professionalSummary, targetMatchSummary, personalInfo{birthDate,ethnicity,politicalStatus,householdRegistration,address,email,graduationDate,targetPosition,itYears,insuranceYears,piccProjectYears}, coreSkills[], workExperiences[{company,title,period,highlights[]}], projectExperiences[{name,role,period,highlights[]}], educationExperiences[{school,major,degree,period}], certificates[{date,title,issuer,remark}], strengths[], risks[], clientRequirements[], responsibilities[], templateSectionAliases{education[],skills[],work[],project[],selfEvaluation[]}, portrait{dimensions[{label,candidate,requirement}], conclusion}。',
+          'professionalSummary 写候选人职业背景概述（2-4句，只基于简历事实）；targetMatchSummary 写与目标岗位的匹配点评（优势/风险/结论），二者不得完全相同；禁止把简历正文已写明的经历写成“缺乏/未见”。',
           '所有字段都以“简历全文”为第一来源：姓名、工作经历、项目经历、教育经历、技能等都必须来自原始简历正文；文件名、模板文本、岗位JD只用于辅助理解或兜底，不能覆盖正文里的真实内容。',
           '【极重要-禁止模板污染】"项目简历模板文本"里出现的所有具体值——人名、公司名、项目名、学校名、专业名、时间区间、职务名、模块名、占位说明（如"就读学校1""测试工程师""主要工作内容1""众邦银行项目管理平台开发""控制工程（研究生）"等）——全部是**占位示例**，不是候选人的真实数据。禁止把这些占位值写入 personalInfo / workExperiences / projectExperiences / educationExperiences / coreSkills 的任何字段。模板只用来理解"章节标题/字段顺序/排版结构"，绝不用来"补全"候选人信息。',
           '判定方法：如果一段"候选人信息"在简历全文里**完全找不到**（即便去掉空格也找不到对应实体词），就**不要**输出它；宁可输出空数组 []，也不要靠模板示例补全。',
@@ -9007,6 +9158,35 @@ app.get('/api/admin/resume-screenings/:id/shenpu-resume', async (req, res) => {
       return res.status(503).json({ message: '缺少申朴简历表，请执行 server/migration_resume_screening_shenpu_resumes.sql' })
     }
     return res.status(500).json({ message: 'db error' })
+  }
+})
+
+app.post('/api/admin/resume-screenings/:id/re-eval', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const idNum = Number(String(req.params.id || '').trim())
+  if (!Number.isFinite(idNum) || idNum <= 0) return res.status(400).json({ message: 'invalid id' })
+  try {
+    const result = await reEvaluateResumeScreeningById(Math.floor(idNum))
+    return res.json({
+      data: {
+        screeningId: String(Math.floor(idNum)),
+        matchScore: result.matchScore,
+        status: result.status,
+        reportSummary: result.summary,
+        evaluationJson: result.evaluationJson ? JSON.parse(result.evaluationJson) : null,
+        skillScore: result.skillScore,
+        experienceScore: result.experienceScore,
+        educationScore: result.educationScore,
+        stabilityScore: result.stabilityScore,
+        candidateName: result.candidateName
+      }
+    })
+  } catch (e: unknown) {
+    if (e instanceof ResumeScreenTaskError) {
+      return res.status(e.statusCode).json({ message: e.message })
+    }
+    console.error('[POST /api/admin/resume-screenings/:id/re-eval]', e)
+    return res.status(500).json({ message: '重新评估失败，请稍后重试' })
   }
 })
 

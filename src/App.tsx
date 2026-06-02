@@ -6068,6 +6068,24 @@ function pickResumeDimensionScores(
   }
 }
 
+function reportSummaryBodyText(resume: Resume): string {
+  const summary = String(resume.evaluationJson?.summary || '').trim()
+  if (summary) return summary
+  const raw = String(resume.reportSummary || '').trim()
+  if (!raw) return ''
+  const stripped = raw.replace(/\s*\|\s*优势：[\s\S]*/u, '').trim()
+  return stripped || raw
+}
+
+function reportHasStructuredSections(resume: Resume): boolean {
+  const ej = resume.evaluationJson
+  return Boolean(
+    (Array.isArray(ej?.strengths) && ej!.strengths!.length) ||
+      (Array.isArray(ej?.risks) && ej!.risks!.length) ||
+      ej?.decision
+  )
+}
+
 function resumeDimensionOrderedEntries(scores: Record<string, number>): Array<[string, number]> {
   const preferred = [
     'risk_fit',
@@ -8310,6 +8328,7 @@ function ResumeScreeningView({
   /** 服务端分页：符合筛选条件的总条数 */
   const [screenListTotal, setScreenListTotal] = useState(0);
   const [reportResume, setReportResume] = useState<Resume | null>(null);
+  const [reportReEvalBusy, setReportReEvalBusy] = useState(false);
   const [profileEditResume, setProfileEditResume] = useState<Resume | null>(null);
   const [fileBusyId, setFileBusyId] = useState<string | null>(null);
   const fileInputModalRef = useRef<HTMLInputElement>(null);
@@ -8805,6 +8824,65 @@ function ResumeScreeningView({
       }
     },
     [apiBase, hasToken]
+  );
+
+  const reEvaluateReport = useCallback(
+    async (resume: Resume) => {
+      if (!apiBase || !hasToken || reportReEvalBusy) return;
+      setReportReEvalBusy(true);
+      try {
+        const r = await miniappApiFetch(
+          `/api/admin/resume-screenings/${encodeURIComponent(resume.id)}/re-eval`,
+          { method: 'POST' }
+        );
+        const j = (await r.json()) as {
+          data?: {
+            matchScore: number;
+            status: string;
+            reportSummary?: string;
+            evaluationJson?: Resume['evaluationJson'];
+            skillScore?: number;
+            experienceScore?: number;
+            educationScore?: number;
+            stabilityScore?: number;
+            candidateName?: string;
+          };
+          message?: string;
+        };
+        if (!r.ok || !j.data) throw new Error(j.message || '重新评估失败');
+        const d = j.data;
+        const evalJson = d.evaluationJson;
+        const fallbackDims = {
+          skill: d.skillScore ?? resume.skillScore ?? 0,
+          experience: d.experienceScore ?? resume.experienceScore ?? 0,
+          education: d.educationScore ?? resume.educationScore ?? 0,
+          stability: d.stabilityScore ?? resume.stabilityScore ?? 0
+        };
+        const updated: Resume = {
+          ...resume,
+          name: d.candidateName?.trim() || resume.name,
+          matchScore: d.matchScore,
+          skillScore: d.skillScore,
+          experienceScore: d.experienceScore,
+          educationScore: d.educationScore,
+          stabilityScore: d.stabilityScore,
+          status: d.status,
+          reportSummary: d.reportSummary,
+          evaluationJson: evalJson,
+          resumeDimensionScores: pickResumeDimensionScores(evalJson, fallbackDims)
+        };
+        setResumes((prev) => prev.map((x) => (x.id === resume.id ? updated : x)));
+        setReportResume((prev) => (prev && prev.id === resume.id ? updated : prev));
+      } catch (e) {
+        setScreeningAdminMsg({
+          title: '重新评估失败',
+          message: userFacingApiError(e, '重新评估失败，请稍后重试')
+        });
+      } finally {
+        setReportReEvalBusy(false);
+      }
+    },
+    [apiBase, hasToken, reportReEvalBusy]
   );
 
   const deleteScreeningsByIds = useCallback(
@@ -10487,9 +10565,13 @@ function ResumeScreeningView({
                   </div>
                 ) : null}
                 <div className="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">
-                  {reportResume.reportSummary?.trim() || '暂无报告正文。'}
+                  {reportHasStructuredSections(reportResume)
+                    ? reportSummaryBodyText(reportResume) || '暂无评估摘要。'
+                    : reportResume.reportSummary?.trim() || '暂无报告正文。'}
                 </div>
-                {Array.isArray(reportResume.evaluationJson?.strengths) && reportResume.evaluationJson.strengths.length ? (
+                {reportHasStructuredSections(reportResume) &&
+                Array.isArray(reportResume.evaluationJson?.strengths) &&
+                reportResume.evaluationJson.strengths.length ? (
                   <div className="mt-4">
                     <h4 className="text-sm font-semibold text-slate-800 mb-1.5">结构化优势</h4>
                     <ul className="text-sm text-slate-700 space-y-1">
@@ -10499,7 +10581,9 @@ function ResumeScreeningView({
                     </ul>
                   </div>
                 ) : null}
-                {Array.isArray(reportResume.evaluationJson?.risks) && reportResume.evaluationJson.risks.length ? (
+                {reportHasStructuredSections(reportResume) &&
+                Array.isArray(reportResume.evaluationJson?.risks) &&
+                reportResume.evaluationJson.risks.length ? (
                   <div className="mt-4">
                     <h4 className="text-sm font-semibold text-slate-800 mb-1.5">结构化风险与核验问题</h4>
                     <ul className="text-sm text-slate-700 space-y-1.5">
@@ -10518,7 +10602,16 @@ function ResumeScreeningView({
                   </div>
                 ) : null}
               </div>
-              <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 rounded-b-xl flex justify-end">
+              <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 rounded-b-xl flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={reportReEvalBusy || !apiBase || !hasToken}
+                  onClick={() => reportResume && void reEvaluateReport(reportResume)}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-indigo-700 bg-white border border-indigo-200 rounded-lg hover:bg-indigo-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {reportReEvalBusy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}
+                  重新 AI 评估
+                </button>
                 <button
                   type="button"
                   onClick={() => setReportResume(null)}

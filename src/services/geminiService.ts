@@ -1,4 +1,12 @@
 import { GoogleGenAI, Type } from '@google/genai';
+import {
+  buildResumeEvalUserPrompt,
+  detectResumeEvalJobType,
+  detectResumeEvalTechDirection,
+  type BuildResumeEvalPromptInput,
+  type ResumeEvalJobType,
+  type ResumeEvalTechDirection
+} from '../../shared/resumeEvalPrompt';
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -93,15 +101,12 @@ ${interviewTranscript}
   }
 }
 
-export type ResumeEvalJobType = 'risk_ops' | 'engineering';
+export type { BuildResumeEvalPromptInput, ResumeEvalJobType, ResumeEvalTechDirection };
+export { detectResumeEvalJobType, detectResumeEvalTechDirection };
 
-export type BuildResumeEvalPromptInput = {
-  jobType: ResumeEvalJobType;
-  jobJD: string;
-  resumeText: string;
-  extraRequirements?: string;
-  techDirection?: '后端' | '前端' | '全栈' | '客户端';
-};
+export function buildResumeEvalPrompt(input: BuildResumeEvalPromptInput): string {
+  return buildResumeEvalUserPrompt(input);
+}
 
 export type ResumeEvalDecision = '建议进入面试' | '建议备选' | '不建议推进';
 
@@ -181,135 +186,6 @@ function fallbackResumeEval(jobType: ResumeEvalJobType): ResumeEvalResult {
     decision: '建议备选',
     summary: '模型输出解析失败，建议人工复核。',
   };
-}
-
-export function buildResumeEvalPrompt(input: BuildResumeEvalPromptInput): string {
-  const { jobType, jobJD, resumeText, extraRequirements = '', techDirection = '后端' } = input;
-
-  const commonHeader = `
-你是资深招聘评估专家。请基于【岗位JD】和【候选人简历】输出结构化评估结果。
-要求：证据驱动、禁止臆测、输出严格JSON（不要额外文本）。
-
-【岗位JD】
-${jobJD}
-
-【候选人简历】
-${resumeText}
-
-【补充要求】
-${extraRequirements || '无'}
-`.trim();
-
-  if (jobType === 'risk_ops') {
-    return `${commonHeader}
-
-# 评估场景
-岗位类型：风控运营
-
-# 流程
-1. 硬性门槛校验（Pass/Fail）
-- 学历/年限硬要求
-- 风控相关经验（信贷/反欺诈/交易风控/策略运营）
-- 数据分析能力（SQL/Excel/BI至少一种）
-- 核心场景（策略迭代、规则配置、指标监控、异常排查）
-
-2. 六维度评分（0-100）
-- risk_fit（权重25）
-- depth（权重20）
-- impact（权重20）
-- data_skill（权重15）
-- stability_growth（权重10）
-- communication_business（权重10）
-
-3. 评分约束
-- 无量化成果 => impact最高70
-- 无SQL/数据分析证据 => data_skill最高65
-- 缺风控场景 => risk_fit最高60
-
-4. 每个维度至少1条证据（来自简历原文）
-证据格式：["证据点：...｜摘录：..."]
-
-5. 输出最多5条风险，每条附面试核验问题
-
-6. 结论仅三选一
-- 建议进入面试
-- 建议备选
-- 不建议推进
-
-# 输出JSON格式
-{
-  "schema_version": "v1.0",
-  "job_type": "risk_ops",
-  "hard_gate": { "passed": true, "items": [{"name": "", "result": "pass", "reason": ""}] },
-  "dimension_scores": {
-    "risk_fit": {"score": 0, "weight": 25, "evidence": [""]},
-    "depth": {"score": 0, "weight": 20, "evidence": [""]},
-    "impact": {"score": 0, "weight": 20, "evidence": [""]},
-    "data_skill": {"score": 0, "weight": 15, "evidence": [""]},
-    "stability_growth": {"score": 0, "weight": 10, "evidence": [""]},
-    "communication_business": {"score": 0, "weight": 10, "evidence": [""]}
-  },
-  "total_score": 0,
-  "strengths": [""],
-  "risks": [{"risk": "", "interview_question": ""}],
-  "decision": "建议进入面试",
-  "summary": ""
-}`.trim();
-  }
-
-  return `${commonHeader}
-
-# 评估场景
-岗位类型：研发岗（${techDirection}）
-
-# 流程
-1. 硬性门槛校验（Pass/Fail）
-- 核心技术栈匹配
-- 年限要求
-- 工程实践要求（性能/稳定性/工程化/测试）
-
-2. 六维度评分（0-100）
-- tech_fit（权重25）
-- engineering_depth（权重20）
-- impact（权重20）
-- code_quality（权重15）
-- stability_growth（权重10）
-- communication_business（权重10）
-
-3. 评分约束
-- 无复杂项目/核心模块经历 => engineering_depth最高70
-- 缺量化成果 => impact最高75
-- 技术名词堆砌无场景 => tech_fit最高65
-
-4. 每个维度至少1条证据（来自简历原文）
-证据格式：["证据点：...｜摘录：..."]
-
-5. 输出最多5条风险，每条附技术追问
-
-6. 结论仅三选一
-- 建议进入面试
-- 建议备选
-- 不建议推进
-
-# 输出JSON格式
-{
-  "schema_version": "v1.0",
-  "job_type": "engineering",
-  "hard_gate": { "passed": true, "items": [{"name": "", "result": "pass", "reason": ""}] },
-  "dimension_scores": {
-    "tech_fit": {"score": 0, "weight": 25, "evidence": [""]},
-    "engineering_depth": {"score": 0, "weight": 20, "evidence": [""]},
-    "impact": {"score": 0, "weight": 20, "evidence": [""]},
-    "code_quality": {"score": 0, "weight": 15, "evidence": [""]},
-    "stability_growth": {"score": 0, "weight": 10, "evidence": [""]},
-    "communication_business": {"score": 0, "weight": 10, "evidence": [""]}
-  },
-  "total_score": 0,
-  "strengths": [""],
-  "risks": [{"risk": "", "interview_question": ""}],
-  "decision": "建议进入面试",
-  "summary": ""
-}`.trim();
 }
 
 export function parseResumeEvalResult(
