@@ -1824,12 +1824,12 @@ export default function App() {
 // --- View Components ---
 
 const CLIENT_MGMT_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 280, minWidth: 180, maxWidth: 560 },
-  { id: 'creditCode', defaultWidth: 300, minWidth: 200, maxWidth: 560 },
-  { id: 'industry', defaultWidth: 180, minWidth: 130, maxWidth: 360 },
-  { id: 'contact', defaultWidth: 160, minWidth: 120, maxWidth: 280 },
-  { id: 'phone', defaultWidth: 180, minWidth: 140, maxWidth: 280 },
-  { id: 'actions', defaultWidth: 160, minWidth: 120, maxWidth: 240 }
+  { id: 'name', defaultWidth: 220, minWidth: 150, maxWidth: 520 },
+  { id: 'creditCode', defaultWidth: 240, minWidth: 180, maxWidth: 520 },
+  { id: 'industry', defaultWidth: 140, minWidth: 110, maxWidth: 320 },
+  { id: 'contact', defaultWidth: 120, minWidth: 96, maxWidth: 240 },
+  { id: 'phone', defaultWidth: 140, minWidth: 120, maxWidth: 240 },
+  { id: 'actions', defaultWidth: 120, minWidth: 96, maxWidth: 220 }
 ];
 
 function ClientManagementView() {
@@ -1863,23 +1863,23 @@ function ClientManagementView() {
           <colgroup>{cols.colNodes}</colgroup>
           <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
             <tr>
-              <ResizableTh col={cols.byId.name} className="px-6 py-4 font-medium">企业名称</ResizableTh>
-              <ResizableTh col={cols.byId.creditCode} className="px-6 py-4 font-medium">统一社会信用代码 (主键)</ResizableTh>
-              <ResizableTh col={cols.byId.industry} className="px-6 py-4 font-medium">所属行业</ResizableTh>
-              <ResizableTh col={cols.byId.contact} className="px-6 py-4 font-medium">联系人</ResizableTh>
-              <ResizableTh col={cols.byId.phone} className="px-6 py-4 font-medium">联系电话</ResizableTh>
-              <ResizableTh col={cols.byId.actions} className="px-6 py-4 font-medium text-right">操作</ResizableTh>
+                <ResizableTh col={cols.byId.name} className="px-3 py-3 font-medium sm:px-4">企业名称</ResizableTh>
+                <ResizableTh col={cols.byId.creditCode} className="px-3 py-3 font-medium sm:px-4">统一社会信用代码 (主键)</ResizableTh>
+                <ResizableTh col={cols.byId.industry} className="px-3 py-3 font-medium sm:px-4">所属行业</ResizableTh>
+                <ResizableTh col={cols.byId.contact} className="px-3 py-3 font-medium sm:px-4">联系人</ResizableTh>
+                <ResizableTh col={cols.byId.phone} className="px-3 py-3 font-medium sm:px-4">联系电话</ResizableTh>
+                <ResizableTh col={cols.byId.actions} className="px-3 py-3 font-medium text-right sm:px-4">操作</ResizableTh>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {clients.map(client => (
               <tr key={client.id} className="hover:bg-slate-50 transition-colors">
-                <td className="px-6 py-4 font-medium text-slate-900">{client.name}</td>
-                <td className="px-6 py-4 font-mono text-slate-500">{client.creditCode}</td>
-                <td className="px-6 py-4 text-slate-600">{client.industry}</td>
-                <td className="px-6 py-4 text-slate-600">{client.contact}</td>
-                <td className="px-6 py-4 text-slate-600">{client.phone}</td>
-                <td className="px-6 py-4 text-right">
+                <td className="px-3 py-3 font-medium text-slate-900 sm:px-4">{client.name}</td>
+                <td className="px-3 py-3 font-mono text-slate-500 sm:px-4">{client.creditCode}</td>
+                <td className="px-3 py-3 text-slate-600 sm:px-4">{client.industry}</td>
+                <td className="px-3 py-3 text-slate-600 sm:px-4">{client.contact}</td>
+                <td className="px-3 py-3 text-slate-600 sm:px-4">{client.phone}</td>
+                <td className="px-3 py-3 text-right sm:px-4">
                   <button className="text-indigo-600 hover:text-indigo-800 font-medium">编辑</button>
                 </td>
               </tr>
@@ -2681,10 +2681,7 @@ function ProjectManagementView({
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">项目管理</h1>
-        </div>
+      <div className="flex flex-wrap items-center justify-end gap-2">
         <div className="flex flex-wrap items-center gap-2 shrink-0">
           {canManage && dmDeptReady ? (
             <button
@@ -3635,10 +3632,6 @@ function WorkbenchView({
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-900">工作台</h1>
-      </div>
-
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
         {statCards.map((c) => (
           <div
@@ -4877,19 +4870,19 @@ function JobEditorModal({
 }
 
 const JOB_QUERY_BASE_COLUMNS: ColumnSpec[] = [
-  { id: 'project', defaultWidth: 240, minWidth: 180, maxWidth: 520 },
-  { id: 'deliveryOwner', defaultWidth: 190, minWidth: 140, maxWidth: 360 },
-  { id: 'recruitDept', defaultWidth: 200, minWidth: 150, maxWidth: 360 },
-  { id: 'title', defaultWidth: 240, minWidth: 180, maxWidth: 460 },
-  { id: 'demand', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
-  { id: 'salary', defaultWidth: 160, minWidth: 120, maxWidth: 280 },
-  { id: 'location', defaultWidth: 170, minWidth: 120, maxWidth: 320 },
-  { id: 'jobDate', defaultWidth: 170, minWidth: 130, maxWidth: 260 },
-  { id: 'status', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
-  { id: 'actions', defaultWidth: 240, minWidth: 180, maxWidth: 420 }
+  { id: 'project', defaultWidth: 180, minWidth: 140, maxWidth: 480 },
+  { id: 'deliveryOwner', defaultWidth: 140, minWidth: 110, maxWidth: 320 },
+  { id: 'recruitDept', defaultWidth: 150, minWidth: 120, maxWidth: 320 },
+  { id: 'title', defaultWidth: 190, minWidth: 150, maxWidth: 420 },
+  { id: 'demand', defaultWidth: 92, minWidth: 76, maxWidth: 180 },
+  { id: 'salary', defaultWidth: 120, minWidth: 96, maxWidth: 240 },
+  { id: 'location', defaultWidth: 120, minWidth: 96, maxWidth: 260 },
+  { id: 'jobDate', defaultWidth: 130, minWidth: 110, maxWidth: 220 },
+  { id: 'status', defaultWidth: 100, minWidth: 82, maxWidth: 180 },
+  { id: 'actions', defaultWidth: 180, minWidth: 150, maxWidth: 360 }
 ];
 const JOB_QUERY_COLUMNS_WITH_CHECK: ColumnSpec[] = [
-  { id: 'check', defaultWidth: 56, minWidth: 48, maxWidth: 72 },
+  { id: 'check', defaultWidth: 44, minWidth: 40, maxWidth: 60 },
   ...JOB_QUERY_BASE_COLUMNS
 ];
 
@@ -5504,10 +5497,6 @@ function JobQueryView({
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-900">岗位分配</h1>
-      </div>
-
       {currentRole === 'delivery_manager' &&
       (!String(authProfile?.dept || '').trim() || String(authProfile?.dept || '').trim() === '-') ? (
         <div className="rounded-xl border border-amber-200 bg-amber-50/90 text-amber-950 px-5 py-4 text-sm leading-relaxed max-w-3xl">
@@ -5630,8 +5619,8 @@ function JobQueryView({
                     />
                   </ResizableTh>
                 ) : null}
-                <ResizableTh col={cols.byId.project} className="px-5 py-3 font-medium whitespace-nowrap">项目</ResizableTh>
-                <ResizableTh col={cols.byId.deliveryOwner} className="px-5 py-3 font-medium whitespace-nowrap">交付负责人</ResizableTh>
+                <ResizableTh col={cols.byId.project} className="px-3 py-3 font-medium whitespace-nowrap">项目</ResizableTh>
+                <ResizableTh col={cols.byId.deliveryOwner} className="px-3 py-3 font-medium whitespace-nowrap">交付负责人</ResizableTh>
                 <ResizableTh
                   col={cols.byId.recruitDept}
                   className="px-5 py-3 font-medium whitespace-nowrap"
@@ -5639,15 +5628,15 @@ function JobQueryView({
                 >
                   招聘部门
                 </ResizableTh>
-                <ResizableTh col={cols.byId.title} className="px-5 py-3 font-medium whitespace-nowrap">岗位名称</ResizableTh>
-                <ResizableTh col={cols.byId.demand} className="px-5 py-3 font-medium whitespace-nowrap" title="需求人数（Headcount）">
+                <ResizableTh col={cols.byId.title} className="px-3 py-3 font-medium whitespace-nowrap">岗位名称</ResizableTh>
+                <ResizableTh col={cols.byId.demand} className="px-3 py-3 font-medium whitespace-nowrap" title="需求人数（Headcount）">
                   招聘人数（HC）
                 </ResizableTh>
-                <ResizableTh col={cols.byId.salary} className="px-5 py-3 font-medium whitespace-nowrap">薪资范围</ResizableTh>
-                <ResizableTh col={cols.byId.location} className="px-5 py-3 font-medium whitespace-nowrap">地点</ResizableTh>
-                <ResizableTh col={cols.byId.jobDate} className="px-5 py-3 font-medium whitespace-nowrap">岗位日期</ResizableTh>
-                <ResizableTh col={cols.byId.status} className="px-5 py-3 font-medium whitespace-nowrap">项目状态</ResizableTh>
-                <ResizableTh col={cols.byId.actions} className="px-5 py-3 font-medium text-right whitespace-nowrap">操作</ResizableTh>
+                <ResizableTh col={cols.byId.salary} className="px-3 py-3 font-medium whitespace-nowrap">薪资范围</ResizableTh>
+                <ResizableTh col={cols.byId.location} className="px-3 py-3 font-medium whitespace-nowrap">地点</ResizableTh>
+                <ResizableTh col={cols.byId.jobDate} className="px-3 py-3 font-medium whitespace-nowrap">岗位日期</ResizableTh>
+                <ResizableTh col={cols.byId.status} className="px-3 py-3 font-medium whitespace-nowrap">项目状态</ResizableTh>
+                <ResizableTh col={cols.byId.actions} className="px-3 py-3 font-medium text-right whitespace-nowrap">操作</ResizableTh>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -7345,22 +7334,22 @@ function LibraryTriCell({ v }: { v: boolean | null }) {
 }
 
 const RESUME_LIBRARY_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 160, minWidth: 120, maxWidth: 300 },
-  { id: 'gender', defaultWidth: 82, minWidth: 70, maxWidth: 130 },
-  { id: 'age', defaultWidth: 82, minWidth: 70, maxWidth: 130 },
-  { id: 'workYears', defaultWidth: 110, minWidth: 90, maxWidth: 180 },
-  { id: 'phone', defaultWidth: 150, minWidth: 120, maxWidth: 220 },
-  { id: 'major', defaultWidth: 130, minWidth: 100, maxWidth: 260 },
-  { id: 'education', defaultWidth: 110, minWidth: 90, maxWidth: 180 },
-  { id: 'position', defaultWidth: 170, minWidth: 130, maxWidth: 320 },
-  { id: 'hasDegree', defaultWidth: 120, minWidth: 100, maxWidth: 180 },
-  { id: 'unifiedEnroll', defaultWidth: 120, minWidth: 100, maxWidth: 180 },
-  { id: 'expectedSalary', defaultWidth: 140, minWidth: 110, maxWidth: 220 },
-  { id: 'checkable', defaultWidth: 120, minWidth: 100, maxWidth: 180 },
-  { id: 'channel', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
-  { id: 'uploaded', defaultWidth: 120, minWidth: 100, maxWidth: 180 },
-  { id: 'uploadTime', defaultWidth: 150, minWidth: 120, maxWidth: 220 },
-  { id: 'actions', defaultWidth: 150, minWidth: 120, maxWidth: 260 }
+  { id: 'name', defaultWidth: 124, minWidth: 96, maxWidth: 280 },
+  { id: 'gender', defaultWidth: 58, minWidth: 48, maxWidth: 110 },
+  { id: 'age', defaultWidth: 58, minWidth: 48, maxWidth: 110 },
+  { id: 'workYears', defaultWidth: 86, minWidth: 72, maxWidth: 160 },
+  { id: 'phone', defaultWidth: 114, minWidth: 96, maxWidth: 200 },
+  { id: 'major', defaultWidth: 94, minWidth: 80, maxWidth: 220 },
+  { id: 'education', defaultWidth: 82, minWidth: 68, maxWidth: 160 },
+  { id: 'position', defaultWidth: 124, minWidth: 100, maxWidth: 280 },
+  { id: 'hasDegree', defaultWidth: 92, minWidth: 78, maxWidth: 160 },
+  { id: 'unifiedEnroll', defaultWidth: 86, minWidth: 74, maxWidth: 150 },
+  { id: 'expectedSalary', defaultWidth: 102, minWidth: 84, maxWidth: 200 },
+  { id: 'checkable', defaultWidth: 86, minWidth: 74, maxWidth: 150 },
+  { id: 'channel', defaultWidth: 94, minWidth: 80, maxWidth: 200 },
+  { id: 'uploaded', defaultWidth: 90, minWidth: 78, maxWidth: 160 },
+  { id: 'uploadTime', defaultWidth: 112, minWidth: 96, maxWidth: 200 },
+  { id: 'actions', defaultWidth: 118, minWidth: 104, maxWidth: 230 }
 ];
 
 function ResumeLibraryView({
@@ -7963,7 +7952,7 @@ function ResumeLibraryView({
           {pagedRows.length > 0 ? (
             <div className="max-w-full overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
               <table
-                className="table-fixed border-collapse text-left text-sm text-slate-800 [&_th]:px-3 [&_th]:py-3 [&_td]:px-3 [&_td]:py-2.5"
+                className="table-fixed border-collapse text-left text-xs text-slate-800 [&_th]:px-2 [&_th]:py-2.5 [&_td]:px-2 [&_td]:py-2"
                 ref={cols.tableRef} style={cols.tableStyle}
               >
                 <colgroup>{cols.colNodes}</colgroup>
@@ -8252,17 +8241,17 @@ function ResumeLibraryView({
 }
 
 const RESUME_SCREENING_COLUMNS: ColumnSpec[] = [
-  { id: 'check', defaultWidth: 56, minWidth: 48, maxWidth: 72 },
-  { id: 'name', defaultWidth: 170, minWidth: 130, maxWidth: 340 },
-  { id: 'project', defaultWidth: 180, minWidth: 140, maxWidth: 360 },
-  { id: 'phone', defaultWidth: 150, minWidth: 120, maxWidth: 220 },
-  { id: 'job', defaultWidth: 220, minWidth: 170, maxWidth: 420 },
-  { id: 'score', defaultWidth: 100, minWidth: 82, maxWidth: 140 },
-  { id: 'stage', defaultWidth: 180, minWidth: 140, maxWidth: 300 },
-  { id: 'uploader', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
-  { id: 'uploadTime', defaultWidth: 150, minWidth: 120, maxWidth: 220 },
-  { id: 'shenpuResume', defaultWidth: 180, minWidth: 140, maxWidth: 280 },
-  { id: 'actions', defaultWidth: 260, minWidth: 220, maxWidth: 420 }
+  { id: 'check', defaultWidth: 42, minWidth: 38, maxWidth: 56 },
+  { id: 'name', defaultWidth: 112, minWidth: 92, maxWidth: 280 },
+  { id: 'project', defaultWidth: 136, minWidth: 106, maxWidth: 320 },
+  { id: 'phone', defaultWidth: 112, minWidth: 92, maxWidth: 200 },
+  { id: 'job', defaultWidth: 160, minWidth: 126, maxWidth: 360 },
+  { id: 'score', defaultWidth: 72, minWidth: 62, maxWidth: 120 },
+  { id: 'stage', defaultWidth: 112, minWidth: 92, maxWidth: 260 },
+  { id: 'uploader', defaultWidth: 94, minWidth: 78, maxWidth: 200 },
+  { id: 'uploadTime', defaultWidth: 106, minWidth: 92, maxWidth: 190 },
+  { id: 'shenpuResume', defaultWidth: 120, minWidth: 104, maxWidth: 240 },
+  { id: 'actions', defaultWidth: 178, minWidth: 158, maxWidth: 360 }
 ];
 
 const RESUME_UPLOAD_MAX_BATCH = 30;
@@ -9371,12 +9360,6 @@ function ResumeScreeningView({
       ) : null}
       <div className="flex min-h-0 flex-1 flex-col gap-2">
         <div className="shrink-0 space-y-2.5">
-          <div>
-            <h1 className="text-xl font-bold text-slate-900">简历管理</h1>
-            <p className="mt-1 text-xs leading-relaxed text-slate-500 sm:text-sm">
-              项目、筛选条件与分页均由服务端计算；修改条件或翻页后会重新请求列表。上传请在弹窗内选择项目与目标岗位后提交文件。
-            </p>
-          </div>
           <form
             className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 shadow-sm"
             title="筛选与分页由服务端计算；点击搜索将重置到第 1 页并重新拉取"
@@ -9694,13 +9677,13 @@ function ResumeScreeningView({
               {hasDisplayResumes ? (
                 <div className="max-w-full overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
                   <table
-                    className="table-fixed text-left text-sm text-slate-800"
+                    className="table-fixed text-left text-xs text-slate-800"
                     ref={cols.tableRef} style={cols.tableStyle}
                   >
                     <colgroup>{cols.colNodes}</colgroup>
                     <thead className="bg-slate-50/95 text-slate-600 border-b border-slate-200 text-xs sticky top-0 z-10">
                       <tr>
-                        <ResizableTh col={cols.byId.check} className="px-1 py-3 text-center" resizable={false}>
+                        <ResizableTh col={cols.byId.check} className="px-1 py-2.5 text-center" resizable={false}>
                           <input
                             type="checkbox"
                             title="全选本页"
@@ -9734,16 +9717,16 @@ function ResumeScreeningView({
                             className="h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                           />
                         </ResizableTh>
-                        <ResizableTh col={cols.byId.name} className="py-3 pl-1.5 pr-2 font-medium">候选人</ResizableTh>
-                        <ResizableTh col={cols.byId.project} className="py-3 pl-1 pr-2 font-medium">项目</ResizableTh>
-                        <ResizableTh col={cols.byId.phone} className="px-1 py-3 font-medium">手机</ResizableTh>
-                        <ResizableTh col={cols.byId.job} className="py-3 pl-1 pr-2 font-medium">匹配岗位</ResizableTh>
-                        <ResizableTh col={cols.byId.score} className="py-3 pl-0 pr-1 text-center font-medium">匹配分</ResizableTh>
-                        <ResizableTh col={cols.byId.stage} className="px-2 py-3 font-medium">流程</ResizableTh>
-                        <ResizableTh col={cols.byId.uploader} className="px-2 py-3 font-medium">上传人</ResizableTh>
-                        <ResizableTh col={cols.byId.uploadTime} className="px-1 py-3 font-medium whitespace-nowrap">上传时间</ResizableTh>
-                        <ResizableTh col={cols.byId.shenpuResume} className="px-2 py-3 font-medium whitespace-nowrap">申朴简历</ResizableTh>
-                        <ResizableTh col={cols.byId.actions} className="border-l border-slate-200 bg-slate-50/95 pl-3 pr-2 py-3 font-medium text-right whitespace-nowrap">操作</ResizableTh>
+                        <ResizableTh col={cols.byId.name} className="py-2.5 pl-1.5 pr-1 font-medium">候选人</ResizableTh>
+                        <ResizableTh col={cols.byId.project} className="py-2.5 pl-1 pr-1 font-medium">项目</ResizableTh>
+                        <ResizableTh col={cols.byId.phone} className="px-1 py-2.5 font-medium">手机</ResizableTh>
+                        <ResizableTh col={cols.byId.job} className="py-2.5 pl-1 pr-1 font-medium">匹配岗位</ResizableTh>
+                        <ResizableTh col={cols.byId.score} className="py-2.5 pl-0 pr-1 text-center font-medium">匹配分</ResizableTh>
+                        <ResizableTh col={cols.byId.stage} className="px-1.5 py-2.5 font-medium">流程</ResizableTh>
+                        <ResizableTh col={cols.byId.uploader} className="px-1.5 py-2.5 font-medium">上传人</ResizableTh>
+                        <ResizableTh col={cols.byId.uploadTime} className="px-1 py-2.5 font-medium whitespace-nowrap">上传时间</ResizableTh>
+                        <ResizableTh col={cols.byId.shenpuResume} className="px-1.5 py-2.5 font-medium whitespace-nowrap">申朴简历</ResizableTh>
+                        <ResizableTh col={cols.byId.actions} className="border-l border-slate-200 bg-slate-50/95 pl-2 pr-1.5 py-2.5 font-medium text-right whitespace-nowrap">操作</ResizableTh>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -9870,7 +9853,7 @@ function ResumeScreeningView({
                                   {uploaderLabel}
                                 </div>
                               </td>
-                              <td className="w-[6.25rem] min-w-[6.25rem] max-w-[6.25rem] shrink-0 px-1 py-3 text-xs tabular-nums text-slate-500">
+                              <td className="w-[5.75rem] min-w-[5.75rem] max-w-[5.75rem] shrink-0 px-1 py-3 text-xs tabular-nums text-slate-500">
                                 <span
                                   className="block whitespace-nowrap font-mono text-[11px] tracking-tight"
                                   title={resume.uploadTimeFull || resume.uploadTime}
@@ -9953,11 +9936,11 @@ function ResumeScreeningView({
                                 )}
                               </td>
                               <td
-                                className={`w-[12.5rem] min-w-[12.5rem] max-w-none shrink-0 border-l border-slate-200 py-2 pl-3 pr-2 text-right align-middle whitespace-nowrap ${
+                                className={`w-[10.75rem] min-w-[10.75rem] max-w-none shrink-0 border-l border-slate-200 py-2 pl-2 pr-1.5 text-right align-middle whitespace-nowrap ${
                                   idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/90'
                                 }`}
                               >
-                                <div className="inline-flex flex-nowrap items-center justify-end gap-1">
+                                <div className="inline-flex flex-nowrap items-center justify-end gap-0.5">
                                   {isResumeUploading || uploadTaskRowFailed || uploadTaskRowDuplicate || isUploadPlaceholder ? (
                                     <div
                                       className={`min-w-[10rem] rounded-lg border px-2 py-1.5 text-left ${
@@ -10012,30 +9995,30 @@ function ResumeScreeningView({
                                       <button
                                         type="button"
                                         onClick={() => setReportResume(resume)}
-                                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-400/35"
+                                        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-400/35"
                                         title="查看报告"
                                         aria-label="查看报告"
                                       >
-                                        <FileBarChart className="h-4 w-4" aria-hidden />
+                                        <FileBarChart className="h-3.5 w-3.5" aria-hidden />
                                       </button>
                                       <button
                                         type="button"
                                         onClick={() => setProfileEditResume(resume)}
-                                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-400/35"
+                                        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-400/35"
                                         title="简历详情"
                                         aria-label="简历详情"
                                       >
-                                        <UserPen className="h-4 w-4" aria-hidden />
+                                        <UserPen className="h-3.5 w-3.5" aria-hidden />
                                       </button>
                                       <button
                                         type="button"
                                         onClick={() => handleInviteFromResume(resume)}
                                         disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
-                                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-40"
+                                        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-40"
                                         title="发起面试"
                                         aria-label="发起面试"
                                       >
-                                        <CalendarCheck className="h-4 w-4" aria-hidden />
+                                        <CalendarCheck className="h-3.5 w-3.5" aria-hidden />
                                       </button>
                                       {resume.hasOriginalFile ? (
                                         <>
@@ -10043,21 +10026,21 @@ function ResumeScreeningView({
                                         type="button"
                                         disabled={fileBusyId === resume.id}
                                         onClick={() => void openResumeOriginalFile(resume, 'preview')}
-                                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300/60 disabled:opacity-50"
+                                        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300/60 disabled:opacity-50"
                                         title="预览原件"
                                         aria-label="预览原件"
                                       >
-                                        <Eye className="h-4 w-4" aria-hidden />
+                                        <Eye className="h-3.5 w-3.5" aria-hidden />
                                       </button>
                                       <button
                                         type="button"
                                         disabled={fileBusyId === resume.id}
                                         onClick={() => void openResumeOriginalFile(resume, 'download')}
-                                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300/60 disabled:opacity-50"
+                                        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300/60 disabled:opacity-50"
                                         title="下载原件"
                                         aria-label="下载原件"
                                       >
-                                        <Download className="h-4 w-4" aria-hidden />
+                                        <Download className="h-3.5 w-3.5" aria-hidden />
                                       </button>
                                         </>
                                       ) : null}
@@ -10663,18 +10646,18 @@ function ResumeScreeningView({
 }
 
 const APPLICATION_MGMT_COLUMNS: ColumnSpec[] = [
-  { id: 'candidate', defaultWidth: 170, minWidth: 130, maxWidth: 300 },
-  { id: 'referrer', defaultWidth: 150, minWidth: 120, maxWidth: 260 },
-  { id: 'project', defaultWidth: 220, minWidth: 170, maxWidth: 400 },
-  { id: 'jobTitle', defaultWidth: 230, minWidth: 180, maxWidth: 420 },
-  { id: 'resumeScore', defaultWidth: 120, minWidth: 96, maxWidth: 180 },
-  { id: 'resumeDims', defaultWidth: 240, minWidth: 200, maxWidth: 360 },
-  { id: 'interviewScore', defaultWidth: 120, minWidth: 96, maxWidth: 180 },
-  { id: 'status', defaultWidth: 170, minWidth: 140, maxWidth: 260 },
-  { id: 'stage', defaultWidth: 180, minWidth: 140, maxWidth: 260 },
-  { id: 'aiInterviewer', defaultWidth: 200, minWidth: 160, maxWidth: 340 },
-  { id: 'recruiter', defaultWidth: 170, minWidth: 130, maxWidth: 260 },
-  { id: 'report', defaultWidth: 170, minWidth: 140, maxWidth: 300 }
+  { id: 'candidate', defaultWidth: 124, minWidth: 100, maxWidth: 280 },
+  { id: 'referrer', defaultWidth: 114, minWidth: 94, maxWidth: 240 },
+  { id: 'project', defaultWidth: 160, minWidth: 126, maxWidth: 360 },
+  { id: 'jobTitle', defaultWidth: 170, minWidth: 136, maxWidth: 380 },
+  { id: 'resumeScore', defaultWidth: 88, minWidth: 76, maxWidth: 150 },
+  { id: 'resumeDims', defaultWidth: 168, minWidth: 140, maxWidth: 320 },
+  { id: 'interviewScore', defaultWidth: 88, minWidth: 76, maxWidth: 150 },
+  { id: 'status', defaultWidth: 122, minWidth: 104, maxWidth: 240 },
+  { id: 'stage', defaultWidth: 130, minWidth: 104, maxWidth: 240 },
+  { id: 'aiInterviewer', defaultWidth: 140, minWidth: 116, maxWidth: 300 },
+  { id: 'recruiter', defaultWidth: 120, minWidth: 100, maxWidth: 240 },
+  { id: 'report', defaultWidth: 118, minWidth: 104, maxWidth: 260 }
 ];
 
 function ApplicationManagementView({
@@ -11070,19 +11053,19 @@ function ApplicationManagementView({
               ) : (
                 rows.map((row) => (
                   <tr key={row.id} className="transition-colors hover:bg-slate-50">
-                    <td className="whitespace-nowrap px-3 py-3 font-bold text-slate-900 sm:px-6 sm:py-4">
+                    <td className="whitespace-nowrap px-2.5 py-3 font-bold text-slate-900 sm:px-3">
                       {row.candidateName}
                     </td>
                     <td
-                      className="max-w-[8rem] truncate px-3 py-3 text-slate-600 sm:max-w-[10rem] sm:px-6 sm:py-4"
+                      className="max-w-[8rem] truncate px-2.5 py-3 text-slate-600 sm:max-w-[10rem] sm:px-3"
                       title={row.referrerLabel}
                     >
                       {row.referrerLabel}
                     </td>
-                    <td className="max-w-[10rem] px-3 py-3 text-slate-600 sm:max-w-[12.5rem] sm:px-6 sm:py-4" title={row.projectName}>
+                    <td className="max-w-[10rem] px-2.5 py-3 text-slate-600 sm:max-w-[12.5rem] sm:px-3" title={row.projectName}>
                       <span className="line-clamp-2">{row.projectName}</span>
                     </td>
-                    <td className="max-w-[12rem] px-3 py-3 text-slate-600 sm:max-w-none sm:px-6 sm:py-4">
+                    <td className="max-w-[12rem] px-2.5 py-3 text-slate-600 sm:max-w-none sm:px-3">
                       <span className="font-medium text-slate-800" title={row.jobTitle}>{row.jobTitle}</span>
                       <p
                         className="mt-0.5 font-mono text-[11px] text-slate-400"
@@ -11094,12 +11077,12 @@ function ApplicationManagementView({
                         {row.jobCode}
                       </p>
                     </td>
-                    <td className="whitespace-nowrap tabular-nums px-3 py-3 sm:px-6 sm:py-4">
+                    <td className="whitespace-nowrap tabular-nums px-2.5 py-3 sm:px-3">
                       <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2 py-1 font-semibold text-sky-900">
                         {row.resumeMatchScore}
                       </span>
                     </td>
-                    <td className="min-w-[12rem] px-3 py-3 text-xs text-slate-600 sm:min-w-[14rem] sm:px-6 sm:py-4">
+                    <td className="min-w-[10rem] px-2.5 py-3 text-xs text-slate-600 sm:min-w-[12rem] sm:px-3">
                       <div className="grid grid-cols-2 gap-1.5">
                         {resumeDimensionOrderedEntries(row.resumeDimensionScores || {})
                           .map(([k, v]) => (
@@ -11115,7 +11098,7 @@ function ApplicationManagementView({
                           ))}
                       </div>
                     </td>
-                    <td className="whitespace-nowrap tabular-nums px-3 py-3 sm:px-6 sm:py-4">
+                    <td className="whitespace-nowrap tabular-nums px-2.5 py-3 sm:px-3">
                       {row.interviewScore !== null ? (
                         <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-1 font-semibold text-violet-900">
                           {row.interviewScore}
@@ -11124,7 +11107,7 @@ function ApplicationManagementView({
                         <span className="text-slate-400">—</span>
                       )}
                     </td>
-                    <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                    <td className="whitespace-nowrap px-2.5 py-3 sm:px-3">
                       <span
                         className={`inline-block max-w-[9rem] truncate rounded px-2 py-1 text-xs font-medium ${
                           row.interviewOutcome === '面试通过'
@@ -11142,7 +11125,7 @@ function ApplicationManagementView({
                         {row.interviewOutcome}
                       </span>
                     </td>
-                    <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                    <td className="whitespace-nowrap px-2.5 py-3 sm:px-3">
                       <span
                         className={`inline-block rounded px-2 py-1 text-xs font-medium ${
                           row.status === 'AI面试完成'
@@ -11156,18 +11139,18 @@ function ApplicationManagementView({
                       </span>
                     </td>
                     <td
-                      className="max-w-[10rem] truncate px-3 py-3 text-slate-600 sm:max-w-[12rem] sm:px-6 sm:py-4"
+                      className="max-w-[10rem] truncate px-2.5 py-3 text-slate-600 sm:max-w-[12rem] sm:px-3"
                       title={row.promptTemplateName || '未发起面试或历史数据未记录模板'}
                     >
                       {row.promptTemplateName || '—'}
                     </td>
                     <td
-                      className="max-w-[10rem] truncate px-3 py-3 text-slate-600 sm:max-w-[12rem] sm:px-6 sm:py-4"
+                      className="max-w-[10rem] truncate px-2.5 py-3 text-slate-600 sm:max-w-[12rem] sm:px-3"
                       title={row.recruitersLabel}
                     >
                       {row.recruitersLabel}
                     </td>
-                    <td className="whitespace-nowrap px-3 py-3 text-right sm:px-6 sm:py-4">
+                    <td className="whitespace-nowrap px-2.5 py-3 text-right sm:px-3">
                       <button
                         type="button"
                         disabled={Boolean(reportLoadingId) || !row.hasInterviewReport}
@@ -11942,13 +11925,7 @@ function RecruiterQualityReportView({ currentRole }: { currentRole: Role }) {
 
   return (
     <div className="space-y-4 sm:space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">招聘质量报表</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            按招聘部门与人员统计上传、发邀与 AI 面试结果；综合分 = 25% 高质量简历 + 25% 合格发邀率 + 50% 面试通过率
-          </p>
-        </div>
+      <div className="flex flex-wrap items-start justify-end gap-3">
         <button type="button" onClick={exportCsv} disabled={!rows.length} className={btnSecondarySm}>
           <Download className="inline h-4 w-4 mr-1" />
           导出 CSV
@@ -12034,7 +12011,7 @@ function RecruiterQualityReportView({ currentRole }: { currentRole: Role }) {
           <div className="py-16 text-center text-sm text-slate-500">所选条件下暂无数据</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[960px] text-left text-sm">
+            <table className="w-full min-w-[820px] text-left text-sm">
               <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
                 <tr>
                   <th className="px-3 py-3 font-medium">招聘部门</th>
@@ -12260,13 +12237,7 @@ function DeliveryPerformanceReportView({ currentRole }: { currentRole: Role }) {
 
   return (
     <div className="space-y-4 sm:space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">交付业绩报表</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            按项目负责人统计需求、推荐、邀约、AI 面试、通过与风险岗位；完成率暂按面试通过人数 / 需求人数计算
-          </p>
-        </div>
+      <div className="flex flex-wrap items-start justify-end gap-3">
         <button type="button" onClick={exportCsv} disabled={!rows.length} className={btnSecondarySm}>
           <Download className="inline h-4 w-4 mr-1" />
           导出 CSV
@@ -12346,7 +12317,7 @@ function DeliveryPerformanceReportView({ currentRole }: { currentRole: Role }) {
           <div className="py-16 text-center text-sm text-slate-500">所选条件下暂无数据</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1120px] text-left text-sm">
+            <table className="w-full min-w-[920px] text-left text-sm">
               <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
                 <tr>
                   <th className="px-3 py-3 font-medium">交付经理</th>
@@ -12403,7 +12374,7 @@ function DeliveryPerformanceReportView({ currentRole }: { currentRole: Role }) {
                         <tr>
                           <td colSpan={12} className="bg-slate-50 px-3 py-3">
                             <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
-                              <table className="w-full min-w-[860px] text-left text-xs">
+                              <table className="w-full min-w-[720px] text-left text-xs">
                                 <thead className="bg-white text-slate-500">
                                   <tr>
                                     <th className="px-3 py-2 font-medium">项目</th>
@@ -13070,35 +13041,27 @@ function SystemInterviewPromptView() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">AI 面试提示词</h1>
-          <p className="mt-1 max-w-3xl text-sm text-slate-600 leading-relaxed">
-            配置小程序 AI 面试出题使用的提示词模板。保存后只影响后续新生成的题目，已生成并入库的面试题不会回改。
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={() => void load()} disabled={loading || saving} className={btnSecondarySm}>
-            重新加载
-          </button>
-          <button
-            type="button"
-            onClick={restoreDefault}
-            disabled={loading || saving || !data?.defaults}
-            className={btnSecondarySm}
-          >
-            恢复默认
-          </button>
-          <button
-            type="button"
-            onClick={() => void save()}
-            disabled={loading || saving || !dirty}
-            className={btnPrimarySmFlex}
-          >
-            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
-            {saving ? '保存中…' : '保存配置'}
-          </button>
-        </div>
+      <div className="flex flex-wrap justify-end gap-2">
+        <button type="button" onClick={() => void load()} disabled={loading || saving} className={btnSecondarySm}>
+          重新加载
+        </button>
+        <button
+          type="button"
+          onClick={restoreDefault}
+          disabled={loading || saving || !data?.defaults}
+          className={btnSecondarySm}
+        >
+          恢复默认
+        </button>
+        <button
+          type="button"
+          onClick={() => void save()}
+          disabled={loading || saving || !dirty}
+          className={btnPrimarySmFlex}
+        >
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+          {saving ? '保存中…' : '保存配置'}
+        </button>
       </div>
 
       {err ? (
@@ -13221,11 +13184,11 @@ const INTERVIEW_PROMPT_ROLE_LABEL: Record<string, string> = {
 };
 
 const SYS_INTERVIEW_PROMPT_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 320, minWidth: 220, maxWidth: 640 },
-  { id: 'status', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
-  { id: 'enabled', defaultWidth: 110, minWidth: 90, maxWidth: 180 },
-  { id: 'updated', defaultWidth: 260, minWidth: 200, maxWidth: 500 },
-  { id: 'actions', defaultWidth: 240, minWidth: 180, maxWidth: 400 }
+  { id: 'name', defaultWidth: 250, minWidth: 180, maxWidth: 580 },
+  { id: 'status', defaultWidth: 100, minWidth: 82, maxWidth: 190 },
+  { id: 'enabled', defaultWidth: 86, minWidth: 72, maxWidth: 150 },
+  { id: 'updated', defaultWidth: 210, minWidth: 160, maxWidth: 460 },
+  { id: 'actions', defaultWidth: 180, minWidth: 150, maxWidth: 360 }
 ];
 
 function SystemInterviewPromptTemplatesView() {
@@ -13424,18 +13387,10 @@ function SystemInterviewPromptTemplatesView() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">AI 面试官管理</h1>
-          <p className="mt-1 max-w-3xl text-sm text-slate-600 leading-relaxed">
-            这里只配置出题用的 <strong>System Prompt</strong>。发起面试邀请时可选择具体模板；候选人姓名、岗位、JD、简历仍由服务端固定逻辑拼入 User Prompt。
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={createNew} disabled={loading || saving} className={btnSecondarySm}>
-            新建模板
-          </button>
-        </div>
+      <div className="flex flex-wrap justify-end gap-2">
+        <button type="button" onClick={createNew} disabled={loading || saving} className={btnSecondarySm}>
+          新建模板
+        </button>
       </div>
 
       {err ? <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{err}</div> : null}
@@ -13456,11 +13411,11 @@ function SystemInterviewPromptTemplatesView() {
                 <colgroup>{cols.colNodes}</colgroup>
                 <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
                   <tr>
-                    <ResizableTh col={cols.byId.name} className="px-4 py-3 font-medium">模板名称</ResizableTh>
-                    <ResizableTh col={cols.byId.status} className="px-4 py-3 font-medium">状态</ResizableTh>
-                    <ResizableTh col={cols.byId.enabled} className="px-4 py-3 font-medium">启用</ResizableTh>
-                    <ResizableTh col={cols.byId.updated} className="px-4 py-3 font-medium">更新信息</ResizableTh>
-                    <ResizableTh col={cols.byId.actions} className="px-4 py-3 font-medium text-right">操作</ResizableTh>
+                    <ResizableTh col={cols.byId.name} className="px-3 py-3 font-medium">模板名称</ResizableTh>
+                    <ResizableTh col={cols.byId.status} className="px-3 py-3 font-medium">状态</ResizableTh>
+                    <ResizableTh col={cols.byId.enabled} className="px-3 py-3 font-medium">启用</ResizableTh>
+                    <ResizableTh col={cols.byId.updated} className="px-3 py-3 font-medium">更新信息</ResizableTh>
+                    <ResizableTh col={cols.byId.actions} className="px-3 py-3 font-medium text-right">操作</ResizableTh>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -13670,13 +13625,7 @@ function SystemAiInterviewSettingsView() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">AI面试设置</h1>
-          <p className="mt-2 text-sm text-slate-500">
-            管理员维护小程序 AI 面试的默认追问策略，招聘人员发起面试时无需单独配置。
-          </p>
-        </div>
+      <div className="flex flex-wrap items-start justify-end gap-4">
         <button type="button" onClick={save} disabled={loading || saving} className={btnPrimarySmFlex}>
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
           保存设置
@@ -13780,10 +13729,10 @@ function SystemAiInterviewSettingsView() {
 }
 
 const JOB_ROLE_BASES_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 260, minWidth: 180, maxWidth: 640 },
-  { id: 'sort', defaultWidth: 120, minWidth: 90, maxWidth: 220 },
-  { id: 'enabled', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
-  { id: 'actions', defaultWidth: 150, minWidth: 120, maxWidth: 260 }
+  { id: 'name', defaultWidth: 220, minWidth: 150, maxWidth: 600 },
+  { id: 'sort', defaultWidth: 90, minWidth: 72, maxWidth: 180 },
+  { id: 'enabled', defaultWidth: 100, minWidth: 82, maxWidth: 180 },
+  { id: 'actions', defaultWidth: 110, minWidth: 92, maxWidth: 220 }
 ];
 
 function SystemJobRoleBasesView() {
@@ -13884,12 +13833,6 @@ function SystemJobRoleBasesView() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-900">标准岗位</h1>
-        <p className="mt-1 max-w-3xl text-sm text-slate-600 leading-relaxed">
-          维护「岗位序列」名称（不含初级/中级等前缀）。与岗位分配中的岗位下拉、简历详情与简历库的「职位」选项一致；仅<strong>管理员</strong>可在此增删改。首次部署若表为空，服务启动时会用内置清单自动种子数据。
-        </p>
-      </div>
       {err ? (
         <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">{err}</div>
       ) : null}
@@ -13929,10 +13872,10 @@ function SystemJobRoleBasesView() {
               <colgroup>{cols.colNodes}</colgroup>
               <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
                 <tr>
-                  <ResizableTh col={cols.byId.name} className="px-4 py-3 font-medium">名称</ResizableTh>
-                  <ResizableTh col={cols.byId.sort} className="px-4 py-3 font-medium whitespace-nowrap">排序</ResizableTh>
-                  <ResizableTh col={cols.byId.enabled} className="px-4 py-3 font-medium whitespace-nowrap">启用</ResizableTh>
-                  <ResizableTh col={cols.byId.actions} className="px-4 py-3 font-medium text-right whitespace-nowrap">操作</ResizableTh>
+                  <ResizableTh col={cols.byId.name} className="px-3 py-3 font-medium">名称</ResizableTh>
+                  <ResizableTh col={cols.byId.sort} className="px-3 py-3 font-medium whitespace-nowrap">排序</ResizableTh>
+                  <ResizableTh col={cols.byId.enabled} className="px-3 py-3 font-medium whitespace-nowrap">启用</ResizableTh>
+                  <ResizableTh col={cols.byId.actions} className="px-3 py-3 font-medium text-right whitespace-nowrap">操作</ResizableTh>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -14000,11 +13943,11 @@ function normalizeDeptFormType(s: string | undefined): '交付' | '招聘' | '�
 }
 
 const SYS_DEPT_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 420, minWidth: 260, maxWidth: 860 },
-  { id: 'type', defaultWidth: 140, minWidth: 110, maxWidth: 220 },
-  { id: 'manager', defaultWidth: 170, minWidth: 130, maxWidth: 300 },
-  { id: 'count', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
-  { id: 'actions', defaultWidth: 260, minWidth: 200, maxWidth: 420 }
+  { id: 'name', defaultWidth: 300, minWidth: 200, maxWidth: 760 },
+  { id: 'type', defaultWidth: 100, minWidth: 82, maxWidth: 190 },
+  { id: 'manager', defaultWidth: 130, minWidth: 105, maxWidth: 260 },
+  { id: 'count', defaultWidth: 100, minWidth: 82, maxWidth: 190 },
+  { id: 'actions', defaultWidth: 190, minWidth: 160, maxWidth: 360 }
 ];
 
 function SystemDeptView() {
@@ -14348,11 +14291,11 @@ function SystemDeptView() {
             <colgroup>{cols.colNodes}</colgroup>
             <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
               <tr>
-                <ResizableTh col={cols.byId.name} className="px-6 py-4 font-medium">部门名称</ResizableTh>
-                <ResizableTh col={cols.byId.type} className="px-6 py-4 font-medium">部门类型</ResizableTh>
-                <ResizableTh col={cols.byId.manager} className="px-6 py-4 font-medium">负责人</ResizableTh>
-                <ResizableTh col={cols.byId.count} className="px-6 py-4 font-medium">成员数量</ResizableTh>
-                <ResizableTh col={cols.byId.actions} className="px-6 py-4 font-medium text-right">操作</ResizableTh>
+                <ResizableTh col={cols.byId.name} className="px-3 py-3 font-medium sm:px-4">部门名称</ResizableTh>
+                <ResizableTh col={cols.byId.type} className="px-3 py-3 font-medium sm:px-4">部门类型</ResizableTh>
+                <ResizableTh col={cols.byId.manager} className="px-3 py-3 font-medium sm:px-4">负责人</ResizableTh>
+                <ResizableTh col={cols.byId.count} className="px-3 py-3 font-medium sm:px-4">成员数量</ResizableTh>
+                <ResizableTh col={cols.byId.actions} className="px-3 py-3 font-medium text-right sm:px-4">操作</ResizableTh>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -14371,7 +14314,7 @@ function SystemDeptView() {
                   className={`transition-colors hover:bg-slate-50 ${sortMode ? 'cursor-grab' : ''} ${draggingDeptId === dept.id ? 'opacity-50' : ''}`}
                 >
                   <td
-                    className="px-6 py-4 font-medium text-slate-900"
+                    className="px-3 py-3 font-medium text-slate-900 sm:px-4"
                     style={{ paddingLeft: `${depth * 1.5 + 1.5}rem` }}
                   >
                     <div className="flex items-center gap-2">
@@ -14396,7 +14339,7 @@ function SystemDeptView() {
                       <span className="text-xs font-normal text-slate-400">L{dept.level}</span>
                     </div>
                   </td>
-                  <td className="px-6 py-4 text-slate-600 text-xs">
+                  <td className="px-3 py-3 text-slate-600 text-xs sm:px-4">
                     {dept.deptType ? (
                       <span
                         className={
@@ -14413,9 +14356,9 @@ function SystemDeptView() {
                       <span className="text-slate-400">—</span>
                     )}
                   </td>
-                  <td className="px-6 py-4 text-slate-600">{dept.manager}</td>
-                  <td className="px-6 py-4 text-slate-600">{dept.count} 人</td>
-                  <td className="px-6 py-4 text-right space-x-2 whitespace-nowrap">
+                  <td className="px-3 py-3 text-slate-600 sm:px-4">{dept.manager}</td>
+                  <td className="px-3 py-3 text-slate-600 sm:px-4">{dept.count} 人</td>
+                  <td className="px-3 py-3 text-right space-x-2 whitespace-nowrap sm:px-4">
                     <button
                       type="button"
                       onClick={() => openChild(dept)}
@@ -14579,12 +14522,12 @@ function SystemDeptView() {
 }
 
 const SYS_USER_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 230, minWidth: 170, maxWidth: 400 },
-  { id: 'username', defaultWidth: 190, minWidth: 150, maxWidth: 340 },
-  { id: 'dept', defaultWidth: 250, minWidth: 180, maxWidth: 460 },
-  { id: 'roles', defaultWidth: 300, minWidth: 220, maxWidth: 520 },
-  { id: 'status', defaultWidth: 130, minWidth: 100, maxWidth: 200 },
-  { id: 'actions', defaultWidth: 200, minWidth: 160, maxWidth: 340 }
+  { id: 'name', defaultWidth: 160, minWidth: 126, maxWidth: 360 },
+  { id: 'username', defaultWidth: 142, minWidth: 116, maxWidth: 300 },
+  { id: 'dept', defaultWidth: 180, minWidth: 144, maxWidth: 420 },
+  { id: 'roles', defaultWidth: 208, minWidth: 164, maxWidth: 480 },
+  { id: 'status', defaultWidth: 100, minWidth: 82, maxWidth: 180 },
+  { id: 'actions', defaultWidth: 142, minWidth: 124, maxWidth: 300 }
 ];
 
 function SystemUserView({
@@ -15018,9 +14961,6 @@ function SystemUserView({
 
   return (
     <div className="space-y-4 sm:space-y-6">
-      <div>
-        <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">用户管理</h1>
-      </div>
       {!listAllUsers && !myDeptOk ? (
         <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">
           无法按部门列出用户：账号未设置「所属部门」。请超级管理员在「用户管理」中为您填写部门（须与「部门管理」中名称一致），保存后重新登录。
@@ -15101,12 +15041,12 @@ function SystemUserView({
                 <colgroup>{cols.colNodes}</colgroup>
                 <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
                   <tr>
-                    <ResizableTh col={cols.byId.name} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">姓名</ResizableTh>
-                    <ResizableTh col={cols.byId.username} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">手机号（登录）</ResizableTh>
-                    <ResizableTh col={cols.byId.dept} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">所属部门</ResizableTh>
-                    <ResizableTh col={cols.byId.roles} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">角色</ResizableTh>
-                    <ResizableTh col={cols.byId.status} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">状态</ResizableTh>
-                    <ResizableTh col={cols.byId.actions} className="px-3 py-3 text-right text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">操作</ResizableTh>
+                    <ResizableTh col={cols.byId.name} className="px-2.5 py-3 text-xs font-medium sm:px-3 sm:text-sm">姓名</ResizableTh>
+                    <ResizableTh col={cols.byId.username} className="px-2.5 py-3 text-xs font-medium sm:px-3 sm:text-sm">手机号（登录）</ResizableTh>
+                    <ResizableTh col={cols.byId.dept} className="px-2.5 py-3 text-xs font-medium sm:px-3 sm:text-sm">所属部门</ResizableTh>
+                    <ResizableTh col={cols.byId.roles} className="px-2.5 py-3 text-xs font-medium sm:px-3 sm:text-sm">角色</ResizableTh>
+                    <ResizableTh col={cols.byId.status} className="px-2.5 py-3 text-xs font-medium sm:px-3 sm:text-sm">状态</ResizableTh>
+                    <ResizableTh col={cols.byId.actions} className="px-2.5 py-3 text-right text-xs font-medium sm:px-3 sm:text-sm">操作</ResizableTh>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -15115,7 +15055,7 @@ function SystemUserView({
                     const active = user.status === '正常';
                     return (
                       <tr key={user.id} className="transition-colors hover:bg-slate-50">
-                        <td className="px-3 py-3 font-bold text-slate-900 sm:px-6 sm:py-4">
+                        <td className="px-2.5 py-3 font-bold text-slate-900 sm:px-3">
                           <div className="flex min-w-0 items-center gap-2 sm:gap-3">
                             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-xs font-bold text-indigo-700">
                               {initial(user.name)}
@@ -15123,11 +15063,11 @@ function SystemUserView({
                             <span className="min-w-0 truncate">{user.name}</span>
                           </div>
                         </td>
-                        <td className="max-w-[9rem] truncate px-3 py-3 font-mono text-xs text-slate-600 sm:max-w-none sm:px-6 sm:py-4">
+                        <td className="max-w-[9rem] truncate px-2.5 py-3 font-mono text-xs text-slate-600 sm:max-w-none sm:px-3">
                           {user.username}
                         </td>
-                        <td className="max-w-[8rem] truncate px-3 py-3 text-slate-600 sm:max-w-none sm:px-6 sm:py-4">{user.dept}</td>
-                        <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                        <td className="max-w-[8rem] truncate px-2.5 py-3 text-slate-600 sm:max-w-none sm:px-3">{user.dept}</td>
+                        <td className="whitespace-nowrap px-2.5 py-3 sm:px-3">
                           <div className="flex max-w-[14rem] flex-wrap gap-1">
                             {(user.roles?.length ? user.roles.map((r) => r.name) : [user.role]).filter(Boolean).map((r) => (
                               <span key={`${user.id}-${r}`} className="rounded-md border border-indigo-100 bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700">
@@ -15136,7 +15076,7 @@ function SystemUserView({
                             ))}
                           </div>
                         </td>
-                        <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                        <td className="whitespace-nowrap px-2.5 py-3 sm:px-3">
                           {active ? (
                             <span className="flex items-center gap-1.5 font-medium text-emerald-600">
                               <span className="h-2 w-2 rounded-full bg-emerald-500" /> 正常
@@ -15147,7 +15087,7 @@ function SystemUserView({
                             </span>
                           )}
                         </td>
-                        <td className="space-x-2 whitespace-nowrap px-3 py-3 text-right sm:px-6 sm:py-4">
+                        <td className="space-x-2 whitespace-nowrap px-2.5 py-3 text-right sm:px-3">
                           <button
                             type="button"
                             onClick={() => openUserEdit(user)}
@@ -15388,11 +15328,11 @@ function mapRoleMenuKeysFromRow(raw: unknown): string[] | null | undefined {
 }
 
 const SYS_ROLE_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 240, minWidth: 170, maxWidth: 520 },
-  { id: 'desc', defaultWidth: 380, minWidth: 240, maxWidth: 840 },
-  { id: 'menuKeys', defaultWidth: 190, minWidth: 150, maxWidth: 360 },
-  { id: 'users', defaultWidth: 140, minWidth: 110, maxWidth: 220 },
-  { id: 'actions', defaultWidth: 170, minWidth: 130, maxWidth: 260 }
+  { id: 'name', defaultWidth: 180, minWidth: 135, maxWidth: 480 },
+  { id: 'desc', defaultWidth: 280, minWidth: 200, maxWidth: 760 },
+  { id: 'menuKeys', defaultWidth: 150, minWidth: 120, maxWidth: 320 },
+  { id: 'users', defaultWidth: 100, minWidth: 82, maxWidth: 190 },
+  { id: 'actions', defaultWidth: 130, minWidth: 110, maxWidth: 240 }
 ];
 
 function SystemRoleView() {
@@ -15635,24 +15575,24 @@ function SystemRoleView() {
             <colgroup>{cols.colNodes}</colgroup>
             <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
               <tr>
-                <ResizableTh col={cols.byId.name} className="px-6 py-4 font-medium">角色名称</ResizableTh>
-                <ResizableTh col={cols.byId.desc} className="px-6 py-4 font-medium">角色描述</ResizableTh>
-                <ResizableTh col={cols.byId.menuKeys} className="px-6 py-4 font-medium">菜单权限</ResizableTh>
-                <ResizableTh col={cols.byId.users} className="px-6 py-4 font-medium">关联用户数</ResizableTh>
-                <ResizableTh col={cols.byId.actions} className="px-6 py-4 font-medium text-right">操作</ResizableTh>
+                <ResizableTh col={cols.byId.name} className="px-3 py-3 font-medium sm:px-4">角色名称</ResizableTh>
+                <ResizableTh col={cols.byId.desc} className="px-3 py-3 font-medium sm:px-4">角色描述</ResizableTh>
+                <ResizableTh col={cols.byId.menuKeys} className="px-3 py-3 font-medium sm:px-4">菜单权限</ResizableTh>
+                <ResizableTh col={cols.byId.users} className="px-3 py-3 font-medium sm:px-4">关联用户数</ResizableTh>
+                <ResizableTh col={cols.byId.actions} className="px-3 py-3 font-medium text-right sm:px-4">操作</ResizableTh>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filtered.map((role) => (
                 <tr key={role.id} className="hover:bg-slate-50 transition-colors">
-                  <td className="px-6 py-4 font-bold text-slate-900">
+                  <td className="px-3 py-3 font-bold text-slate-900 sm:px-4">
                     <div className="flex items-center gap-2">
                       <Shield className="w-4 h-4 text-indigo-500 shrink-0" />
                       {role.name}
                     </div>
                   </td>
-                  <td className="px-6 py-4 text-slate-600">{role.desc || '—'}</td>
-                  <td className="px-6 py-4 text-slate-600">
+                  <td className="px-3 py-3 text-slate-600 sm:px-4">{role.desc || '—'}</td>
+                  <td className="px-3 py-3 text-slate-600 sm:px-4">
                     {role.menuKeys === undefined || role.menuKeys === null ? (
                       <span className="text-xs text-slate-500">职级默认</span>
                     ) : role.menuKeys.length === 0 ? (
@@ -15661,8 +15601,8 @@ function SystemRoleView() {
                       <span className="text-xs text-indigo-700">自定义 {role.menuKeys.length} 项</span>
                     )}
                   </td>
-                  <td className="px-6 py-4 text-slate-600">{role.users} 人</td>
-                  <td className="px-6 py-4 text-right space-x-2 whitespace-nowrap">
+                  <td className="px-3 py-3 text-slate-600 sm:px-4">{role.users} 人</td>
+                  <td className="px-3 py-3 text-right space-x-2 whitespace-nowrap sm:px-4">
                     <button
                       type="button"
                       onClick={() => openEdit(role)}
@@ -15815,11 +15755,11 @@ const SYSTEM_MENU_ICON_OPTIONS = [
 ] as const;
 
 const SYS_MENU_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 360, minWidth: 220, maxWidth: 840 },
-  { id: 'icon', defaultWidth: 110, minWidth: 90, maxWidth: 180 },
-  { id: 'type', defaultWidth: 160, minWidth: 120, maxWidth: 260 },
-  { id: 'path', defaultWidth: 300, minWidth: 220, maxWidth: 640 },
-  { id: 'actions', defaultWidth: 210, minWidth: 160, maxWidth: 340 }
+  { id: 'name', defaultWidth: 260, minWidth: 180, maxWidth: 760 },
+  { id: 'icon', defaultWidth: 86, minWidth: 72, maxWidth: 150 },
+  { id: 'type', defaultWidth: 120, minWidth: 96, maxWidth: 230 },
+  { id: 'path', defaultWidth: 230, minWidth: 170, maxWidth: 580 },
+  { id: 'actions', defaultWidth: 160, minWidth: 130, maxWidth: 300 }
 ];
 
 function SystemMenuView() {
@@ -16090,18 +16030,18 @@ function SystemMenuView() {
               <colgroup>{cols.colNodes}</colgroup>
               <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
                 <tr>
-                  <ResizableTh col={cols.byId.name} className="px-6 py-4 font-medium">菜单名称</ResizableTh>
-                  <ResizableTh col={cols.byId.icon} className="px-6 py-4 font-medium">图标</ResizableTh>
-                  <ResizableTh col={cols.byId.type} className="px-6 py-4 font-medium">类型</ResizableTh>
-                  <ResizableTh col={cols.byId.path} className="px-6 py-4 font-medium">路由路径</ResizableTh>
-                  <ResizableTh col={cols.byId.actions} className="px-6 py-4 font-medium text-right">操作</ResizableTh>
+                  <ResizableTh col={cols.byId.name} className="px-3 py-3 font-medium sm:px-4">菜单名称</ResizableTh>
+                  <ResizableTh col={cols.byId.icon} className="px-3 py-3 font-medium sm:px-4">图标</ResizableTh>
+                  <ResizableTh col={cols.byId.type} className="px-3 py-3 font-medium sm:px-4">类型</ResizableTh>
+                  <ResizableTh col={cols.byId.path} className="px-3 py-3 font-medium sm:px-4">路由路径</ResizableTh>
+                  <ResizableTh col={cols.byId.actions} className="px-3 py-3 font-medium text-right sm:px-4">操作</ResizableTh>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {pagedMenuRows.map(({ menu, depth }) => (
                   <tr key={menu.id} className="hover:bg-slate-50 transition-colors">
                     <td
-                      className="px-6 py-4 font-medium text-slate-900"
+                      className="px-3 py-3 font-medium text-slate-900 sm:px-4"
                       style={{ paddingLeft: `${depth * 2 + 1.5}rem` }}
                     >
                       <div className="flex items-center gap-2">
@@ -16109,8 +16049,8 @@ function SystemMenuView() {
                         {menu.name}
                       </div>
                     </td>
-                    <td className="px-6 py-4 text-slate-500">{getIcon(menu.icon)}</td>
-                    <td className="px-6 py-4">
+                    <td className="px-3 py-3 text-slate-500 sm:px-4">{getIcon(menu.icon)}</td>
+                    <td className="px-3 py-3 sm:px-4">
                       <span
                         className={`px-2 py-1 rounded text-xs font-medium ${
                           menu.type === '目录'
@@ -16123,8 +16063,8 @@ function SystemMenuView() {
                         {menu.type}
                       </span>
                     </td>
-                    <td className="px-6 py-4 font-mono text-slate-500 text-xs">{menu.path}</td>
-                    <td className="px-6 py-4 text-right space-x-2 whitespace-nowrap">
+                    <td className="px-3 py-3 font-mono text-slate-500 text-xs sm:px-4">{menu.path}</td>
+                    <td className="px-3 py-3 text-right space-x-2 whitespace-nowrap sm:px-4">
                       <button
                         type="button"
                         onClick={() => openChild(menu)}
