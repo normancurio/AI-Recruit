@@ -134,6 +134,22 @@ test('shenpu resume extraction preserves detailed experience text for template r
   assert.match(source, /sanitized\.projectExperiences = splitMergedProjectsHeuristically\(sanitized\.projectExperiences\)/)
 })
 
+test('shenpu pdf generation prefers libreoffice for editable chinese fonts', () => {
+  assert.match(source, /injectShenpuPdfEditableFontCss/)
+  assert.match(source, /renderHtmlToPdfViaLibreOffice/)
+  assert.match(source, /SHENPU_PDF_ENGINE/)
+  assert.match(source, /Noto Sans CJK SC/)
+  assert.doesNotMatch(source, /PingFang SC/)
+})
+
+test('shenpu editable pdf uses libreoffice with chromium radar png embed', () => {
+  assert.match(source, /replaceShenpuRadarSvgWithPng/)
+  assert.match(source, /renderSvgMarkupToPngBuffer/)
+  assert.match(source, /editable/)
+  assert.match(source, /SHENPU_STANDARD_RESUME_PDF_CSS/)
+  assert.doesNotMatch(source, /embedRadarOverlayOnLoPdf/)
+})
+
 test('shenpu resume regeneration corrects stale candidate name from resume text', () => {
   const routeStart = source.indexOf("app.post('/api/admin/resume-screenings/:id/shenpu-resume'")
   assert.notEqual(routeStart, -1)

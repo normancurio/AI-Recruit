@@ -42,6 +42,9 @@ services:
       PORT: "3011"
       HOST: "0.0.0.0"
       TZ: Asia/Shanghai
+      # 申朴标准 PDF：editable = 用 docx 生成真正的 Word（雷达嵌 PNG）再 LibreOffice 转 PDF，
+      # 文字 WPS 可编辑、版式贴近原蓝色样式；需纯 Chromium 矢量样式时改回 chromium。
+      SHENPU_PDF_ENGINE: editable
     volumes:
       # 简历原件与申朴生成文件：持久化命名卷；重建/升级容器不丢文件（否则预览/下载 404）
       - resume_screening_files:/app/storage/resumes
