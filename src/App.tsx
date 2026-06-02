@@ -8237,6 +8237,26 @@ const RESUME_SCREENING_COLUMNS: ColumnSpec[] = [
   { id: 'actions', defaultWidth: 260, minWidth: 220, maxWidth: 420 }
 ];
 
+const RESUME_UPLOAD_MAX_BATCH = 30;
+const RESUME_UPLOAD_CONCURRENCY = 3;
+
+function isAllowedResumeUploadFile(file: File): boolean {
+  const name = String(file.name || '').toLowerCase();
+  if (/\.(pdf|docx|txt|png|jpe?g|webp)$/i.test(name)) return true;
+  const type = String(file.type || '').toLowerCase();
+  return (
+    type === 'application/pdf' ||
+    type === 'text/plain' ||
+    type.includes('wordprocessingml') ||
+    type.startsWith('image/')
+  );
+}
+
+function collectResumeUploadFiles(fileList: FileList | File[] | null | undefined): File[] {
+  if (!fileList) return [];
+  return Array.from(fileList).filter(isAllowedResumeUploadFile);
+}
+
 function ResumeScreeningView({
   currentRole,
   authProfile
@@ -8593,7 +8613,6 @@ function ResumeScreeningView({
     if (duplicateUploadNotifiedTaskRef.current === duplicate.taskId) return;
     duplicateUploadNotifiedTaskRef.current = duplicate.taskId;
     setUploadTasks((prev) => prev.filter((t) => t.taskId !== duplicate.taskId));
-    setUploadModalOpen(false);
     setScreeningAdminMsg({
       title: '简历已存在',
       message: duplicate.message || '该岗位下已有这份简历，无需重复上传。'
@@ -9099,49 +9118,97 @@ function ResumeScreeningView({
     openInvitePromptPicker(matched.job_code, resume);
   };
 
-  const runUpload = (file: File | null) => {
-    if (!file || !apiBase || !hasToken) return;
-    if (!uploadJobCode) {
-      setUploadHint(
-        jobsForResumeUpload.length === 0 && uploadProjectFilter.trim()
-          ? '当前项目下没有可选岗位，请更换项目或为岗位绑定项目后再试。'
-          : '上传需绑定具体岗位。请先在「目标岗位」中选择某一岗位。'
-      );
-      return;
-    }
-    const selectedJob = jobsForResumeUpload.find((j) => j.job_code === uploadJobCode);
-    const selectedProject = projectFilterOptions.find((p) => p.id === uploadProjectFilter.trim());
-    setUploadHint('');
-    setUploadTaskJobLabel(selectedJob ? `${selectedJob.title} (${selectedJob.job_code})` : uploadJobCode);
-    setUploadTaskProjectLabel(selectedProject?.name || '');
-    setUploading(true);
-    const fd = new FormData();
-    fd.append('file', file);
-    fd.append('jobCode', uploadJobCode);
-    if (uploadCandidateName.trim()) fd.append('candidateName', uploadCandidateName.trim());
-    void miniappApiFetch('/api/admin/resume-screen', { method: 'POST', body: fd })
-      .then(async (r) => {
-        const j = (await r.json()) as { data?: ResumeUploadTask; message?: string }
-        if (!r.ok) throw new Error(j.message || 'upload failed');
-        if (!j.data?.taskId) throw new Error('上传任务创建失败');
+  const runUploadFiles = useCallback(
+    async (rawFiles: FileList | File[] | null | undefined) => {
+      const files = collectResumeUploadFiles(rawFiles);
+      if (!files.length) {
+        setUploadHint('未识别到可上传的文件，请选择 PDF、DOCX、TXT 或图片');
+        return;
+      }
+      if (!apiBase || !hasToken) return;
+      if (!uploadJobCode) {
+        setUploadHint(
+          jobsForResumeUpload.length === 0 && uploadProjectFilter.trim()
+            ? '当前项目下没有可选岗位，请更换项目或为岗位绑定项目后再试。'
+            : '上传需绑定具体岗位。请先在「目标岗位」中选择某一岗位。'
+        );
+        return;
+      }
+      const batch = files.slice(0, RESUME_UPLOAD_MAX_BATCH);
+      if (files.length > RESUME_UPLOAD_MAX_BATCH) {
+        setUploadHint(`一次最多 ${RESUME_UPLOAD_MAX_BATCH} 份，已取前 ${RESUME_UPLOAD_MAX_BATCH} 份`);
+      }
+      const selectedJob = jobsForResumeUpload.find((j) => j.job_code === uploadJobCode);
+      const selectedProject = projectFilterOptions.find((p) => p.id === uploadProjectFilter.trim());
+      setUploadTaskJobLabel(selectedJob ? `${selectedJob.title} (${selectedJob.job_code})` : uploadJobCode);
+      setUploadTaskProjectLabel(selectedProject?.name || '');
+      setUploading(true);
+      setUploadHint(`正在提交 ${batch.length} 份简历…`);
+
+      const manualName = batch.length === 1 ? uploadCandidateName.trim() : '';
+      let ok = 0;
+      let fail = 0;
+      let cursor = 0;
+
+      const uploadOne = async (file: File) => {
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('jobCode', uploadJobCode);
+        if (manualName) fd.append('candidateName', manualName);
+        const r = await miniappApiFetch('/api/admin/resume-screen', { method: 'POST', body: fd });
+        const j = (await r.json()) as { data?: ResumeUploadTask; message?: string };
+        if (!r.ok || !j.data?.taskId) throw new Error(j.message || 'upload failed');
         setUploadTasks((prev) => [j.data!, ...prev.filter((task) => task.taskId !== j.data!.taskId)]);
-        setUploadHint('');
-        setUploadModalOpen(false);
-      })
-      .catch((e: unknown) => {
-        setUploadHint(userFacingApiError(e, '上传或筛查失败'));
-      })
-      .finally(() => setUploading(false));
-  };
+      };
+
+      const worker = async () => {
+        while (cursor < batch.length) {
+          const file = batch[cursor]!;
+          cursor += 1;
+          try {
+            await uploadOne(file);
+            ok += 1;
+          } catch {
+            fail += 1;
+          }
+        }
+      };
+
+      await Promise.all(
+        Array.from({ length: Math.min(RESUME_UPLOAD_CONCURRENCY, batch.length) }, () => worker())
+      );
+
+      setUploading(false);
+      if (fail > 0) {
+        setUploadHint(`已提交 ${ok} 份，${fail} 份失败；成功项在下方列表解析中`);
+      } else {
+        setUploadHint(`已提交 ${ok} 份，后台解析中；可继续添加或关闭窗口`);
+      }
+      if (batch.length === 1 && ok === 1) setUploadCandidateName('');
+    },
+    [
+      apiBase,
+      hasToken,
+      uploadJobCode,
+      uploadCandidateName,
+      jobsForResumeUpload,
+      uploadProjectFilter,
+      projectFilterOptions
+    ]
+  );
 
   const uploadTaskActive =
-    Boolean(uploadTask) &&
-    uploadTask?.status !== 'failed' &&
-    uploadTask?.status !== 'duplicate' &&
-    uploadTask?.status !== 'done';
-  const uploadTaskFailed = uploadTask?.status === 'failed';
-  const uploadTaskDuplicate = uploadTask?.status === 'duplicate';
-  const uploadTaskAllDone = uploadTask?.status === 'done';
+    uploadTasks.some((task) => task.status === 'queued' || task.status === 'running');
+  const uploadModalTasks = useMemo(
+    () =>
+      uploadTasks.filter(
+        (task) =>
+          task.status === 'queued' ||
+          task.status === 'running' ||
+          task.status === 'failed'
+      ),
+    [uploadTasks]
+  );
   const displayResumes = useMemo(() => {
     if (uploadTasks.length === 0) return resumes;
     let decorated = resumes;
@@ -9961,7 +10028,7 @@ function ResumeScreeningView({
                   <h3 id="resume-upload-modal-title" className="text-lg font-bold text-slate-900">
                     上传简历
                   </h3>
-                  <p className="mt-0.5 text-xs text-slate-500">须选择具体目标岗位，解析完成后将加入下方列表</p>
+                  <p className="mt-0.5 text-xs text-slate-500">须选择具体目标岗位；可一次选择多份，解析完成后将加入下方列表</p>
                 </div>
                 <button
                   type="button"
@@ -10050,12 +10117,12 @@ function ResumeScreeningView({
                   <input
                     value={uploadCandidateName}
                     onChange={(e) => setUploadCandidateName(e.target.value)}
-                    disabled={uploading || uploadTaskActive}
+                    disabled={uploading}
                     placeholder="文件名不含姓名或扫描件时建议填写"
                     className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/20 disabled:bg-slate-50"
                   />
                   <p className="mt-1 text-[11px] leading-snug text-slate-500">
-                    填写后优先作为候选人姓名；不填则按文件名、简历正文和 AI 结果自动识别。
+                    仅在上传单份时生效；批量上传时按各文件名与正文自动识别姓名。
                   </p>
                 </div>
                 {uploadHint ? (
@@ -10067,66 +10134,48 @@ function ResumeScreeningView({
                     {uploadHint}
                   </p>
                 ) : null}
-                {uploadTask ? (
-                  <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-sm font-semibold text-slate-900">
-                          {uploadTaskFailed
-                            ? '处理失败'
-                            : uploadTaskDuplicate
-                              ? '简历已存在'
-                              : uploadTaskAllDone
-                                ? '处理完成'
-                                : '后台处理中'}
-                        </div>
-                        <div className="mt-0.5 truncate text-xs text-slate-500" title={uploadTask.candidateName || uploadTask.jobCode}>
-                          {uploadTask.candidateName || uploadTask.jobCode}
-                        </div>
-                      </div>
-                      {uploadTaskActive ? <Loader2 className="h-4 w-4 shrink-0 animate-spin text-indigo-500" /> : null}
-                    </div>
-                    <div className="space-y-2">
-                      <div>
-                        <div className="mb-1 flex items-center justify-between gap-2 text-xs">
-                          <span className="truncate text-slate-600" title={uploadTask.uploadStage || uploadTask.error || ''}>
-                            原始简历上传提取：{uploadTask.error || uploadTask.uploadStage || '处理中'}
+                {uploadModalTasks.length > 0 ? (
+                  <div className="max-h-44 space-y-2 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                    <p className="text-xs font-medium text-slate-700">
+                      处理队列（{uploadModalTasks.length}）
+                    </p>
+                    {uploadModalTasks.map((task) => (
+                      <div key={task.taskId} className="rounded-md border border-slate-200 bg-white px-2.5 py-2">
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="min-w-0 truncate font-medium text-slate-800" title={task.fileName || task.jobCode}>
+                            {task.fileName || task.jobCode}
                           </span>
                           <span className="shrink-0 tabular-nums text-slate-500">
-                            {Math.max(0, Math.min(100, Math.round(uploadTask.uploadProgress || 0)))}%
+                            {Math.max(0, Math.min(100, Math.round(task.uploadProgress || 0)))}%
                           </span>
                         </div>
-                        <div className="h-2 overflow-hidden rounded-full bg-white">
+                        <p className="mt-0.5 truncate text-[11px] text-slate-500" title={task.error || task.uploadStage || ''}>
+                          {task.error || task.uploadStage || '处理中'}
+                        </p>
+                        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-100">
                           <div
                             className={`h-full rounded-full transition-all ${
-                              uploadTaskFailed || uploadTaskDuplicate ? 'bg-amber-500' : 'bg-indigo-500'
+                              task.status === 'failed' ? 'bg-rose-500' : 'bg-indigo-500'
                             }`}
-                            style={{ width: `${Math.max(0, Math.min(100, Math.round(uploadTask.uploadProgress || 0)))}%` }}
+                            style={{
+                              width: `${Math.max(0, Math.min(100, Math.round(task.uploadProgress || 0)))}%`
+                            }}
                           />
                         </div>
                       </div>
-                      {uploadTask.status === 'done' ? (
-                        <div className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-600">
-                          申朴标准简历不会自动生成，可在列表「申朴简历」列点击生成。
-                        </div>
-                      ) : uploadTask.status === 'duplicate' ? (
-                        <div className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs text-amber-800">
-                          该岗位下已有这份简历，无需重复上传。
-                        </div>
-                      ) : null}
-                    </div>
-                    {uploadTask.message ? <div className="text-xs text-slate-500">{uploadTask.message}</div> : null}
+                    ))}
                   </div>
                 ) : null}
                 <input
                   ref={fileInputModalRef}
                   type="file"
-                  accept=".pdf,.doc,.docx,.txt,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                  multiple
+                  accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.webp,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*"
                   className="hidden"
                   onChange={(e) => {
-                    const f = e.target.files?.[0];
+                    const list = e.target.files;
                     e.target.value = '';
-                    runUpload(f || null);
+                    void runUploadFiles(list);
                   }}
                 />
                 <div
@@ -10146,8 +10195,7 @@ function ResumeScreeningView({
                     e.preventDefault();
                     e.stopPropagation();
                     if (uploading) return;
-                    const f = e.dataTransfer.files?.[0];
-                    runUpload(f || null);
+                    void runUploadFiles(e.dataTransfer.files);
                   }}
                   className={`flex min-h-[280px] flex-1 flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 px-4 py-8 text-center transition-colors group ${
                     uploading
@@ -10162,11 +10210,12 @@ function ResumeScreeningView({
                     {uploading
                       ? '正在提交任务…'
                       : uploadTaskActive
-                        ? '后台处理中，可继续上传下一份'
-                        : '点击或拖拽简历到此处'}
+                        ? '后台解析中，可继续添加更多简历'
+                        : '点击或拖拽简历到此处（可多选）'}
                   </p>
                   <p className="mt-0.5 text-[11px] leading-snug text-slate-500">
-                    支持 PDF、DOCX、TXT；旧版 .doc 请另存为 DOCX 后再上传
+                    支持 PDF、DOCX、TXT、PNG/JPG；一次最多 {RESUME_UPLOAD_MAX_BATCH} 份，同时解析约{' '}
+                    {RESUME_UPLOAD_CONCURRENCY} 份
                   </p>
                 </div>
               </div>
