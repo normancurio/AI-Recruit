@@ -8,7 +8,7 @@ FROM ${NODE_IMAGE}
 
 WORKDIR /app
 
-# 申朴简历：用 Chromium 将服务端 HTML/SVG 模板稳定转成 PDF；Noto CJK 保证中文字形。
+# 申朴简历 PDF：默认 LibreOffice 转 PDF（TrueType 嵌入，在线编辑器可改字）；Chromium 作兜底。
 RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
       sed -i \
         -e 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g' \
@@ -16,8 +16,10 @@ RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
         /etc/apt/sources.list.d/debian.sources; \
     fi \
   && apt-get update \
-  && apt-get install -y --no-install-recommends chromium fonts-noto-cjk \
+  && apt-get install -y --no-install-recommends chromium fonts-noto-cjk libreoffice-writer-nogui \
   && rm -rf /var/lib/apt/lists/*
+
+ENV SHENPU_PDF_ENGINE=chromium
 
 COPY package.json package-lock.json ./
 COPY miniapp-candidate/package.json miniapp-candidate/package-lock.json ./miniapp-candidate/

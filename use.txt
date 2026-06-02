@@ -60,6 +60,10 @@ npm run dev:api
 
 在运行 npm run dev:full 的终端按 Ctrl+C。
 
+申朴标准 PDF（.env 里 SHENPU_PDF_ENGINE）：
+- chromium：样式/蓝色雷达最好，WPS 文字编辑可能报 Type3
+- editable：WPS 可改字（LibreOffice + 雷达截图），改 .env 后重启 dev:full 并重新生成简历
+
 备注：
 - 本地测试不要连接线上数据库。
 - 不建议再用 screen/nohup 启动这个项目，避免前端拿到旧进程或旧代码。

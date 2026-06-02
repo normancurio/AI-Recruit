@@ -63,6 +63,7 @@ import {
   type DeliveryPerformanceUiRole
 } from './deliveryManagerPerformanceReport.ts'
 import { buildXfyunIatAuthWsUrl, checkXfyunIatEnv } from './xfyunIat.ts'
+import { buildShenpuResumeDocx } from './shenpuResumeDocx.ts'
 
 const requireCjs = createRequire(import.meta.url)
 
@@ -4091,6 +4092,28 @@ function shenpuPortraitScoreRows(dimensions: ShenpuResumeDocument['portrait']['d
     .join('')
 }
 
+/** 申朴标准简历 PDF 样式（与原先 Chromium 整页打印一致）。 */
+const SHENPU_STANDARD_RESUME_PDF_CSS = `
+    @page { size: A4; margin: 10mm 12mm; }
+    * { box-sizing: border-box; } body { font-family: "Noto Sans CJK SC","Noto Sans SC",sans-serif; color:#0f172a; margin:0; font-size:11.5px; line-height:1.42; }
+    h1,h2,h3,p{margin:0}.cover{border-top:7px solid #1d4ed8;padding-top:10px}.brand{color:#1d4ed8;font-weight:700;letter-spacing:.08em}.name{font-size:25px;font-weight:800;margin-top:5px}.headline{font-size:14px;color:#334155;margin-top:2px}.meta{margin-top:6px;color:#475569}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.card{border:1px solid #dbeafe;border-radius:9px;padding:9px}.card h3{font-size:13px;color:#1d4ed8;margin-bottom:4px}.section{margin-top:8px}.section h2{font-size:14px;border-left:4px solid #2563eb;padding-left:7px;margin-bottom:4px}.chips{display:flex;flex-wrap:wrap;gap:5px}.chip{background:#eff6ff;color:#1d4ed8;padding:2px 7px;border-radius:999px}.entry{margin-bottom:6px}.entry-head{display:flex;justify-content:space-between;gap:10px}.muted{color:#64748b}.portrait{display:grid;grid-template-columns:430px 1fr;gap:12px;align-items:start}.portrait .radar-slot{width:430px;min-width:430px;min-height:230px}.portrait svg,.portrait img.radar-chart{width:100%;height:auto;max-height:230px;display:block}.page-break{page-break-before:always}ul{margin:3px 0 0;padding-left:17px}li{margin:1px 0}.summary{background:#f8fafc;border-radius:9px;padding:10px}.score-panel{margin-top:8px}.score-row{display:grid;grid-template-columns:88px 1fr 58px;gap:8px;align-items:center;margin-top:6px}.score-name{font-weight:600;color:#334155}.score-track{position:relative;height:8px;border-radius:999px;background:#e2e8f0;overflow:hidden}.score-track .req{position:absolute;inset:0 auto 0 0;background:#fecaca}.score-track .cand{position:absolute;inset:0 auto 0 0;background:#111827;opacity:.82}.score-num{text-align:right;color:#64748b}.score-num b{color:#111827}.jd-blocks{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.jd-card{border:1px solid #e2e8f0;border-radius:9px;padding:10px;background:#fff}.jd-card h3{font-size:13px;color:#0f172a;margin-bottom:6px;display:flex;align-items:center;gap:6px}.jd-card h3::before{content:"";display:inline-block;width:3px;height:13px;background:#2563eb;border-radius:2px}.jd-card.req h3::before{background:#ef4444}.jd-card ul{padding-left:16px}.jd-card li{margin:2px 0;color:#334155;line-height:1.5}.foot{margin-top:10px;color:#64748b;font-size:10px;text-align:right}
+`
+
+/** LibreOffice 转 PDF 时尽量贴近 Chromium 的表格/双色块布局。 */
+const SHENPU_PDF_LO_COMPAT_CSS = `
+.portrait{display:table !important;width:100%;table-layout:fixed;border-collapse:separate;border-spacing:12px 0}
+.portrait .radar-slot{display:table-cell;vertical-align:top;width:430px;min-width:430px;min-height:230px}
+.portrait .portrait-side{display:table-cell;vertical-align:top}
+.grid,.jd-blocks{display:table !important;width:100%;table-layout:fixed;border-collapse:separate;border-spacing:10px 0}
+.grid>.card,.jd-blocks>.jd-card{display:table-cell;vertical-align:top;width:50%}
+.chips{display:block;line-height:1.75}
+.chip{display:inline-block;margin:0 5px 3px 0}
+.entry-head{display:table;width:100%;table-layout:fixed}
+.entry-head strong,.entry-head span{display:table-cell;vertical-align:top}
+.score-row{display:table;width:100%;table-layout:fixed}
+.score-row>*{display:table-cell;vertical-align:middle}
+`
+
 function renderShenpuResumeHtml(params: {
   candidateName: string
   candidatePhone?: string | null
@@ -4101,10 +4124,7 @@ function renderShenpuResumeHtml(params: {
   const li = (items: string[]) => items.map((x) => `<li>${escapeHtml(x)}</li>`).join('')
   const exp = (title: string, subtitle: string, period: string, highlights: string[]) =>
     `<div class="entry"><div class="entry-head"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(period)}</span></div><div class="muted">${escapeHtml(subtitle)}</div><ul>${li(highlights)}</ul></div>`
-  return `<!doctype html><html><head><meta charset="utf-8"><style>
-    @page { size: A4; margin: 10mm 12mm; }
-    * { box-sizing: border-box; } body { font-family: "Arial Unicode MS","PingFang SC","Hiragino Sans GB",sans-serif; color:#0f172a; margin:0; font-size:11.5px; line-height:1.42; }
-    h1,h2,h3,p{margin:0}.cover{border-top:7px solid #1d4ed8;padding-top:10px}.brand{color:#1d4ed8;font-weight:700;letter-spacing:.08em}.name{font-size:25px;font-weight:800;margin-top:5px}.headline{font-size:14px;color:#334155;margin-top:2px}.meta{margin-top:6px;color:#475569}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.card{border:1px solid #dbeafe;border-radius:9px;padding:9px}.card h3{font-size:13px;color:#1d4ed8;margin-bottom:4px}.section{margin-top:8px}.section h2{font-size:14px;border-left:4px solid #2563eb;padding-left:7px;margin-bottom:4px}.chips{display:flex;flex-wrap:wrap;gap:5px}.chip{background:#eff6ff;color:#1d4ed8;padding:2px 7px;border-radius:999px}.entry{margin-bottom:6px}.entry-head{display:flex;justify-content:space-between;gap:10px}.muted{color:#64748b}.portrait{display:grid;grid-template-columns:430px 1fr;gap:12px;align-items:start}.portrait svg{width:100%;height:auto;max-height:230px;display:block}.page-break{page-break-before:always}ul{margin:3px 0 0;padding-left:17px}li{margin:1px 0}.summary{background:#f8fafc;border-radius:9px;padding:10px}.score-panel{margin-top:8px}.score-row{display:grid;grid-template-columns:88px 1fr 58px;gap:8px;align-items:center;margin-top:6px}.score-name{font-weight:600;color:#334155}.score-track{position:relative;height:8px;border-radius:999px;background:#e2e8f0;overflow:hidden}.score-track .req{position:absolute;inset:0 auto 0 0;background:#fecaca}.score-track .cand{position:absolute;inset:0 auto 0 0;background:#111827;opacity:.82}.score-num{text-align:right;color:#64748b}.score-num b{color:#111827}.jd-blocks{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.jd-card{border:1px solid #e2e8f0;border-radius:9px;padding:10px;background:#fff}.jd-card h3{font-size:13px;color:#0f172a;margin-bottom:6px;display:flex;align-items:center;gap:6px}.jd-card h3::before{content:"";display:inline-block;width:3px;height:13px;background:#2563eb;border-radius:2px}.jd-card.req h3::before{background:#ef4444}.jd-card ul{padding-left:16px}.jd-card li{margin:2px 0;color:#334155;line-height:1.5}.foot{margin-top:10px;color:#64748b;font-size:10px;text-align:right}
+  return `<!doctype html><html><head><meta charset="utf-8"><style>${SHENPU_STANDARD_RESUME_PDF_CSS}
   </style></head><body>
     <section class="cover">
       <div class="brand">申朴标准简历</div>
@@ -4120,7 +4140,7 @@ function renderShenpuResumeHtml(params: {
       <div class="section"><h2>教育经历</h2>${params.doc.educationExperiences.map((x) => exp(x.school, `${x.major} ${x.degree}`.trim(), x.period, [])).join('') || '<p class="muted">原始简历未提取到明确教育经历。</p>'}</div>
     </section>
     <section class="page-break">
-      <div class="section"><h2>岗位匹配画像</h2><div class="portrait">${shenpuRadarSvg(params.doc.portrait.dimensions)}<div><div class="summary"><h3>画像结论</h3><p>${escapeHtml(params.doc.portrait.conclusion)}</p></div><div class="score-panel">${shenpuPortraitScoreRows(params.doc.portrait.dimensions)}</div></div></div></div>
+      <div class="section"><h2>岗位匹配画像</h2><div class="portrait"><div class="radar-slot">${shenpuRadarSvg(params.doc.portrait.dimensions)}</div><div class="portrait-side"><div class="summary"><h3>画像结论</h3><p>${escapeHtml(params.doc.portrait.conclusion)}</p></div><div class="score-panel">${shenpuPortraitScoreRows(params.doc.portrait.dimensions)}</div></div></div></div>
       <div class="jd-blocks">
         <div class="jd-card req"><h3>客户要求</h3><ul>${li(params.doc.clientRequirements) || '<li class="muted">岗位 JD 中未提供明确客户要求。</li>'}</ul></div>
         <div class="jd-card"><h3>岗位职责描述</h3><ul>${li(params.doc.responsibilities) || '<li class="muted">岗位 JD 中未提供明确职责描述。</li>'}</ul></div>
@@ -4134,18 +4154,107 @@ function renderShenpuResumeHtml(params: {
   </body></html>`
 }
 
-async function renderHtmlToPdfBuffer(html: string): Promise<Buffer> {
-  const renderer =
+const SHENPU_RADAR_SVG_RE =
+  /<svg viewBox="0 0 560 290" xmlns="http:\/\/www\.w3\.org\/2000\/svg">[\s\S]*?<\/svg>/i
+
+function resolveChromiumBinary(): string {
+  return (
     process.env.PDF_RENDERER_BIN?.trim() ||
     [
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Chromium.app/Contents/MacOS/Chromium',
       '/usr/bin/chromium',
       '/usr/bin/google-chrome',
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
       'chromium',
       'google-chrome'
     ].find((candidate) => !candidate.startsWith('/') || fs.existsSync(candidate)) ||
     'chromium'
+  )
+}
+
+function wrapShenpuResumeHtmlFragment(head: string, bodyInner: string): string {
+  return `${head}<body>${bodyInner}</body></html>`
+}
+
+/** 用 Chromium 按申朴样式截图雷达 SVG，供 LibreOffice 整页转 PDF 时嵌入（避免 SVG 乱码）。 */
+async function renderSvgMarkupToPngBuffer(svgMarkup: string, documentHead: string): Promise<Buffer> {
+  const renderer = resolveChromiumBinary()
+  const body =
+    '<div class="section"><h2>岗位匹配画像</h2><div class="portrait"><div class="radar-slot">' +
+    svgMarkup +
+    '</div><div class="portrait-side"></div></div></div>'
+  const html = wrapShenpuResumeHtmlFragment(documentHead, body)
+  const tempDir = path.join(RESUME_STORAGE_DIR, '.tmp')
+  fs.mkdirSync(tempDir, { recursive: true })
+  const token = crypto.randomUUID()
+  const htmlPath = path.join(tempDir, `radar-${token}.html`)
+  const pngPath = path.join(tempDir, `radar-${token}.png`)
+  fs.writeFileSync(htmlPath, html, 'utf8')
+  try {
+    await execFileAsync(renderer, [
+      '--headless=new',
+      '--disable-gpu',
+      '--no-sandbox',
+      '--hide-scrollbars',
+      '--window-size=640,380',
+      `--screenshot=${pngPath}`,
+      `file://${htmlPath}`
+    ])
+    return fs.readFileSync(pngPath)
+  } finally {
+    fs.rmSync(htmlPath, { force: true })
+    fs.rmSync(pngPath, { force: true })
+  }
+}
+
+async function replaceShenpuRadarSvgWithPng(html: string): Promise<string> {
+  const match = html.match(SHENPU_RADAR_SVG_RE)
+  if (!match) return html
+  const bodyStart = html.indexOf('<body>')
+  const head = bodyStart > 0 ? html.slice(0, bodyStart) : '<html><head><meta charset="utf-8"></head>'
+  const png = await renderSvgMarkupToPngBuffer(match[0], head)
+  const dataUrl = `data:image/png;base64,${png.toString('base64')}`
+  const img = `<img class="radar-chart" src="${dataUrl}" alt="岗位匹配画像" width="560" height="290" style="width:100%;max-height:230px;height:auto;display:block"/>`
+  return html.replace(match[0], img)
+}
+
+/** 常规文字走 LibreOffice + Noto；雷达在 HTML 中已换成 PNG，不再含 Type3 矢量字。 */
+function injectShenpuPdfEditableFontCss(html: string): string {
+  const inject = `<style id="shenpu-pdf-fonts">
+@font-face{font-family:"ShenpuPdf";src:local("Noto Sans CJK SC"),local("Noto Sans SC");font-display:block;}
+html,body{font-family:"ShenpuPdf","Noto Sans CJK SC","Noto Sans SC",sans-serif;}
+${SHENPU_PDF_LO_COMPAT_CSS}
+</style>`
+  if (html.includes('</head>')) return html.replace('</head>', `${inject}</head>`)
+  return inject + html
+}
+
+function resolveLibreOfficeBinary(): string | null {
+  const fromEnv = process.env.LIBREOFFICE_BIN?.trim()
+  const candidates = [
+    fromEnv || '',
+    '/usr/bin/soffice',
+    '/usr/bin/libreoffice',
+    'soffice',
+    'libreoffice'
+  ].filter(Boolean)
+  for (const candidate of candidates) {
+    if (candidate.startsWith('/') && !fs.existsSync(candidate)) continue
+    return candidate
+  }
+  return null
+}
+
+function resolveShenpuPdfEngine(): 'chromium' | 'libreoffice' {
+  const raw = String(process.env.SHENPU_PDF_ENGINE || 'chromium').trim().toLowerCase()
+  if (raw === 'chromium' || raw === 'chrome') return 'chromium'
+  // editable / libreoffice：LibreOffice 转全文 + 雷达 Chromium 截图嵌图，WPS 可改字
+  if (raw === 'editable' || raw === 'libreoffice' || raw === 'lo' || raw === 'soffice') return 'libreoffice'
+  return 'chromium'
+}
+
+async function renderHtmlToPdfViaChromium(html: string): Promise<Buffer> {
+  const renderer = resolveChromiumBinary()
   const tempDir = path.join(RESUME_STORAGE_DIR, '.tmp')
   fs.mkdirSync(tempDir, { recursive: true })
   const token = crypto.randomUUID()
@@ -4168,6 +4277,195 @@ async function renderHtmlToPdfBuffer(html: string): Promise<Buffer> {
     fs.rmSync(htmlPath, { force: true })
     fs.rmSync(pdfPath, { force: true })
   }
+}
+
+async function renderHtmlToPdfViaLibreOffice(html: string): Promise<Buffer> {
+  const soffice = resolveLibreOfficeBinary()
+  if (!soffice) throw new Error('LibreOffice (soffice) not found')
+  const tempDir = path.join(RESUME_STORAGE_DIR, '.tmp')
+  fs.mkdirSync(tempDir, { recursive: true })
+  const token = crypto.randomUUID()
+  const htmlPath = path.join(tempDir, `shenpu-${token}.html`)
+  const profileDir = path.join(tempDir, `lo-profile-${token}`)
+  fs.mkdirSync(profileDir, { recursive: true })
+  fs.writeFileSync(htmlPath, html, 'utf8')
+  const profileUrl = `file://${profileDir}`
+  const pdfPath = path.join(tempDir, `shenpu-${token}.pdf`)
+  try {
+    await execFileAsync(
+      soffice,
+      [
+        `-env:UserInstallation=${profileUrl}`,
+        '--headless',
+        '--norestore',
+        '--nolockcheck',
+        '--convert-to',
+        'pdf',
+        '--outdir',
+        tempDir,
+        htmlPath
+      ],
+      { timeout: 120_000 }
+    )
+    if (!fs.existsSync(pdfPath)) throw new Error(`LibreOffice PDF missing: ${pdfPath}`)
+    return fs.readFileSync(pdfPath)
+  } finally {
+    fs.rmSync(htmlPath, { force: true })
+    fs.rmSync(pdfPath, { force: true })
+    fs.rmSync(profileDir, { recursive: true, force: true })
+  }
+}
+
+async function renderHtmlToPdfBuffer(html: string): Promise<Buffer> {
+  const engine = resolveShenpuPdfEngine()
+  if (engine === 'libreoffice') {
+    let prepared = html
+    if (SHENPU_RADAR_SVG_RE.test(html)) {
+      try {
+        prepared = await replaceShenpuRadarSvgWithPng(html)
+      } catch (e) {
+        console.warn(
+          '[shenpu-resume] radar png embed failed, libreoffice will try inline svg:',
+          e instanceof Error ? e.message : e
+        )
+      }
+    }
+    const htmlWithFonts = injectShenpuPdfEditableFontCss(prepared)
+    try {
+      return await renderHtmlToPdfViaLibreOffice(htmlWithFonts)
+    } catch (e) {
+      console.warn(
+        '[shenpu-resume] LibreOffice PDF failed, fallback to Chromium:',
+        e instanceof Error ? e.message : e
+      )
+    }
+  }
+  // chromium：原版蓝色样式 + SVG 雷达；WPS 文字编辑可能提示 Type3
+  return await renderHtmlToPdfViaChromium(html)
+}
+
+/** 仅把雷达 SVG 用 Chromium 紧凑截图成 PNG（不含任何标题/旁注），供 Word/docx 内嵌图片用。 */
+async function renderShenpuRadarPngBuffer(
+  dimensions: ShenpuResumeDocument['portrait']['dimensions']
+): Promise<Buffer | null> {
+  try {
+    const renderer = resolveChromiumBinary()
+    const svg = shenpuRadarSvg(dimensions)
+    const html =
+      '<!doctype html><html><head><meta charset="utf-8"><style>' +
+      '*{margin:0;padding:0;box-sizing:border-box}html,body{width:560px;background:#fff}' +
+      'svg{display:block;width:560px;height:290px}' +
+      '</style></head><body>' +
+      svg +
+      '</body></html>'
+    const tempDir = path.join(RESUME_STORAGE_DIR, '.tmp')
+    fs.mkdirSync(tempDir, { recursive: true })
+    const token = crypto.randomUUID()
+    const htmlPath = path.join(tempDir, `radar-img-${token}.html`)
+    const pngPath = path.join(tempDir, `radar-img-${token}.png`)
+    fs.writeFileSync(htmlPath, html, 'utf8')
+    try {
+      await execFileAsync(renderer, [
+        '--headless=new',
+        '--disable-gpu',
+        '--no-sandbox',
+        '--hide-scrollbars',
+        '--window-size=560,292',
+        `--screenshot=${pngPath}`,
+        `file://${htmlPath}`
+      ])
+      return fs.readFileSync(pngPath)
+    } finally {
+      fs.rmSync(htmlPath, { force: true })
+      fs.rmSync(pngPath, { force: true })
+    }
+  } catch (e) {
+    console.warn(
+      '[shenpu-resume] radar png render failed:',
+      e instanceof Error ? e.message : e
+    )
+    return null
+  }
+}
+
+async function renderDocxBufferToPdfViaLibreOffice(docxBuffer: Buffer): Promise<Buffer> {
+  const soffice = resolveLibreOfficeBinary()
+  if (!soffice) throw new Error('LibreOffice (soffice) not found')
+  const tempDir = path.join(RESUME_STORAGE_DIR, '.tmp')
+  fs.mkdirSync(tempDir, { recursive: true })
+  const token = crypto.randomUUID()
+  const docxPath = path.join(tempDir, `shenpu-${token}.docx`)
+  const profileDir = path.join(tempDir, `lo-profile-${token}`)
+  fs.mkdirSync(profileDir, { recursive: true })
+  fs.writeFileSync(docxPath, docxBuffer)
+  const pdfPath = path.join(tempDir, `shenpu-${token}.pdf`)
+  try {
+    await execFileAsync(
+      soffice,
+      [
+        `-env:UserInstallation=file://${profileDir}`,
+        '--headless',
+        '--norestore',
+        '--nolockcheck',
+        '--convert-to',
+        'pdf',
+        '--outdir',
+        tempDir,
+        docxPath
+      ],
+      { timeout: 120_000 }
+    )
+    if (!fs.existsSync(pdfPath)) throw new Error(`LibreOffice PDF missing: ${pdfPath}`)
+    return fs.readFileSync(pdfPath)
+  } finally {
+    fs.rmSync(docxPath, { force: true })
+    fs.rmSync(pdfPath, { force: true })
+    fs.rmSync(profileDir, { recursive: true, force: true })
+  }
+}
+
+/**
+ * 申朴默认模板（无上传模板）PDF：
+ * - editable/libreoffice 引擎：先用 docx 生成真正的 Word（雷达嵌 PNG），再 LibreOffice 转 PDF。
+ *   文字是可编辑 Word run，转出的 PDF 字体正常嵌入、WPS 可改字，且版式贴近蓝色目标样式。
+ * - chromium 引擎或 docx 失败：回退到原 HTML→PDF（样式最佳，但 WPS 可能提示 Type3）。
+ */
+async function renderShenpuDefaultResumePdfBuffer(params: {
+  candidateName: string
+  candidatePhone?: string | null
+  jobTitle: string
+  department?: string | null
+  doc: ShenpuResumeDocument
+}): Promise<Buffer> {
+  const engine = resolveShenpuPdfEngine()
+  if (engine === 'libreoffice') {
+    try {
+      const radarPng = await renderShenpuRadarPngBuffer(params.doc.portrait.dimensions)
+      const docxBuffer = await buildShenpuResumeDocx({
+        candidateName: params.candidateName,
+        candidatePhone: params.candidatePhone,
+        jobTitle: params.jobTitle,
+        department: params.department,
+        doc: params.doc,
+        radarPng
+      })
+      return await renderDocxBufferToPdfViaLibreOffice(docxBuffer)
+    } catch (e) {
+      console.warn(
+        '[shenpu-resume] docx→pdf failed, fallback to Chromium HTML:',
+        e instanceof Error ? e.message : e
+      )
+    }
+  }
+  return await renderHtmlToPdfViaChromium(
+    renderShenpuResumeHtml({
+      candidateName: params.candidateName,
+      candidatePhone: params.candidatePhone,
+      jobTitle: params.jobTitle,
+      department: params.department,
+      doc: params.doc
+    })
+  )
 }
 
 type ProjectShenpuResumeTemplate = {
@@ -4987,7 +5285,7 @@ function renderProjectTemplateResumeHtml(params: {
     : '<p class="muted">—</p>'
   return `<!doctype html><html><head><meta charset="utf-8"><style>
     @page { size: A4; margin: 12mm; }
-    * { box-sizing: border-box; } body { margin: 0; font-family: "Arial Unicode MS","PingFang SC","Hiragino Sans GB",sans-serif; color: #111827; font-size: 11px; line-height: 1.45; }
+    * { box-sizing: border-box; } body { margin: 0; font-family: "Noto Sans CJK SC","Noto Sans SC",sans-serif; color: #111827; font-size: 11px; line-height: 1.45; }
     .title { text-align: center; font-size: 20px; font-weight: 800; letter-spacing: .28em; margin-bottom: 8px; }
     table.resume { width: 100%; border-collapse: collapse; table-layout: fixed; }
     .resume td, .resume th { border: 1px solid #111827; padding: 6px 7px; vertical-align: middle; word-break: break-word; }
@@ -5206,23 +5504,23 @@ async function generateShenpuResumeForScreening(params: {
             doc,
             templateAbsPath: params.template!.absPath
           })
-        : await renderHtmlToPdfBuffer(
-            params.template
-              ? renderProjectTemplateResumeHtml({
-                  candidateName: params.candidateName,
-                  candidatePhone: params.candidatePhone,
-                  jobTitle: params.jobTitle,
-                  doc,
-                  templateFileName: params.template.fileName
-                })
-              : renderShenpuResumeHtml({
-                  candidateName: params.candidateName,
-                  candidatePhone: params.candidatePhone,
-                  jobTitle: params.jobTitle,
-                  department: params.department,
-                  doc
-                })
-          )
+        : params.template
+          ? await renderHtmlToPdfBuffer(
+              renderProjectTemplateResumeHtml({
+                candidateName: params.candidateName,
+                candidatePhone: params.candidatePhone,
+                jobTitle: params.jobTitle,
+                doc,
+                templateFileName: params.template.fileName
+              })
+            )
+          : await renderShenpuDefaultResumePdfBuffer({
+              candidateName: params.candidateName,
+              candidatePhone: params.candidatePhone,
+              jobTitle: params.jobTitle,
+              department: params.department,
+              doc
+            })
     await mysqlPool.query(
       `UPDATE resume_screening_shenpu_resumes SET progress_percent=90, progress_stage=? WHERE screening_id=?`,
       [templateKind === 'word' ? '写入 Word 文件' : templateKind === 'xlsx' ? '写入 Excel 文件' : '写入 PDF 文件', params.screeningId]
