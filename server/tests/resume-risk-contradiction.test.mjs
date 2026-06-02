@@ -35,15 +35,23 @@ test('filterContradictoryResumeRisks removes contradictions but keeps others', (
   assert.match(filtered[0].risk, /反洗钱/)
 })
 
-test('sanitizeDimensionEvidenceList drops excerpts not found in resume', () => {
+test('sanitizeDimensionEvidenceList drops synthetic placeholder and unsupported excerpts', () => {
   const resume = '对接过外汇买卖、贵金属衍生、贵金属租赁等代客业务系统。'
   const kept = sanitizeDimensionEvidenceList(
     [
-      '证据点：金融代客｜摘录：对接过外汇买卖、贵金属衍生',
-      '证据点：编造经历｜摘录：从未出现的外星项目开发'
+      '模型未返回该维度证据，请结合简历原文与JD人工复核（stability_growth）',
+      '证据点：金融代客｜摘录：对接过外汇买卖、贵金属衍生'
     ],
     resume
   )
   assert.equal(kept.length, 1)
   assert.match(kept[0], /外汇买卖/)
+})
+
+test('sanitizeDimensionEvidenceList returns empty when only synthetic placeholders remain', () => {
+  const kept = sanitizeDimensionEvidenceList(
+    ['模型未返回该维度证据，请结合简历原文与JD人工复核（stability_growth）'],
+    '任意简历正文'
+  )
+  assert.deepEqual(kept, [])
 })

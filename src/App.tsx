@@ -6121,11 +6121,12 @@ function resumeDimensionEvidenceText(
   const dim = evaluationJson?.dimension_scores?.[dimKey]
   const ev = typeof dim === 'number' ? undefined : dim?.evidence
   if (!Array.isArray(ev) || !ev.length) return '暂无评语'
-  return ev
+  const lines = ev
     .map((x) => String(x || '').trim())
     .filter(Boolean)
-    .slice(0, 2)
-    .join('；')
+    .filter((line) => !/模型未返回该维度证据|请结合简历原文与JD人工复核/.test(line))
+  if (!lines.length) return '暂无评语'
+  return lines.slice(0, 2).join('；')
 }
 
 /** 大模型未走通时的入库记录（含历史「关键词估算」文案） */

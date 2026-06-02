@@ -72,7 +72,7 @@ ${extraRequirements || '无'}
 - 无SQL/数据分析证据 => data_skill最高65
 - 缺风控场景 => risk_fit最高60
 
-4. 每个维度至少1条证据（来自简历原文）
+4. 每个维度至少1条证据（来自简历原文），不得省略任一维度（含 stability_growth、communication_business）
 证据格式：["证据点：...｜摘录：..."]
 
 5. 输出最多5条风险，每条附面试核验问题
@@ -129,7 +129,7 @@ ${extraRequirements || '无'}
 - 缺量化成果 => impact最高75
 - 技术名词堆砌无场景 => tech_fit最高65
 
-4. 每个维度至少1条证据（来自简历原文）
+4. 每个维度至少1条证据（来自简历原文），不得省略任一维度（含 stability_growth、communication_business）
 证据格式：["证据点：...｜摘录：..."]
 
 5. 输出最多5条风险，每条附技术追问

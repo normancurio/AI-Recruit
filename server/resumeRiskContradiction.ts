@@ -1,5 +1,7 @@
 export type ResumeEvalRiskItem = { risk: string; interview_question: string }
 
+const SYNTHETIC_DIMENSION_EVIDENCE_RE = /模型未返回该维度证据|请结合简历原文与JD人工复核/
+
 const RISK_LACK_RE = /缺乏|没有|未见|未体现|缺少|未明确|无明确|未提及|未涉及/
 const RISK_TERM_STOP_RE =
   /^(缺乏|没有|经验|背景|模块|业务|能力|明确|相关|特定|银行|金融|市场|岗位|候选人|简历|等|及|与|和|的|如|例如|包括|涉及)$/
@@ -71,11 +73,20 @@ export function evidenceSupportedByResume(evidence: string, resumePlain: string)
   return probe.length >= 4 && resume.includes(probe)
 }
 
+export function isSyntheticDimensionEvidence(evidence: string): boolean {
+  return SYNTHETIC_DIMENSION_EVIDENCE_RE.test(String(evidence || ''))
+}
+
 export function sanitizeDimensionEvidenceList(evidence: string[], resumePlain?: string): string[] {
   const plain = String(resumePlain || '').trim()
-  if (!plain) return evidence
-  const kept = evidence.filter((line) => evidenceSupportedByResume(line, plain))
-  return kept.length ? kept : evidence.slice(0, 1)
+  const withoutSynthetic = evidence
+    .map((line) => String(line || '').trim())
+    .filter(Boolean)
+    .filter((line) => !isSyntheticDimensionEvidence(line))
+  if (!withoutSynthetic.length) return []
+  if (!plain) return withoutSynthetic
+  const kept = withoutSynthetic.filter((line) => evidenceSupportedByResume(line, plain))
+  return kept.length ? kept : []
 }
 
 export function sanitizeDimensionScoresEvidence(

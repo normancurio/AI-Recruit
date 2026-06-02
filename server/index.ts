@@ -33,6 +33,7 @@ import {
   filterContradictoryResumeRisks,
   sanitizeDimensionScoresEvidence
 } from './resumeRiskContradiction'
+import { guessCandidateNameFromFilename, isFilenameEnglishNoiseToken } from './resumeFilenameName'
 
 const execFileAsync = promisify(execFile)
 
@@ -2090,100 +2091,13 @@ function sanitizeCandidateName(raw: unknown): string {
   return zhName || enName ? n.slice(0, 64) : ''
 }
 
-const FILENAME_NAME_STOP_WORDS = new Set([
-  '申朴',
-  '简历',
-  '个人简历',
-  '求职简历',
-  '候选人',
-  '保单',
-  '可出差',
-  '加水印',
-  '北京',
-  '上海',
-  '深圳',
-  '苏州',
-  '杭州',
-  '广州',
-  '成都',
-  '武汉',
-  '南京',
-  '太仓',
-  '重庆'
-])
-
-const FILENAME_ROLE_WORD_RE =
-  /^(java|python|android|ios|mes|labview|web|前端|后端|全栈|测试|太仓测试|测试台架|产品|产品经理|项目经理|经理|运维|大数据|数据|建模|数据建模|算法|视觉算法|采购|采购专员|市场|市场专员|开发|开发工程师|工程师|架构师|资深|高级|中级|初级|技术|研发)$/i
-
-function normalizeChineseNameToken(raw: string): string {
-  let s = String(raw || '').replace(/[^\u4e00-\u9fa5]/g, '').trim()
-  if (s.length >= 3 && /[男女]$/.test(s)) {
-    const withoutGender = s.slice(0, -1)
-    if (withoutGender.length >= 2) s = withoutGender
-  }
-  return s
-}
-
-function isPlausibleFilenameCandidateName(raw: string): boolean {
-  const s = normalizeChineseNameToken(raw)
-  if (!/^[\u4e00-\u9fa5]{2,4}$/.test(s)) return false
-  if (FILENAME_NAME_STOP_WORDS.has(s)) return false
-  if (FILENAME_ROLE_WORD_RE.test(s)) return false
-  return true
-}
-
-function guessCandidateNameFromFilename(filename: string): string {
-  const original = normalizeMultipartFilename(filename)
-  const base = original
-    .replace(/\.[^.]+$/i, '')
-    .replace(/[（(][^()（）]*[）)]/g, ' ')
-    .replace(/[【\[][^】\]]*[】\]]/g, ' ')
-    .replace(/[_－—–]/g, '-')
-    .replace(/pdf/gi, ' ')
-    .replace(/加水印/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  const yearName = base.match(/(?:^|[\s\-】])([\u4e00-\u9fa5]{2,4})\s*(?:10年以上|\d+\s*年)/)
-  if (yearName?.[1] && isPlausibleFilenameCandidateName(yearName[1])) {
-    return normalizeChineseNameToken(yearName[1])
-  }
-
-  const resumeLabelName = base.match(/([\u4e00-\u9fa5]{2,4})\s*的?\s*(?:个人)?简历/)
-  if (resumeLabelName?.[1] && isPlausibleFilenameCandidateName(resumeLabelName[1])) {
-    return normalizeChineseNameToken(resumeLabelName[1])
-  }
-
-  const enLead = base.match(/^([A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+){0,2})(?:\s|[-_.]|$)/)
-  if (enLead?.[1]) {
-    const en = sanitizeCandidateName(enLead[1])
-    if (en) return en
-  }
-
-  const parts = base
-    .split(/[-\s]+/)
-    .map((p) => normalizeChineseNameToken(p))
-    .filter(Boolean)
-
-  const candidates: string[] = []
-  for (let i = parts.length - 1; i >= 0; i -= 1) candidates.push(parts[i]!)
-  for (let i = 0; i < parts.length; i += 1) {
-    if (FILENAME_NAME_STOP_WORDS.has(parts[i]!) && i + 1 < parts.length) candidates.push(parts[i + 1]!)
-  }
-  if (parts[0] && parts[0] !== '申朴') candidates.push(parts[0])
-
-  for (const c of candidates) {
-    if (isPlausibleFilenameCandidateName(c)) return normalizeChineseNameToken(c)
-  }
-  return ''
-}
-
 function isLikelyBadCandidateName(raw: string): boolean {
   const s = String(raw || '').trim()
   if (!s || isPlaceholderCandidateName(s)) return true
   if (['技能', '技能特长', '个人优势', '教育经历', '工作经历', '项目经验', '性别'].includes(s)) return true
   if (/[性别：:]/.test(s)) return true
   if (/^[A-Za-z]{1,3}$/.test(s)) return true
+  if (isFilenameEnglishNoiseToken(s)) return true
   if (s.length > 4 && /^[\u4e00-\u9fa5]+男$/.test(s)) return true
   if (s.length === 3 && /^[\u4e00-\u9fa5]{2}[男女]$/.test(s)) return true
   return false
@@ -2194,7 +2108,7 @@ function chooseCandidateName(aiName: string, resumeName: string, filenameName: s
   const resume = sanitizeCandidateName(resumeName)
   const file = sanitizeCandidateName(filenameName)
   /** 招聘侧习惯在文件名写真实姓名；正文首行猜测易误判为职位/公司 */
-  if (file) return file
+  if (file && !isLikelyBadCandidateName(filenameName)) return file
   if (ai && !isLikelyBadCandidateName(aiName)) return ai
   if (resume && !isLikelyBadCandidateName(resumeName)) return resume
   return ai || resume || '候选人'
@@ -2238,7 +2152,7 @@ function normalizeResumeEvalDimension(
   if (typeof value === 'number') {
     return {
       score: clampResumeScore(value),
-      evidence: [`模型未返回该维度证据，请结合简历原文与JD人工复核（${dimName}）`]
+      evidence: []
     }
   }
   const o = (value || {}) as { score?: unknown; evidence?: unknown }
@@ -2248,8 +2162,7 @@ function normalizeResumeEvalDimension(
     : []
   return {
     score,
-    evidence:
-      evidence.length > 0 ? evidence : [`模型未返回该维度证据，请结合简历原文与JD人工复核（${dimName}）`]
+    evidence
   }
 }
 
