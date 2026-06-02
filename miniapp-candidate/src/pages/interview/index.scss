@@ -223,14 +223,43 @@
   }
 }
 
-/* 数字人视频层：沿用旧版静态头像的轻微呼吸缩放 */
+/* 读题前：静态 PNG 呼吸，不播 MP4 */
+.interviewer-circle-fill {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: 50%;
+  background-color: #94b8e8;
+  background-repeat: no-repeat;
+  background-size: cover;
+  background-position: center top;
+  transform-origin: center center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms ease;
+}
+
+.interviewer-circle-fill--active {
+  opacity: 1;
+  animation: interviewer-avatar-breathe 3.2s ease-in-out infinite;
+}
+
+/* 播报结束切回 PNG：开场层立刻隐藏 */
 .interviewer-circle-video-layer {
   position: absolute;
   inset: 0;
+  z-index: 0;
   border-radius: 50%;
   overflow: hidden;
-  transform-origin: center center;
-  animation: interviewer-avatar-breathe 3.2s ease-in-out infinite;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 60ms ease;
+}
+
+.interviewer-circle-video-layer--active {
+  z-index: 2;
+  opacity: 1;
+  pointer-events: none;
 }
 
 /* 数字人面试官视频：开场/嗯 两个视频叠放，通过透明度切换避免重新挂载导致卡顿 */
@@ -243,7 +272,7 @@
   overflow: hidden;
   background-color: #94b8e8;
   opacity: 0;
-  transition: opacity 220ms ease;
+  transition: opacity 120ms ease;
   pointer-events: none;
 }
 
@@ -251,9 +280,8 @@
   opacity: 1;
 }
 
-/* 播报结束切到作答：开场层立刻隐藏，不等多余过渡 */
 .interviewer-circle-video:not(.interviewer-circle-video--active) {
-  transition: opacity 80ms ease;
+  transition: opacity 40ms ease;
 }
 
 /* 圆内底部胶囊标签 */

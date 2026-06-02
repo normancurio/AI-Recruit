@@ -4,6 +4,7 @@ import { Button, Text, View } from '@tarojs/components'
 
 import { loginAndGetOpenId } from '../../services/authApi'
 import { flowLog, flowLogInfo } from '../../utils/flowLog'
+import { preloadInterviewAssets } from '../../utils/digitalHumanPreload'
 
 import './index.scss'
 
@@ -53,6 +54,7 @@ export default function EntryPage() {
   }, [goLogin])
 
   useDidShow(() => {
+    preloadInterviewAssets()
     void bootstrap()
   })
 

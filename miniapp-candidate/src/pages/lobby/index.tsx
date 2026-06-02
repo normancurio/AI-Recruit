@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { Button, Text, View } from '@tarojs/components'
 import { CandidateProfile, JobInfo } from '../../types/interview'
 import { flowLogInfo } from '../../utils/flowLog'
-import { preloadDigitalHumanVideos } from '../../utils/digitalHumanPreload'
+import { preloadInterviewAssets } from '../../utils/digitalHumanPreload'
 import { prefetchInterviewWarmup } from '../../utils/interviewWarmup'
 
 import './index.scss'
@@ -23,10 +23,16 @@ export default function LobbyPage() {
     flowLogInfo('等候区', `岗位 ${j.title} session=${(Taro.getStorageSync('session_id') as string) || ''}`)
     setProfile(p)
     setJob(j)
-    preloadDigitalHumanVideos()
+    preloadInterviewAssets()
     const rs = typeof p.resumeScreeningId === 'number' ? p.resumeScreeningId : undefined
     // 静默预热：不在候场页暴露“加载中”，进入面试页后若还没完成，由面试页继续显示题目加载中。
-    void prefetchInterviewWarmup({ jobId: j.id, candidateName: p.name, resumeScreeningId: rs })
+    void prefetchInterviewWarmup({
+      jobId: j.id,
+      candidateName: p.name,
+      inviteCode: p.inviteCode,
+      sessionId: (Taro.getStorageSync('session_id') as string) || '',
+      resumeScreeningId: rs
+    })
   })
 
   /** 答题页会拉题、建会话；候场页只静默预热，不拦截用户进入 */

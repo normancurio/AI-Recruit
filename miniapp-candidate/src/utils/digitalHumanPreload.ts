@@ -1,5 +1,6 @@
 import Taro from '@tarojs/taro'
 
+import { AI_INTERVIEWER_IMG_URL } from '../config/aiInterviewerImgUrl'
 import {
   getOpeningVideoUrl,
   getUmmVideoUrl,
@@ -7,7 +8,7 @@ import {
   UMM_VIDEO_CACHE_KEY
 } from '../config/digitalHumanVideo'
 
-let preloading = false
+export const AI_INTERVIEWER_IMG_CACHE_KEY = 'ai_interviewer_img_cache_v1'
 
 function preloadOne(url: string, cacheKey: string): Promise<string> {
   return new Promise((resolve) => {
@@ -51,16 +52,21 @@ function preloadOne(url: string, cacheKey: string): Promise<string> {
 }
 
 /**
- * 在邀请码页提前下载数字人视频并缓存临时路径，
- * 让面试页直接用本地缓存播放，避免进入面试页时因视频未加载而卡顿。
+ * 提前下载数字人视频、面试官 PNG，供面试页直接使用本地缓存。
  */
 export function preloadDigitalHumanVideos(): void {
-  if (preloading) return
-  preloading = true
   void Promise.all([
     preloadOne(getOpeningVideoUrl(), OPENING_VIDEO_CACHE_KEY),
     preloadOne(getUmmVideoUrl(), UMM_VIDEO_CACHE_KEY)
-  ]).finally(() => {
-    preloading = false
-  })
+  ])
+}
+
+export function preloadInterviewerAvatar(): void {
+  void preloadOne(AI_INTERVIEWER_IMG_URL, AI_INTERVIEWER_IMG_CACHE_KEY)
+}
+
+/** 登录/候场：视频 + 静态头像一并预载 */
+export function preloadInterviewAssets(): void {
+  preloadDigitalHumanVideos()
+  preloadInterviewerAvatar()
 }

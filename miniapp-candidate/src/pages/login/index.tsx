@@ -1,11 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import Taro, { useDidShow, useShareAppMessage } from '@tarojs/taro'
 import { Button, Input, Text, View } from '@tarojs/components'
 import { loginWithInviteCode } from '../../services/interviewApi'
 import { loginAndGetOpenId } from '../../services/authApi'
 import type { CandidateProfile } from '../../types/interview'
 import { flowLog, flowLogInfo } from '../../utils/flowLog'
-import { preloadDigitalHumanVideos } from '../../utils/digitalHumanPreload'
+import { preloadInterviewAssets } from '../../utils/digitalHumanPreload'
+import { triggerLoginWarmup } from '../../utils/loginWarmup'
 import { prefetchInterviewWarmup } from '../../utils/interviewWarmup'
 
 import './index.scss'
@@ -22,8 +23,7 @@ export default function LoginPage() {
   }))
 
   useDidShow(async () => {
-    // 邀请码页就提前下载数字人视频，进入面试页时直接走本地缓存，避免视频未就绪卡顿。
-    preloadDigitalHumanVideos()
+    preloadInterviewAssets()
     try {
       let oid = (Taro.getStorageSync('wx_openid') as string) || ''
       if (!oid) {
@@ -37,6 +37,10 @@ export default function LoginPage() {
     }
   })
 
+  const tryWarmup = useCallback((code: string, candidateName: string) => {
+    triggerLoginWarmup(code, candidateName)
+  }, [])
+
   const canSubmit = useMemo(() => {
     return Boolean(name.trim() && phone.trim() && inviteCode.trim())
   }, [inviteCode, name, phone])
@@ -48,8 +52,6 @@ export default function LoginPage() {
       Taro.showToast({ title: '请输入真实姓名（至少2个字）', icon: 'none' })
       return
     }
-    // 后台结构化邀请码为「岗位码-发起人账号-筛查记录 id」（见 server buildStructuredInviteCode），
-    // 另支持仅岗位码、历史 INV 前缀等；具体有效性由 /api/candidate/login-invite 校验。
     if (code.length < 4 || code.length > 128) {
       Taro.showToast({ title: '邀请码须 4～128 位', icon: 'none' })
       return
@@ -63,6 +65,7 @@ export default function LoginPage() {
       Taro.showToast({ title: '请输入本人11位手机号（用于匹配面试报告）', icon: 'none' })
       return
     }
+    tryWarmup(code, trimmedName)
     try {
       setLoading(true)
       const loginRes = await Taro.login()
@@ -99,10 +102,11 @@ export default function LoginPage() {
       Taro.setStorageSync('candidate_profile', profile)
       Taro.setStorageSync('candidate_job', data.job)
       flowLog('登录 login-invite', true, `session=${data.sessionId} trtc=${data.trtc ? 'yes' : 'no'}`)
-      // 登录成功即后台出题（候场阅读说明时通常已生成完），缩短进入面试页等待
       void prefetchInterviewWarmup({
         jobId: data.job.id,
         candidateName: data.name,
+        inviteCode: code,
+        sessionId: data.sessionId,
         resumeScreeningId:
           typeof data.resumeScreeningId === 'number' && data.resumeScreeningId > 0
             ? data.resumeScreeningId
@@ -134,7 +138,11 @@ export default function LoginPage() {
             className='input'
             value={name}
             placeholder='请输入真实姓名'
-            onInput={(e) => setName(e.detail.value)}
+            onInput={(e) => {
+              const v = e.detail.value
+              setName(v)
+              tryWarmup(inviteCode, v)
+            }}
           />
           <Text className='field-tip'>姓名错误会影响后台定位，请务必与简历保持一致</Text>
         </View>
@@ -165,7 +173,11 @@ export default function LoginPage() {
             className='input'
             value={inviteCode}
             placeholder='HR 提供的岗位码或完整码，演示可填 J001'
-            onInput={(e) => setInviteCode(e.detail.value)}
+            onInput={(e) => {
+              const v = e.detail.value
+              setInviteCode(v)
+              tryWarmup(v, name)
+            }}
           />
         </View>
 

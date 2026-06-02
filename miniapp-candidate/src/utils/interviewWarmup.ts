@@ -2,7 +2,8 @@ import Taro from '@tarojs/taro'
 
 import {
   buildInterviewQuestionsCacheKey,
-  prefetchInterviewQuestions
+  prefetchInterviewQuestions,
+  type InterviewQuestionFetchOpts
 } from '../services/interviewApi'
 import { flowLog, flowLogInfo } from './flowLog'
 import { prefetchInterviewQuestionTtsPath, type RequirePluginFn } from './interviewQuestionTts'
@@ -15,22 +16,30 @@ function getWechatSiRequirePlugin(): RequirePluginFn | null {
 }
 
 /**
- * 登录成功 / 候场页：后台拉题 + 首题读题 TTS 预生成，缩短进入面试页等待。
+ * 登录页 / 候场页：先快出 Q1 + 后台 Q2～Q6，并预拉首题 TTS。
  */
 export function prefetchInterviewWarmup(params: {
   jobId: string
   candidateName: string
   resumeScreeningId?: number
+  inviteCode?: string
+  sessionId?: string
 }): Promise<unknown> {
+  const fetchOpts: InterviewQuestionFetchOpts = {
+    inviteCode: params.inviteCode,
+    sessionId: params.sessionId
+  }
   const key = buildInterviewQuestionsCacheKey(
     params.jobId,
     params.candidateName,
-    params.resumeScreeningId
+    params.resumeScreeningId,
+    params.inviteCode
   )
   const questionsPromise = prefetchInterviewQuestions(
     params.jobId,
     params.candidateName,
-    params.resumeScreeningId
+    params.resumeScreeningId,
+    fetchOpts
   )
 
   const requirePlugin = getWechatSiRequirePlugin()

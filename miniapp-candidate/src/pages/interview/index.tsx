@@ -17,6 +17,7 @@ import {
   bindSessionMember,
   buildInterviewQuestionsCacheKey,
   DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG,
+  ensureInterviewQuestionsRest,
   fetchInterviewFollowUpConfig,
   fetchInterviewQuestionsOrPrefetched,
   fetchPreparedFollowUp,
@@ -75,11 +76,12 @@ export default function InterviewPage() {
 
   /**
    * 数字人面试官状态：
-   * - speaking：系统播报（AI 读题）时循环播放「开场」视频，模拟数字人说话。
-   * - listening：候选人作答时静音播放「嗯」视频，播完一次延迟几秒再循环。
+   * - idle：读题前 / 读题结束后等待作答，静态 PNG 呼吸，不播视频。
+   * - speaking：系统播报（AI 读题）时循环播放「开场」视频。
+   * - listening：候选人已开口作答时播放「嗯」视频。
    */
-  const [dhMode, setDhMode] = useState<'speaking' | 'listening'>('listening')
-  const dhModeRef = useRef<'speaking' | 'listening'>('listening')
+  const [dhMode, setDhMode] = useState<'idle' | 'speaking' | 'listening'>('idle')
+  const dhModeRef = useRef<'idle' | 'speaking' | 'listening'>('idle')
   dhModeRef.current = dhMode
   const ummLoopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   /** 作答视频「嗯」播完后延迟多少毫秒再循环 */
@@ -135,7 +137,7 @@ export default function InterviewPage() {
    * 所以统一用 createVideoContext 主动驱动，并在 useDidShow / 模式切换时各调一次。
    */
   const applyDigitalHumanPlayback = useCallback(
-    (mode: 'speaking' | 'listening') => {
+    (mode: 'idle' | 'speaking' | 'listening') => {
       let opening: ReturnType<typeof Taro.createVideoContext> | null = null
       let umm: ReturnType<typeof Taro.createVideoContext> | null = null
       try {
@@ -148,14 +150,32 @@ export default function InterviewPage() {
       } catch {
         umm = null
       }
-      if (mode === 'speaking') {
+      if (mode === 'idle') {
         clearUmmLoopTimer()
         try {
-          umm?.pause?.()
+          opening?.pause?.()
+          opening?.seek?.(0)
         } catch {
           /* ignore */
         }
         try {
+          umm?.pause?.()
+          umm?.seek?.(0)
+        } catch {
+          /* ignore */
+        }
+        return
+      }
+      if (mode === 'speaking') {
+        clearUmmLoopTimer()
+        try {
+          umm?.pause?.()
+          umm?.seek?.(0)
+        } catch {
+          /* ignore */
+        }
+        try {
+          opening?.seek?.(0)
           opening?.play?.()
         } catch {
           /* ignore */
@@ -180,12 +200,32 @@ export default function InterviewPage() {
 
   /** 切换数字人视频模式并立刻驱动原生 video（不等 useEffect），播报结束须马上停「开场」 */
   const setDigitalHumanMode = useCallback(
-    (mode: 'speaking' | 'listening') => {
+    (mode: 'idle' | 'speaking' | 'listening') => {
       dhModeRef.current = mode
       setDhMode(mode)
       applyDigitalHumanPlayback(mode)
     },
     [applyDigitalHumanPlayback]
+  )
+
+  /** 作答阶段：未开口前保持 PNG，首次检测到转写再切「嗯」MP4 */
+  const ummAvatarActivatedRef = useRef(false)
+
+  /** 读题结束 / 等待作答：立刻停开场与嗯视频，回到 PNG */
+  const resetAnswerPhaseAvatar = useCallback(() => {
+    ummAvatarActivatedRef.current = false
+    setDigitalHumanMode('idle')
+  }, [setDigitalHumanMode])
+
+  const activateUmmAvatarOnUserSpeech = useCallback(
+    (text: string) => {
+      const t = String(text || '').trim()
+      if (!t || ummAvatarActivatedRef.current) return
+      if (questionTtsPlayingRef.current || dhModeRef.current === 'speaking') return
+      ummAvatarActivatedRef.current = true
+      setDigitalHumanMode('listening')
+    },
+    [setDigitalHumanMode]
   )
 
   const transcribingRef = useRef(false)
@@ -442,7 +482,8 @@ export default function InterviewPage() {
     }
     closeAnswerTranscriptDisplay()
     clearUmmLoopTimer()
-    setDigitalHumanMode('speaking')
+    ummAvatarActivatedRef.current = false
+    setDigitalHumanMode('idle')
     pendingRestartSidRef.current = null
     pendingTtsAfterStopRef.current = null
     if (forceRestartFallbackTimerRef.current) {
@@ -533,6 +574,7 @@ export default function InterviewPage() {
           setTranscriptStreaming('')
           return
         }
+        activateUmmAvatarOnUserSpeech(t)
         cancelTranscriptRemoteDebounce()
         setTranscriptFinalized((prev) => {
           const next = [...prev, t]
@@ -577,6 +619,7 @@ export default function InterviewPage() {
             return
           }
           flowLog('WechatSI onRecognize', true, `len=${text.length}`)
+          activateUmmAvatarOnUserSpeech(text)
           setTranscriptStreaming(text)
           const fullLive = transcriptFinalizedRef.current.join('') + text
           latestLiveTranscriptSyncRef.current = fullLive
@@ -733,9 +776,11 @@ export default function InterviewPage() {
     }
 
     const playTtsThenResume = (sidInner: string, ttsRaw: string) => {
+      ummAvatarActivatedRef.current = false
+      setDigitalHumanMode('idle')
       if (!requirePluginFn) {
         questionTtsPlayingRef.current = false
-        setDigitalHumanMode('listening')
+        resetAnswerPhaseAvatar()
         setCallStatusLine('请口述您的回答')
         if (!transcribingRef.current) openRecognition(sidInner)
         else resumeAnswerAfterQuestionTts(sidInner)
@@ -786,8 +831,8 @@ export default function InterviewPage() {
             firstQuestionNeedsTapRetryRef.current = true
             setCallStatusLine('自动读题失败，请点击页面任意位置后重试')
           }
-          // 语音一结束立刻停「开场」循环，不等 holdMs / 转写门控（它们只影响 ASR，不影响视频）
-          setDigitalHumanMode('listening')
+          // 播报一结束立刻停开场 MP4，回到 PNG（不等 holdMs）
+          resetAnswerPhaseAvatar()
           const elapsed = Date.now() - ttsStartAt
           const holdMs = Math.max(0, minTtsCoverMs - elapsed)
           const releaseTtsAndResume = () => {
@@ -814,7 +859,7 @@ export default function InterviewPage() {
         playTtsThenResume(sidInner, String(t))
       } else {
         closeAnswerTranscriptDisplay()
-        setDigitalHumanMode('listening')
+        resetAnswerPhaseAvatar()
         setCallStatusLine('请口述您的回答')
         openRecognition(sidInner)
       }
@@ -854,6 +899,8 @@ export default function InterviewPage() {
     scheduleTranscriptRemote,
     pushTranscriptRemoteNow,
     setDigitalHumanMode,
+    resetAnswerPhaseAvatar,
+    activateUmmAvatarOnUserSpeech,
     closeAnswerTranscriptDisplay
   ])
 
@@ -896,16 +943,27 @@ export default function InterviewPage() {
       if (dataInitMarkerRef.current !== dataMarker) {
         dataInitMarkerRef.current = dataMarker
         setInitError('')
+        ummAvatarActivatedRef.current = false
+        setDigitalHumanMode('idle')
         closeAnswerTranscriptDisplay()
         try {
           setCallStatusLine('正在准备题目…')
           followUpConfigRef.current = DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG
           const resumeScreeningId =
             typeof p.resumeScreeningId === 'number' ? p.resumeScreeningId : undefined
-          const questionsCacheKey = buildInterviewQuestionsCacheKey(j.id, p.name, resumeScreeningId)
+          const questionFetchOpts = {
+            inviteCode: p.inviteCode,
+            sessionId: sid
+          }
+          const questionsCacheKey = buildInterviewQuestionsCacheKey(
+            j.id,
+            p.name,
+            resumeScreeningId,
+            p.inviteCode
+          )
 
           const [list] = await Promise.all([
-            fetchInterviewQuestionsOrPrefetched(j.id, p.name, resumeScreeningId),
+            fetchInterviewQuestionsOrPrefetched(j.id, p.name, resumeScreeningId, questionFetchOpts),
             fetchInterviewFollowUpConfig(j.id, sid)
               .then((cfg) => {
                 followUpConfigRef.current = { ...DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG, ...cfg }
@@ -926,6 +984,23 @@ export default function InterviewPage() {
           flowLog('AI 题目生成', true, `${cleaned.length} 题`)
           flowLogInfo('AI 首题', cleaned[0]?.text?.slice(0, 40) || '')
           setQuestions(cleaned)
+          if (cleaned.length < 6 && cleaned[0]?.text) {
+            ensureInterviewQuestionsRest(
+              j.id,
+              p.name,
+              cleaned[0].text,
+              resumeScreeningId,
+              questionFetchOpts,
+              (merged) => {
+                if (!visibleRef.current) return
+                const next = merged.filter((q) => q && String(q.text || '').trim())
+                if (next.length > questionCountRef.current) {
+                  setQuestions(next)
+                  flowLogInfo('面试页', `后续题目已就绪，共 ${next.length} 题`)
+                }
+              }
+            )
+          }
           followUpCountRef.current = 0
           followUpParentIdsRef.current = new Set()
           transcriptFinalizedRef.current = []
@@ -1088,6 +1163,8 @@ export default function InterviewPage() {
       nextQuestions.splice(nextIdx, 0, followUp)
       setQuestions(nextQuestions)
       closeAnswerTranscriptDisplay()
+      ummAvatarActivatedRef.current = false
+      setDigitalHumanMode('idle')
       pendingTtsAfterStopRef.current = followUp.text
       setIndex(nextIdx)
       void startWechatSiTranscribe(sessionId, true)
@@ -1097,6 +1174,8 @@ export default function InterviewPage() {
     if (!isLast) {
       const nextIdx = index + 1
       closeAnswerTranscriptDisplay()
+      ummAvatarActivatedRef.current = false
+      setDigitalHumanMode('idle')
       pendingTtsAfterStopRef.current = questions[nextIdx]?.text ?? ''
       setIndex(nextIdx)
       void startWechatSiTranscribe(sessionId, true)
@@ -1130,7 +1209,17 @@ export default function InterviewPage() {
             <View className='interviewer-avatar-stack'>
               <View className='interviewer-circle-cluster'>
                 <View className='interviewer-circle-frame'>
-                  <View className='interviewer-circle-video-layer'>
+                  <View
+                    className={`interviewer-circle-fill${dhMode === 'idle' ? ' interviewer-circle-fill--active' : ''}`}
+                    style={
+                      AI_INTERVIEWER_IMG_URL
+                        ? { backgroundImage: `url(${JSON.stringify(AI_INTERVIEWER_IMG_URL)})` }
+                        : undefined
+                    }
+                  />
+                  <View
+                    className={`interviewer-circle-video-layer${dhMode !== 'idle' ? ' interviewer-circle-video-layer--active' : ''}`}
+                  >
                     <Video
                       id={OPENING_VIDEO_ID}
                       className={`interviewer-circle-video${dhMode === 'speaking' ? ' interviewer-circle-video--active' : ''}`}

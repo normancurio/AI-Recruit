@@ -73,6 +73,8 @@ export default function InvitePage() {
       void prefetchInterviewWarmup({
         jobId: data.job.id,
         candidateName: profile.name,
+        inviteCode: profile.inviteCode,
+        sessionId: data.sessionId,
         resumeScreeningId:
           typeof profile.resumeScreeningId === 'number' ? profile.resumeScreeningId : undefined
       })
