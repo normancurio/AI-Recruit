@@ -2483,6 +2483,87 @@ function extractEmailFromResumeText(text: string): string | null {
   return found[0].trim().length <= 128 ? found[0].trim() : null
 }
 
+/** PDF/OCR 常见异体字（康熙部首等）归一化后再做实体匹配 */
+function normalizeResumeMatchText(s: string): string {
+  return String(s || '')
+    .normalize('NFKC')
+    .replace(/[\s\u3000|｜]/g, '')
+    .replace(/[（）()【】\[\]《》<>「」]/g, '')
+    .toLowerCase()
+}
+
+type ResumeEducationExperience = ShenpuResumeDocument['educationExperiences'][number]
+
+/**
+ * 从简历正文兜底提取教育经历（人保财等模板常见「时间 | 学校 | 专业 | 学历」单行格式）。
+ * 仅在 AI 结构化结果为空时作为补丁，逐段复制原文，不改写。
+ */
+function extractEducationExperiencesFromResumeText(text: string): ResumeEducationExperience[] {
+  const t = String(text || '').replace(/\r\n/g, '\n').slice(0, 26000)
+  const lines = t.split('\n').map((l) => l.trim()).filter(Boolean)
+  const out: ResumeEducationExperience[] = []
+  const seen = new Set<string>()
+  const push = (exp: ResumeEducationExperience) => {
+    const school = String(exp.school || '').trim()
+    const major = String(exp.major || '').trim()
+    const degree = String(exp.degree || '').trim()
+    const period = String(exp.period || '').trim()
+    if (!school && !major && !degree) return
+    const key = normalizeResumeMatchText(`${period}|${school}|${major}|${degree}`)
+    if (!key || seen.has(key)) return
+    seen.add(key)
+    out.push({ school, major, degree, period })
+  }
+  const degreeRe = /^(本科|专科|大专|高职|硕士|研究生|博士|学士|高中|中专|职高)$/
+  const hasSchoolMarker = (s: string) => /(大学|学院|学校)/.test(String(s || '').normalize('NFKC'))
+  const parsePipeEducationLine = (line: string): ResumeEducationExperience | null => {
+    if (!/[|｜]/.test(line)) return null
+    const segs = line.split(/[|｜]/).map((s) => s.trim()).filter(Boolean)
+    if (segs.length < 2) return null
+    const period = /^\d{4}[\.\-/年]/.test(segs[0]) ? segs[0] : ''
+    const school = segs.find((s) => hasSchoolMarker(s)) || (period ? segs[1] : '')
+    if (!school || !hasSchoolMarker(school)) return null
+    const degree = [...segs].reverse().find((s) => degreeRe.test(s) || /(本科|硕士|博士|专科|学士)$/.test(s)) || ''
+    const major =
+      segs.find((s) => s !== period && s !== school && s !== degree && s.length >= 2 && !/^\d{4}/.test(s)) || ''
+    return { period, school, major, degree }
+  }
+  let inEdu = false
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (/^(教育背景|教育经历|学历信息|Education)/i.test(line)) {
+      inEdu = true
+      continue
+    }
+    if (inEdu && /^(工作|项目|技能|自我|个人|技术|证书)/.test(line) && !/(大学|学院|学校|本科|硕士|博士)/.test(line.normalize('NFKC'))) {
+      inEdu = false
+    }
+    const pipeParsed = parsePipeEducationLine(line)
+    if (pipeParsed) {
+      push(pipeParsed)
+      continue
+    }
+    if (!inEdu && !hasSchoolMarker(line)) continue
+    const labeled = line.match(/(?:毕业院校|学校名称|院校|学校)[:：\s\u3000]+([^\n\r,，;；|｜]{2,48})/)
+    if (labeled?.[1]) {
+      push({ school: labeled[1].trim(), major: '', degree: '', period: '' })
+      continue
+    }
+    const schoolInLine = line.match(/([\u4e00-\u9fffA-Za-z·（）()]{2,40}(?:大学|学院|学校)[\u4e00-\u9fffA-Za-z（）()]*)?/)
+    const schoolName = schoolInLine?.[0] && hasSchoolMarker(schoolInLine[0]) ? schoolInLine[0].trim() : ''
+    if (schoolName && !/^(专业|学历|时间|日期)/.test(schoolName)) {
+      const periodMatch = line.match(/(\d{4}[\.\-/年]\d{1,2}\s*[-~至—]\s*(?:\d{4}[\.\-/年]\d{1,2}|至今|现在))/)
+      push({
+        school: schoolName,
+        major: '',
+        degree: '',
+        period: periodMatch?.[1]?.trim() || ''
+      })
+    }
+  }
+  return out.slice(0, 3)
+}
+
 /** 从简历正文抓取院校（常见标签 + 教育区块含「大学/学院」的行） */
 function extractSchoolFromResumeText(text: string): string | null {
   const t = text.replace(/\r\n/g, '\n').replace(/[\t\u3000]+/g, ' ').slice(0, 26000)
@@ -2497,13 +2578,16 @@ function extractSchoolFromResumeText(text: string): string | null {
       if (s.length >= 2 && !/^[:：\s]+$/.test(s) && !/^\d+$/.test(s)) return s
     }
   }
+  const fromEdu = extractEducationExperiencesFromResumeText(t)
+  if (fromEdu[0]?.school) return fromEdu[0].school.slice(0, 80)
   const lines = t.split('\n').map((l) => l.trim()).filter(Boolean)
   let inEdu = false
   for (let i = 0; i < Math.min(lines.length, 100); i++) {
     const line = lines[i]
     if (/^(教育背景|教育经历|学历信息|Education)/i.test(line)) inEdu = true
-    if (inEdu && /(大学|学院|学校)$/.test(line) && line.length >= 4 && line.length <= 44) {
-      if (!/^(专业|学历|本科|硕士|博士|时间|日期)/.test(line)) return line.slice(0, 80)
+    if (inEdu && /(大学|学院|学校)/.test(line) && line.length >= 4 && line.length <= 80) {
+      const m = line.match(/([\u4e00-\u9fffA-Za-z·（）()]{2,40}(?:大学|学院|学校)[\u4e00-\u9fffA-Za-z（）()]*)?/)
+      if (m?.[0] && !/^(专业|学历|本科|硕士|博士|时间|日期)/.test(m[0])) return m[0].slice(0, 80)
     }
   }
   return null
@@ -3494,13 +3578,15 @@ function isMentionedInResume(probe: string, resumeNoSpace: string): boolean {
   // 取实体核心 token（最长连续中文/英数字串）防止"，：（）"等分隔影响匹配
   const tokens: string[] = probe.match(/[\u4e00-\u9fffA-Za-z0-9]+/g) || []
   if (!tokens.length) return false
+  const normTokens = tokens.map((t) => normalizeResumeMatchText(t)).filter(Boolean)
+  if (!normTokens.length) return false
   // 找最长的 token 在简历里出现即可（一般是公司名/项目主名）
-  const longest = tokens.sort((a, b) => b.length - a.length)[0]
+  const longest = normTokens.sort((a, b) => b.length - a.length)[0]
   if (longest.length < 3) {
     // 整体串都很短：要求至少一个 token 出现且长度 >= 2
-    return tokens.some((t) => t.length >= 2 && resumeNoSpace.includes(t))
+    return normTokens.some((t) => t.length >= 2 && resumeNoSpace.includes(t))
   }
-  // 取最长 token 前若干字符，覆盖 OCR 抖动 / 标点差异
+  // 取最长 token 前若干字符，覆盖 OCR 抖动 / 标点差异 / PDF 异体字
   const probeLen = Math.min(longest.length, 8)
   return resumeNoSpace.includes(longest.slice(0, probeLen))
 }
@@ -3510,7 +3596,7 @@ function dropTemplatePlaceholdersFromDoc(
   resumeText: string,
   templateText: string
 ): ShenpuResumeDocument {
-  const norm = (s: string) => String(s || '').replace(/\s+/g, '').toLowerCase()
+  const norm = (s: string) => normalizeResumeMatchText(s)
   const resumeNoSpace = norm(resumeText)
   const templateNoSpace = norm(templateText)
   if (!resumeNoSpace) return doc
@@ -3536,9 +3622,13 @@ function dropTemplatePlaceholdersFromDoc(
   })
   doc.educationExperiences = (doc.educationExperiences || []).filter((e) => {
     const school = norm(e.school)
-    if (!school) return false
-    if (isFromTemplateOnly(school)) return false
-    return isMentionedInResume(school, resumeNoSpace)
+    const major = norm(e.major)
+    if (!school && !major) return false
+    if (school && isFromTemplateOnly(e.school)) return false
+    if (school && isMentionedInResume(e.school, resumeNoSpace)) return true
+    if (major && isMentionedInResume(e.major, resumeNoSpace)) return true
+    const periodKey = norm(e.period)
+    return !!(periodKey && periodKey.length >= 6 && resumeNoSpace.includes(periodKey.slice(0, 6)))
   })
   doc.certificates = (doc.certificates || []).filter((c) => {
     const title = norm(c.title)
@@ -3710,17 +3800,19 @@ function fallbackShenpuResumeDocument(params: {
           }
         ]
       : []
-  const educationExperiences =
-    pText('school', 80) || pText('major', 80) || pText('education', 60)
-      ? [
-          {
-            school: pText('school', 80),
-            major: pText('major', 80),
-            degree: pText('education', 60),
-            period: ''
-          }
-        ]
-      : []
+  const educationExperiences = (() => {
+    if (pText('school', 80) || pText('major', 80) || pText('education', 60)) {
+      return [
+        {
+          school: pText('school', 80),
+          major: pText('major', 80),
+          degree: pText('education', 60),
+          period: ''
+        }
+      ]
+    }
+    return extractEducationExperiencesFromResumeText(params.resumeText || '')
+  })()
   const projectExperiences = projectNames.map((name) => ({
     name,
     role: fallbackWorkTitle,
@@ -3867,6 +3959,10 @@ async function runShenpuResumeWithAi(params: {
       .replace(/\\s*```\\s*$/i, '')
     const sanitized = sanitizeShenpuResumeDocument(JSON.parse(text), fallback)
     sanitized.projectExperiences = splitMergedProjectsHeuristically(sanitized.projectExperiences)
+    // 人保财等模板常见「时间 | 学校 | 专业 | 学历」单行格式；AI 漏提或 PDF 异体字导致匹配失败时兜底。
+    if (!sanitized.educationExperiences.length) {
+      sanitized.educationExperiences = extractEducationExperiencesFromResumeText(params.resumeText)
+    }
     // 关键兜底：把 AI 误从模板示例抓进来的"占位项目/公司/学校"剔除——
     // 项目名/公司名/学校名必须能在候选人简历正文里找到，不在简历但出现在模板里的就视为占位被丢。
     return dropTemplatePlaceholdersFromDoc(sanitized, params.resumeText, params.templateText || '')

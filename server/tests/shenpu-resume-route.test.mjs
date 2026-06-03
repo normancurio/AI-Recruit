@@ -132,6 +132,11 @@ test('shenpu resume extraction preserves detailed experience text for template r
   // 兜底拆分函数应当存在，防止 AI 把多个项目挤进单一对象
   assert.match(source, /function splitMergedProjectsHeuristically/)
   assert.match(source, /sanitized\.projectExperiences = splitMergedProjectsHeuristically\(sanitized\.projectExperiences\)/)
+  // 人保财等模板：PDF 异体字 +「时间 | 学校 | 专业 | 学历」单行格式兜底提取教育背景
+  assert.match(source, /function extractEducationExperiencesFromResumeText/)
+  assert.match(source, /function normalizeResumeMatchText/)
+  assert.match(source, /if \(!sanitized\.educationExperiences\.length\)/)
+  assert.match(source, /sanitized\.educationExperiences = extractEducationExperiencesFromResumeText/)
 })
 
 test('shenpu pdf generation prefers libreoffice for editable chinese fonts', () => {
