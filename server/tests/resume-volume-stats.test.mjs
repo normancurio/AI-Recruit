@@ -17,3 +17,12 @@ test('fillDailyCounts fills missing days with zero', () => {
     { date: '2026-06-03', count: 5 }
   ])
 })
+
+test('fillDailyCounts accepts Date objects from mysql2 DATE columns', () => {
+  const daily = fillDailyCounts(
+    [{ day: new Date('2026-06-02T00:00:00'), count: 7 }],
+    '2026-06-02',
+    '2026-06-02'
+  )
+  assert.deepEqual(daily, [{ date: '2026-06-02', count: 7 }])
+})

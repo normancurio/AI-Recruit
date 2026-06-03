@@ -39,6 +39,17 @@ function round1(n: number): number {
   return Math.round(n * 10) / 10
 }
 
+/** mysql2 的 DATE 列可能是 Date 对象，需规范成 YYYY-MM-DD */
+function normalizeMysqlDateKey(raw: unknown): string {
+  if (!raw) return ''
+  if (raw instanceof Date && !Number.isNaN(raw.getTime())) return fmtDate(raw)
+  const s = String(raw).trim()
+  const iso = s.match(/^(\d{4}-\d{2}-\d{2})/)
+  if (iso?.[1]) return iso[1]
+  const d = new Date(s)
+  return Number.isNaN(d.getTime()) ? '' : fmtDate(d)
+}
+
 /** 补齐日期区间内无数据的自然日为 0 */
 export function fillDailyCounts(
   rows: Array<{ day: string; count: number }>,
@@ -47,7 +58,7 @@ export function fillDailyCounts(
 ): ResumeVolumeDailyPoint[] {
   const map = new Map<string, number>()
   for (const r of rows) {
-    const d = String(r.day || '').slice(0, 10)
+    const d = normalizeMysqlDateKey(r.day)
     if (!d) continue
     map.set(d, Number(r.count) || 0)
   }
@@ -117,7 +128,7 @@ export async function buildResumeVolumeStatsReport(opts: {
 
   const daily = fillDailyCounts(
     (rows || []).map((r) => ({
-      day: String(r.day ?? ''),
+      day: normalizeMysqlDateKey(r.day),
       count: Number(r.cnt) || 0
     })),
     fromStr,
