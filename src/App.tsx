@@ -11356,10 +11356,32 @@ function shiftReportDateRange(days: number): { from: string; to: string } {
   return { from: fmt(from), to: fmt(to) }
 }
 
+function buildMovingAverageSeries(values: number[], window: number): number[] {
+  return values.map((_, i) => {
+    const start = Math.max(0, i - window + 1)
+    const slice = values.slice(start, i + 1)
+    const sum = slice.reduce((s, v) => s + v, 0)
+    return Math.round((sum / slice.length) * 10) / 10
+  })
+}
+
+function buildCumulativeSeries(daily: ResumeVolumeDailyPoint[]): ResumeVolumeDailyPoint[] {
+  let sum = 0
+  return daily.map((d) => {
+    sum += d.count
+    return { date: d.date, count: sum }
+  })
+}
+
+function formatShortDate(iso: string): string {
+  return iso.slice(5).replace('-', '/')
+}
+
 function ResumeVolumeStatsView() {
-  const initialRange = useMemo(() => defaultReportDateRange(), [])
+  const initialRange = useMemo(() => shiftReportDateRange(30), [])
   const [dateFrom, setDateFrom] = useState(initialRange.from)
   const [dateTo, setDateTo] = useState(initialRange.to)
+  const [chartMode, setChartMode] = useState<'daily' | 'cumulative'>('daily')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [daily, setDaily] = useState<ResumeVolumeDailyPoint[]>([])
@@ -11367,7 +11389,9 @@ function ResumeVolumeStatsView() {
     total: 0,
     dayCount: 0,
     avgPerDay: 0,
-    peak: null as { date: string; count: number } | null
+    peak: null as { date: string; count: number } | null,
+    trough: null as { date: string; count: number } | null,
+    previousPeriod: null as { total: number; avgPerDay: number; changePct: number | null } | null
   })
 
   const load = useCallback(async () => {
@@ -11385,7 +11409,16 @@ function ResumeVolumeStatsView() {
       }>(r, '加载统计失败')
       if (!r.ok) throw adminJsonFailError(r, payload, '加载统计失败')
       setDaily(Array.isArray(payload.daily) ? payload.daily : [])
-      setSummary(payload.summary ?? { total: 0, dayCount: 0, avgPerDay: 0, peak: null })
+      setSummary(
+        payload.summary ?? {
+          total: 0,
+          dayCount: 0,
+          avgPerDay: 0,
+          peak: null,
+          trough: null,
+          previousPeriod: null
+        }
+      )
     } catch (e) {
       setError(userFacingApiError(e, '加载统计失败'))
       setDaily([])
@@ -11398,28 +11431,81 @@ function ResumeVolumeStatsView() {
     void load()
   }, [load])
 
-  const maxCount = useMemo(() => Math.max(1, ...daily.map((d) => d.count)), [daily])
+  const activeQuickDays = useMemo(() => {
+    for (const d of [7, 30, 90]) {
+      const r = shiftReportDateRange(d)
+      if (r.from === dateFrom && r.to === dateTo) return d
+    }
+    return null
+  }, [dateFrom, dateTo])
+
+  const chartSeries = useMemo(
+    () => (chartMode === 'cumulative' ? buildCumulativeSeries(daily) : daily),
+    [daily, chartMode]
+  )
+  const ma7Series = useMemo(
+    () => (chartMode === 'daily' && daily.length >= 2 ? buildMovingAverageSeries(daily.map((d) => d.count), 7) : null),
+    [daily, chartMode]
+  )
+  const peakIdx = useMemo(
+    () => (summary.peak ? daily.findIndex((d) => d.date === summary.peak!.date) : -1),
+    [daily, summary.peak]
+  )
+
+  const maxCount = useMemo(() => {
+    const vals = chartSeries.map((d) => d.count)
+    if (ma7Series) vals.push(...ma7Series)
+    return Math.max(1, ...vals)
+  }, [chartSeries, ma7Series])
+
   const labelStep = daily.length <= 14 ? 1 : daily.length <= 45 ? 3 : 7
   const [hoverIdx, setHoverIdx] = useState<number | null>(null)
 
   const lineChart = useMemo(() => {
-    if (!daily.length) return null
-    const chartW = Math.max(640, daily.length * 18)
+    if (!chartSeries.length) return null
+    const chartW = Math.max(640, chartSeries.length * 18)
     const chartH = 240
     const pad = { top: 20, right: 20, bottom: 32, left: 40 }
     const innerW = chartW - pad.left - pad.right
     const innerH = chartH - pad.top - pad.bottom
     const yTicks = [0, Math.round(maxCount / 2), maxCount]
-    const points = daily.map((d, i) => {
+    const toPoint = (count: number, i: number) => {
       const x =
-        pad.left + (daily.length <= 1 ? innerW / 2 : (i / Math.max(daily.length - 1, 1)) * innerW)
-      const y = pad.top + innerH - (d.count / maxCount) * innerH
-      return { x, y, ...d }
-    })
+        pad.left +
+        (chartSeries.length <= 1 ? innerW / 2 : (i / Math.max(chartSeries.length - 1, 1)) * innerW)
+      const y = pad.top + innerH - (count / maxCount) * innerH
+      return { x, y }
+    }
+    const points = chartSeries.map((d, i) => ({ ...toPoint(d.count, i), ...d, idx: i }))
     const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ')
     const areaPath = `${linePath} L ${points[points.length - 1]!.x.toFixed(1)} ${(pad.top + innerH).toFixed(1)} L ${points[0]!.x.toFixed(1)} ${(pad.top + innerH).toFixed(1)} Z`
-    return { chartW, chartH, pad, innerH, yTicks, points, linePath, areaPath }
-  }, [daily, maxCount])
+    let maPath: string | null = null
+    let maPoints: Array<{ x: number; y: number; value: number }> = []
+    if (ma7Series) {
+      maPoints = ma7Series.map((v, i) => ({ ...toPoint(v, i), value: v }))
+      maPath = maPoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ')
+    }
+    return { chartW, chartH, pad, innerH, yTicks, points, linePath, areaPath, maPath, maPoints }
+  }, [chartSeries, ma7Series, maxCount])
+
+  const insightText = useMemo(() => {
+    if (!daily.length || loading) return null
+    const parts: string[] = []
+    parts.push(
+      `${formatShortDate(dateFrom)} 至 ${formatShortDate(dateTo)} 共上传 ${summary.total} 份，日均 ${summary.avgPerDay} 份`
+    )
+    if (summary.peak) {
+      parts.push(`高峰 ${formatShortDate(summary.peak.date)}（${summary.peak.count} 份）`)
+    }
+    const prev = summary.previousPeriod
+    if (prev && prev.changePct !== null) {
+      const dir = prev.changePct >= 0 ? '增加' : '减少'
+      parts.push(`较上一周期${dir} ${Math.abs(prev.changePct)}%`)
+    } else if (prev && prev.total === 0 && summary.total > 0) {
+      parts.push('上一周期无上传')
+    }
+    return parts.join('。') + '。'
+  }, [daily.length, loading, dateFrom, dateTo, summary])
 
   const exportCsv = () => {
     const lines = daily.map((d) => `${d.date},${d.count}`)
@@ -11444,7 +11530,7 @@ function ResumeVolumeStatsView() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">简历量统计</h1>
-          <p className="mt-1 text-sm text-slate-500">按上传日期统计简历筛查数量，查看每日趋势（以 created_at 为准）</p>
+          <p className="mt-1 text-sm text-slate-500">按上传日期统计简历筛查数量，查看总上传趋势（以 created_at 为准）</p>
         </div>
         <button type="button" onClick={exportCsv} disabled={!daily.length} className={btnSecondarySm}>
           <Download className="inline h-4 w-4 mr-1" />
@@ -11477,7 +11563,11 @@ function ResumeVolumeStatsView() {
               key={d}
               type="button"
               onClick={() => applyQuickRange(d)}
-              className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
+              className={
+                activeQuickDays === d
+                  ? 'rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-medium text-indigo-700'
+                  : 'rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100'
+              }
             >
               近{d}天
             </button>
@@ -11489,7 +11579,13 @@ function ResumeVolumeStatsView() {
         </button>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {insightText ? (
+        <div className="rounded-lg border border-indigo-100 bg-indigo-50/60 px-4 py-3 text-sm text-indigo-900">
+          {insightText}
+        </div>
+      ) : null}
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
           <div className="text-xs text-slate-500">期间简历总量</div>
           <div className="text-xl font-bold text-slate-900">{summary.total}</div>
@@ -11505,8 +11601,29 @@ function ResumeVolumeStatsView() {
         <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
           <div className="text-xs text-slate-500">单日最高</div>
           <div className="text-xl font-bold text-emerald-700">
-            {summary.peak ? `${summary.peak.count}（${summary.peak.date.slice(5)}）` : '—'}
+            {summary.peak ? `${summary.peak.count}（${formatShortDate(summary.peak.date)}）` : '—'}
           </div>
+        </div>
+        <div className="col-span-2 rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:col-span-1">
+          <div className="text-xs text-slate-500">环比上一周期</div>
+          <div
+            className={`text-xl font-bold ${
+              summary.previousPeriod?.changePct == null
+                ? 'text-slate-400'
+                : summary.previousPeriod.changePct >= 0
+                  ? 'text-emerald-700'
+                  : 'text-rose-600'
+            }`}
+          >
+            {summary.previousPeriod?.changePct != null
+              ? `${summary.previousPeriod.changePct >= 0 ? '+' : ''}${summary.previousPeriod.changePct}%`
+              : summary.previousPeriod
+                ? '—'
+                : '—'}
+          </div>
+          {summary.previousPeriod ? (
+            <div className="mt-0.5 text-[11px] text-slate-400">上期 {summary.previousPeriod.total} 份</div>
+          ) : null}
         </div>
       </div>
 
@@ -11515,7 +11632,51 @@ function ResumeVolumeStatsView() {
       ) : null}
 
       <div className="overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
-        <h2 className="mb-4 text-sm font-semibold text-slate-800">每日趋势</h2>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold text-slate-800">上传趋势</h2>
+          <div className="flex rounded-lg border border-slate-200 p-0.5 text-xs">
+            <button
+              type="button"
+              onClick={() => setChartMode('daily')}
+              className={
+                chartMode === 'daily'
+                  ? 'rounded-md bg-indigo-600 px-3 py-1.5 font-medium text-white'
+                  : 'rounded-md px-3 py-1.5 font-medium text-slate-600 hover:bg-slate-50'
+              }
+            >
+              每日
+            </button>
+            <button
+              type="button"
+              onClick={() => setChartMode('cumulative')}
+              className={
+                chartMode === 'cumulative'
+                  ? 'rounded-md bg-indigo-600 px-3 py-1.5 font-medium text-white'
+                  : 'rounded-md px-3 py-1.5 font-medium text-slate-600 hover:bg-slate-50'
+              }
+            >
+              累计
+            </button>
+          </div>
+        </div>
+        {chartMode === 'daily' && ma7Series ? (
+          <div className="mb-3 flex flex-wrap items-center gap-4 text-[11px] text-slate-500">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="inline-block h-0.5 w-4 rounded bg-indigo-600" />
+              每日上传
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="inline-block h-0 w-4 border-t-2 border-dashed border-amber-500" />
+              7 日均线
+            </span>
+            {peakIdx >= 0 ? (
+              <span className="inline-flex items-center gap-1.5">
+                <span className="inline-block h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-white" />
+                峰值日
+              </span>
+            ) : null}
+          </div>
+        ) : null}
         {loading ? (
           <div className="flex items-center justify-center gap-2 py-20 text-slate-500">
             <Loader2 className="h-5 w-5 animate-spin" />
@@ -11530,7 +11691,7 @@ function ResumeVolumeStatsView() {
               className="min-w-full"
               style={{ minWidth: lineChart.chartW, height: lineChart.chartH }}
               role="img"
-              aria-label="简历上传每日趋势折线图"
+              aria-label="简历上传趋势折线图"
             >
               <defs>
                 <linearGradient id="resumeVolumeArea" x1="0" y1="0" x2="0" y2="1">
@@ -11557,6 +11718,17 @@ function ResumeVolumeStatsView() {
                 )
               })}
               <path d={lineChart.areaPath} fill="url(#resumeVolumeArea)" />
+              {lineChart.maPath ? (
+                <path
+                  d={lineChart.maPath}
+                  fill="none"
+                  stroke="#f59e0b"
+                  strokeWidth="1.5"
+                  strokeDasharray="6 4"
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                />
+              ) : null}
               <path
                 d={lineChart.linePath}
                 fill="none"
@@ -11565,41 +11737,52 @@ function ResumeVolumeStatsView() {
                 strokeLinejoin="round"
                 strokeLinecap="round"
               />
-              {lineChart.points.map((p, i) => (
-                <g key={p.date}>
-                  <circle
-                    cx={p.x}
-                    cy={p.y}
-                    r={hoverIdx === i ? 6 : 4}
-                    fill={hoverIdx === i ? '#4338ca' : '#4f46e5'}
-                    stroke="#fff"
-                    strokeWidth="2"
-                    className="cursor-pointer"
-                    onMouseEnter={() => setHoverIdx(i)}
-                    onMouseLeave={() => setHoverIdx(null)}
-                  />
-                  {hoverIdx === i ? (
-                    <g pointerEvents="none">
-                      <rect
-                        x={Math.min(Math.max(p.x - 42, lineChart.pad.left), lineChart.chartW - 84)}
-                        y={Math.max(p.y - 36, 4)}
-                        width="84"
-                        height="28"
-                        rx="6"
-                        fill="#1e293b"
-                      />
-                      <text
-                        x={Math.min(Math.max(p.x, lineChart.pad.left + 42), lineChart.chartW - lineChart.pad.right)}
-                        y={Math.max(p.y - 24, 16)}
-                        textAnchor="middle"
-                        className="fill-white text-[10px] font-medium"
-                      >
-                        {p.date.slice(5)} · {p.count} 份
-                      </text>
-                    </g>
-                  ) : null}
-                </g>
-              ))}
+              {lineChart.points.map((p, i) => {
+                const isPeak = chartMode === 'daily' && i === peakIdx
+                const dailyCount = daily[i]?.count ?? p.count
+                const tooltip =
+                  chartMode === 'cumulative'
+                    ? `${formatShortDate(p.date)} · 累计 ${p.count} 份`
+                    : `${formatShortDate(p.date)} · ${dailyCount} 份`
+                return (
+                  <g key={p.date}>
+                    {isPeak ? (
+                      <circle cx={p.x} cy={p.y} r="9" fill="#10b981" fillOpacity="0.18" pointerEvents="none" />
+                    ) : null}
+                    <circle
+                      cx={p.x}
+                      cy={p.y}
+                      r={isPeak ? 6 : hoverIdx === i ? 6 : 4}
+                      fill={isPeak ? '#059669' : hoverIdx === i ? '#4338ca' : '#4f46e5'}
+                      stroke="#fff"
+                      strokeWidth="2"
+                      className="cursor-pointer"
+                      onMouseEnter={() => setHoverIdx(i)}
+                      onMouseLeave={() => setHoverIdx(null)}
+                    />
+                    {hoverIdx === i ? (
+                      <g pointerEvents="none">
+                        <rect
+                          x={Math.min(Math.max(p.x - 48, lineChart.pad.left), lineChart.chartW - 96)}
+                          y={Math.max(p.y - 36, 4)}
+                          width="96"
+                          height="28"
+                          rx="6"
+                          fill="#1e293b"
+                        />
+                        <text
+                          x={Math.min(Math.max(p.x, lineChart.pad.left + 48), lineChart.chartW - lineChart.pad.right)}
+                          y={Math.max(p.y - 24, 16)}
+                          textAnchor="middle"
+                          className="fill-white text-[10px] font-medium"
+                        >
+                          {tooltip}
+                        </text>
+                      </g>
+                    ) : null}
+                  </g>
+                )
+              })}
               {lineChart.points.map((p, i) =>
                 i % labelStep === 0 || i === lineChart.points.length - 1 ? (
                   <text
@@ -11609,7 +11792,7 @@ function ResumeVolumeStatsView() {
                     textAnchor="middle"
                     className="fill-slate-400 text-[10px]"
                   >
-                    {p.date.slice(5)}
+                    {formatShortDate(p.date)}
                   </text>
                 ) : null
               )}
@@ -11650,16 +11833,7 @@ function ResumeVolumeStatsView() {
 }
 
 function defaultReportDateRange(): { from: string; to: string } {
-  const to = new Date()
-  const from = new Date(to)
-  from.setDate(from.getDate() - 30)
-  const fmt = (d: Date) => {
-    const y = d.getFullYear()
-    const m = String(d.getMonth() + 1).padStart(2, '0')
-    const day = String(d.getDate()).padStart(2, '0')
-    return `${y}-${m}-${day}`
-  }
-  return { from: fmt(from), to: fmt(to) }
+  return shiftReportDateRange(30)
 }
 
 function RecruiterQualityReportView({ currentRole }: { currentRole: Role }) {

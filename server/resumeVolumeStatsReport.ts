@@ -13,6 +13,12 @@ export type ResumeVolumeStatsResult = {
     dayCount: number
     avgPerDay: number
     peak: { date: string; count: number } | null
+    trough: { date: string; count: number } | null
+    previousPeriod: {
+      total: number
+      avgPerDay: number
+      changePct: number | null
+    } | null
   }
   daily: ResumeVolumeDailyPoint[]
   meta: {
@@ -77,10 +83,72 @@ export function fillDailyCounts(
 function emptyResult(dateFrom: string, dateTo: string): ResumeVolumeStatsResult {
   const daily = fillDailyCounts([], dateFrom, dateTo)
   return {
-    summary: { total: 0, dayCount: daily.length, avgPerDay: 0, peak: null },
+    summary: {
+      total: 0,
+      dayCount: daily.length,
+      avgPerDay: 0,
+      peak: null,
+      trough: null,
+      previousPeriod: null
+    },
     daily,
     meta: { dateFrom, dateTo }
   }
+}
+
+async function queryDailyCounts(
+  bizPool: Pool,
+  from: Date,
+  toExclusive: Date,
+  allowedJobCodes: string[] | null,
+  allowedUploaderLowers: string[] | null
+): Promise<Array<{ day: string; count: number }>> {
+  const whereParts = ['s.created_at >= ?', 's.created_at < ?']
+  const whereParams: unknown[] = [from, toExclusive]
+
+  if (allowedJobCodes) {
+    if (!allowedJobCodes.length) return []
+    const ph = allowedJobCodes.map(() => '?').join(', ')
+    whereParts.push(`UPPER(TRIM(s.job_code)) IN (${ph})`)
+    whereParams.push(...allowedJobCodes.map((c) => String(c).trim().toUpperCase()))
+  }
+
+  if (allowedUploaderLowers) {
+    if (!allowedUploaderLowers.length) return []
+    const ph = allowedUploaderLowers.map(() => '?').join(', ')
+    whereParts.push(`LOWER(TRIM(COALESCE(s.uploader_username,''))) IN (${ph})`)
+    whereParams.push(...allowedUploaderLowers)
+  }
+
+  const [rows] = await bizPool.query<RowDataPacket[]>(
+    `SELECT DATE(s.created_at) AS day, COUNT(*) AS cnt
+     FROM resume_screenings s
+     WHERE ${whereParts.join(' AND ')}
+     GROUP BY DATE(s.created_at)
+     ORDER BY day ASC`,
+    whereParams
+  )
+
+  return (rows || []).map((r) => ({
+    day: normalizeMysqlDateKey(r.day),
+    count: Number(r.cnt) || 0
+  }))
+}
+
+function pickPeak(daily: ResumeVolumeDailyPoint[]): ResumeVolumeDailyPoint | null {
+  return daily.reduce<ResumeVolumeDailyPoint | null>(
+    (best, d) => (!best || d.count > best.count ? d : best),
+    null
+  )
+}
+
+function pickTrough(daily: ResumeVolumeDailyPoint[]): ResumeVolumeDailyPoint | null {
+  const nonzero = daily.filter((d) => d.count > 0)
+  if (!nonzero.length) return null
+  return nonzero.reduce<ResumeVolumeDailyPoint | null>(
+    (best, d) => (!best || d.count < best.count ? d : best),
+    null
+  )
 }
 
 export async function buildResumeVolumeStatsReport(opts: {
@@ -99,54 +167,50 @@ export async function buildResumeVolumeStatsReport(opts: {
   const toExclusive = new Date(dateTo)
   toExclusive.setDate(toExclusive.getDate() + 1)
 
-  const whereParts = ['s.created_at >= ?', 's.created_at < ?']
-  const whereParams: unknown[] = [dateFrom, toExclusive]
-
-  if (opts.allowedJobCodes) {
-    if (!opts.allowedJobCodes.length) return emptyResult(fromStr, toStr)
-    const ph = opts.allowedJobCodes.map(() => '?').join(', ')
-    whereParts.push(`UPPER(TRIM(s.job_code)) IN (${ph})`)
-    whereParams.push(...opts.allowedJobCodes.map((c) => String(c).trim().toUpperCase()))
-  }
-
-  if (opts.allowedUploaderLowers) {
-    if (!opts.allowedUploaderLowers.length) return emptyResult(fromStr, toStr)
-    const ph = opts.allowedUploaderLowers.map(() => '?').join(', ')
-    whereParts.push(`LOWER(TRIM(COALESCE(s.uploader_username,''))) IN (${ph})`)
-    whereParams.push(...opts.allowedUploaderLowers)
-  }
-
-  const whereSql = whereParts.join(' AND ')
-  const [rows] = await opts.bizPool.query<RowDataPacket[]>(
-    `SELECT DATE(s.created_at) AS day, COUNT(*) AS cnt
-     FROM resume_screenings s
-     WHERE ${whereSql}
-     GROUP BY DATE(s.created_at)
-     ORDER BY day ASC`,
-    whereParams
+  const rows = await queryDailyCounts(
+    opts.bizPool,
+    dateFrom,
+    toExclusive,
+    opts.allowedJobCodes,
+    opts.allowedUploaderLowers
   )
+  if (opts.allowedJobCodes && !opts.allowedJobCodes.length) return emptyResult(fromStr, toStr)
+  if (opts.allowedUploaderLowers && !opts.allowedUploaderLowers.length) return emptyResult(fromStr, toStr)
 
-  const daily = fillDailyCounts(
-    (rows || []).map((r) => ({
-      day: normalizeMysqlDateKey(r.day),
-      count: Number(r.cnt) || 0
-    })),
-    fromStr,
-    toStr
-  )
+  const daily = fillDailyCounts(rows, fromStr, toStr)
   const total = daily.reduce((sum, d) => sum + d.count, 0)
   const dayCount = daily.length
-  const peak = daily.reduce<ResumeVolumeDailyPoint | null>(
-    (best, d) => (!best || d.count > best.count ? d : best),
-    null
-  )
+  const peak = pickPeak(daily)
+  const trough = pickTrough(daily)
+
+  let previousPeriod: ResumeVolumeStatsResult['summary']['previousPeriod'] = null
+  if (dayCount > 0) {
+    const prevToExclusive = new Date(dateFrom)
+    const prevFrom = new Date(dateFrom)
+    prevFrom.setDate(prevFrom.getDate() - dayCount)
+    const prevRows = await queryDailyCounts(
+      opts.bizPool,
+      prevFrom,
+      prevToExclusive,
+      opts.allowedJobCodes,
+      opts.allowedUploaderLowers
+    )
+    const prevTotal = prevRows.reduce((sum, r) => sum + r.count, 0)
+    previousPeriod = {
+      total: prevTotal,
+      avgPerDay: dayCount ? round1(prevTotal / dayCount) : 0,
+      changePct: prevTotal > 0 ? round1(((total - prevTotal) / prevTotal) * 100) : null
+    }
+  }
 
   return {
     summary: {
       total,
       dayCount,
       avgPerDay: dayCount ? round1(total / dayCount) : 0,
-      peak: peak && peak.count > 0 ? { date: peak.date, count: peak.count } : null
+      peak: peak && peak.count > 0 ? { date: peak.date, count: peak.count } : null,
+      trough,
+      previousPeriod
     },
     daily,
     meta: { dateFrom: fromStr, dateTo: toStr }
