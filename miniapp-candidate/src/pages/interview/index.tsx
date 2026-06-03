@@ -1175,7 +1175,7 @@ export default function InterviewPage() {
 
   const buildShortAnswerFollowUp = useCallback((parent: InterviewQuestion, answer: string): InterviewQuestion | null => {
     const cfg = followUpConfigRef.current
-    if (!cfg.enabled || !cfg.fallbackEnabled) return null
+    if (!cfg.enabled || !cfg.fallbackEnabled || cfg.demoMode) return null
     const compact = String(answer || '').replace(/\s+/g, '')
     if (compact.length >= cfg.shortAnswerThreshold) return null
     return {
@@ -1208,7 +1208,7 @@ export default function InterviewPage() {
       const got = await fetchPreparedFollowUp({
         sessionId,
         questionId: parent.id,
-        waitMs: cfg.modelWaitMs
+        waitMs: cfg.demoMode ? Math.max(cfg.modelWaitMs, 3500) : cfg.modelWaitMs
       }).catch(() => null)
       flowLogInfo('追问检查', `追问状态=${got?.status || 'request_failed'}`)
       if (got?.status === 'ready' && got.question?.text) {

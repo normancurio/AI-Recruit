@@ -1230,8 +1230,10 @@ type InterviewFollowUpConfig = {
   prompt: string
 }
 
-const DEMO_FOLLOW_UP_QUESTION =
-  '可以结合一个具体项目或经历，把刚才说的再展开说明一下吗？'
+const DEMO_FOLLOW_UP_PROMPT_SUFFIX = [
+  '【演示模式】本场为产品演示：只要候选人回答达到有效字数，必须返回 should_follow_up=true，并给出 1 个锚定其回答细节的具体追问。',
+  '禁止返回 should_follow_up=false，禁止泛泛而谈的追问，禁止重复原题。'
+].join('\n')
 
 const DEFAULT_FOLLOW_UP_PROMPT = [
   '你是结构化技术面试里的追问面试官。你的任务不是评价答案是否充分，而是从候选人的回答里继续追深一层，验证真实性、深度和个人贡献。',
@@ -1547,9 +1549,44 @@ function buildInstantFollowUpQuestion(parentQuestion: string, answer: string): s
   return '你刚才提到的这段经历，最关键的处理细节是什么？'
 }
 
-function buildDemoFollowUpQuestion(parentQuestion: string, answer: string): string {
-  const instant = buildInstantFollowUpQuestion(parentQuestion, answer)
-  return instant || DEMO_FOLLOW_UP_QUESTION
+function followUpSystemPrompt(config: InterviewFollowUpConfig): string {
+  const base = config.prompt || DEFAULT_FOLLOW_UP_PROMPT
+  return config.demoMode ? `${base}\n${DEMO_FOLLOW_UP_PROMPT_SUFFIX}` : base
+}
+
+function followUpModelTimeoutMs(config: InterviewFollowUpConfig): number {
+  const base = Math.max(1500, Number(process.env.QWEN_FOLLOWUP_TIMEOUT_MS) || 6000)
+  return config.demoMode ? Math.max(base, 8000) : base
+}
+
+async function generateFollowUpViaModel(
+  config: InterviewFollowUpConfig,
+  question: string,
+  answer: string,
+  opts?: { force?: boolean }
+): Promise<string> {
+  const model = config.model || process.env.QWEN_FOLLOWUP_MODEL?.trim() || 'qwen-turbo'
+  const userContent = opts?.force
+    ? `当前题目：${question}\n候选人回答：${answer}\n你必须生成一个锚定回答细节的追问。只返回 JSON，且 should_follow_up 必须为 true。`
+    : `当前题目：${question}\n候选人回答：${answer}\n请基于回答中的具体点生成一个追问。`
+  const data = await dashScopeChatCompletions(
+    {
+      model,
+      messages: [
+        { role: 'system', content: followUpSystemPrompt(config) },
+        { role: 'user', content: userContent }
+      ],
+      temperature: config.demoMode ? 0.45 : 0.35,
+      max_tokens: 180
+    },
+    { timeoutMs: followUpModelTimeoutMs(config) }
+  )
+  const content = String(data?.choices?.[0]?.message?.content || '').trim()
+  const parsed = parseFollowUpJson(content)
+  if (!parsed) return ''
+  const normalized = normalizeFollowUpQuestion(parsed.question, question)
+  if (config.demoMode) return normalized
+  return parsed.shouldFollowUp ? normalized : ''
 }
 
 function shouldPrepareFollowUp(answer: string, question: string, config: InterviewFollowUpConfig) {
@@ -1580,43 +1617,13 @@ async function prepareInterviewFollowUp(params: {
   const existing = followUpCache.get(key)
   if (existing?.status === 'pending' || existing?.status === 'ready') return
 
-  if (config.demoMode) {
-    const followUp = buildDemoFollowUpQuestion(question, answer)
-    followUpCache.set(key, {
-      status: 'ready',
-      question: followUp,
-      parentQuestion: question,
-      answer,
-      updatedAt: Date.now()
-    })
-    return
-  }
-
   followUpCache.set(key, { status: 'pending', parentQuestion: question, answer, updatedAt: Date.now() })
 
   try {
-    const model = config.model || process.env.QWEN_FOLLOWUP_MODEL?.trim() || 'qwen-turbo'
-    const data = await dashScopeChatCompletions(
-      {
-        model,
-        messages: [
-          {
-            role: 'system',
-            content: config.prompt || DEFAULT_FOLLOW_UP_PROMPT
-          },
-          {
-            role: 'user',
-            content: `当前题目：${question}\n候选人回答：${answer}\n请基于回答中的具体点生成一个追问。`
-          }
-        ],
-        temperature: 0.35,
-        max_tokens: 180
-      },
-      { timeoutMs: Math.max(1500, Number(process.env.QWEN_FOLLOWUP_TIMEOUT_MS) || 6000) }
-    )
-    const content = String(data?.choices?.[0]?.message?.content || '').trim()
-    const parsed = parseFollowUpJson(content)
-    const followUp = parsed?.shouldFollowUp ? normalizeFollowUpQuestion(parsed.question, question) : ''
+    let followUp = await generateFollowUpViaModel(config, question, answer)
+    if (config.demoMode && !followUp) {
+      followUp = await generateFollowUpViaModel(config, question, answer, { force: true })
+    }
     followUpCache.set(key, {
       status: followUp ? 'ready' : 'skipped',
       question: followUp || undefined,
@@ -11813,25 +11820,12 @@ app.get('/api/live/session/follow-up', async (req, res) => {
     }
     cleanupFollowUpCache()
     const key = followUpCacheKey(sessionId, questionId)
+    const effectiveWaitMs = config.demoMode ? Math.max(waitMs, 3500) : waitMs
     const startedAt = Date.now()
     let value = followUpCache.get(key)
-    while (value?.status === 'pending' && waitMs > 0 && Date.now() - startedAt < waitMs) {
+    while (value?.status === 'pending' && effectiveWaitMs > 0 && Date.now() - startedAt < effectiveWaitMs) {
       await sleepMs(120)
       value = followUpCache.get(key)
-    }
-    if (config.demoMode) {
-      const demoText = buildDemoFollowUpQuestion(value?.parentQuestion || '', value?.answer || '')
-      return res.json({
-        data: {
-          status: 'ready',
-          question: {
-            id: `FU-${questionId}-demo`,
-            text: demoText,
-            type: 'follow_up',
-            parentQuestionId: questionId
-          }
-        }
-      })
     }
     if (!value) return res.json({ data: { status: 'none' } })
     if (value.status === 'ready' && value.question) {
@@ -11847,7 +11841,7 @@ app.get('/api/live/session/follow-up', async (req, res) => {
         }
       })
     }
-    if (value.status === 'pending' && !requireModel && config.fallbackEnabled) {
+    if (value.status === 'pending' && !requireModel && config.fallbackEnabled && !config.demoMode) {
       const instant = buildInstantFollowUpQuestion(value.parentQuestion || '', value.answer || '')
       if (instant) {
         return res.json({

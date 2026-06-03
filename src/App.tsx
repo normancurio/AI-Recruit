@@ -13722,7 +13722,7 @@ function SystemAiInterviewSettingsView() {
                     <span>
                       演示模式 · 每道主题必出追问
                       <span className="mt-1 block text-xs font-normal leading-relaxed text-amber-800">
-                        开启后跳过 AI 判定，候选人每答完一道主题题（≥2 字）都会插入追问。演示结束后请关闭。
+                        开启后放宽触发条件并延长 AI 等待时间，仍由模型根据回答生成追问（不用固定兜底句）。演示结束后请关闭。
                       </span>
                     </span>
                   </label>

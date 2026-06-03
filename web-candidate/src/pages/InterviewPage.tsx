@@ -110,7 +110,7 @@ export default function InterviewPage() {
       const got = await fetchPreparedFollowUp({
         sessionId,
         questionId: parent.id,
-        waitMs: cfg.modelWaitMs
+        waitMs: cfg.demoMode ? Math.max(cfg.modelWaitMs, 3500) : cfg.modelWaitMs
       })
       if (got?.status === 'ready' && got.question?.text) {
         return {
@@ -120,7 +120,7 @@ export default function InterviewPage() {
         }
       }
       const compact = answer.replace(/\s+/g, '')
-      if (cfg.fallbackEnabled && compact.length < cfg.shortAnswerThreshold) {
+      if (cfg.fallbackEnabled && !cfg.demoMode && compact.length < cfg.shortAnswerThreshold) {
         return {
           id: `FU-${parent.id}-short`,
           text: '可以结合一个具体项目或经历，再展开说明一下吗？',
