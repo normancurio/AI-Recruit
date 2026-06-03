@@ -63,6 +63,10 @@ import {
   buildDeliveryManagerPerformanceReport,
   type DeliveryPerformanceUiRole
 } from './deliveryManagerPerformanceReport.ts'
+import {
+  buildResumeVolumeStatsReport,
+  type ResumeVolumeUiRole
+} from './resumeVolumeStatsReport.ts'
 import { buildXfyunIatAuthWsUrl, checkXfyunIatEnv } from './xfyunIat.ts'
 import { buildShenpuResumeDocx } from './shenpuResumeDocx.ts'
 
@@ -9684,6 +9688,54 @@ app.get('/api/admin/reports/recruiter-quality', async (req, res) => {
     }
     console.error('[GET /api/admin/reports/recruiter-quality]', e)
     return res.status(500).json({ message: '报表生成失败，请稍后重试' })
+  }
+})
+
+/** 简历量统计：按自然日聚合上传量，支持日期区间 */
+app.get('/api/admin/stats/resume-volume', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const token = extractAdminRequestToken(req)
+  const actor = await loadAdminSessionActor(token)
+  if (!actor) {
+    return res.status(401).json({ message: '登录已失效，请重新登录' })
+  }
+  const uiRole = actor.uiRole as ResumeVolumeUiRole
+  if (
+    uiRole !== 'recruiter' &&
+    uiRole !== 'admin' &&
+    uiRole !== 'recruiting_manager' &&
+    uiRole !== 'delivery_manager'
+  ) {
+    return res.status(403).json({ message: '没有权限查看简历量统计' })
+  }
+  try {
+    let allowedJobCodes: string[] | null = null
+    let allowedUploaderLowers: string[] | null = null
+    if (uiRole === 'recruiter') {
+      const me = actor.username.trim().toLowerCase()
+      allowedUploaderLowers = me ? [me] : ['\0']
+    } else if (uiRole === 'recruiting_manager') {
+      allowedUploaderLowers = await adminDeptMemberUploadersLower(actor.dept)
+    } else if (uiRole === 'delivery_manager') {
+      allowedJobCodes = await allowedJobCodesForScreeningListToken(token)
+    }
+    const report = await buildResumeVolumeStatsReport({
+      bizPool: mysqlPool,
+      query: req.query as Record<string, unknown>,
+      allowedJobCodes,
+      allowedUploaderLowers
+    })
+    return res.json(report)
+  } catch (e: unknown) {
+    const code = (e as { code?: string })?.code
+    if (code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({ message: 'resume_screenings 表未创建，请先执行迁移脚本' })
+    }
+    if (isMysqlTransientError(e)) {
+      return res.status(503).json({ message: '数据库连接中断，请稍后重试' })
+    }
+    console.error('[GET /api/admin/stats/resume-volume]', e)
+    return res.status(500).json({ message: '统计生成失败，请稍后重试' })
   }
 })
 

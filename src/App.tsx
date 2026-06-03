@@ -34,7 +34,7 @@ import {
   ChevronRight, ChevronLeft, MoreHorizontal, CheckCircle2, XCircle,
   LogOut, Bell, LayoutDashboard, FolderOpen, Bot,
   Clock, Calendar, Pencil, Trash2, Loader2, KeyRound, Sparkles, UserRound, Lock, X, RotateCcw,
-  FileBarChart, UserPen, CalendarCheck, Eye, Download, History, Copy
+  FileBarChart, UserPen, CalendarCheck, Eye, Download, History, Copy, TrendingUp
 } from 'lucide-react';
 
 /**
@@ -187,7 +187,8 @@ const ADMIN_ROLE_MENU_OPTIONS: { group: string; items: { id: string; label: stri
       { id: 'resume-library', label: '简历库' },
       { id: 'application-mgmt', label: '初面管理' },
       { id: 'delivery-performance-report', label: '交付业绩报表' },
-      { id: 'recruiter-quality-report', label: '招聘质量报表' }
+      { id: 'recruiter-quality-report', label: '招聘质量报表' },
+      { id: 'resume-volume-stats', label: '简历量统计' }
     ]
   },
   {
@@ -349,6 +350,12 @@ const NAV_TEMPLATE: NavItem[] = [
         title: '招聘质量报表',
         roles: ['admin', 'recruiting_manager', 'delivery_manager', 'recruiter'],
         icon: <FileBarChart className="w-4 h-4" />
+      },
+      {
+        id: 'resume-volume-stats',
+        title: '简历量统计',
+        roles: ['admin', 'recruiting_manager', 'delivery_manager', 'recruiter'],
+        icon: <TrendingUp className="w-4 h-4" />
       },
       {
         id: 'delivery-performance-report',
@@ -1297,6 +1304,8 @@ export default function App() {
       case 'application-mgmt': return <ApplicationManagementView currentRole={currentRole} authProfile={authProfile} />;
       case 'recruiter-quality-report':
         return <RecruiterQualityReportView currentRole={currentRole} />;
+      case 'resume-volume-stats':
+        return <ResumeVolumeStatsView />;
       case 'delivery-performance-report':
         return <DeliveryPerformanceReportView currentRole={currentRole} />;
       case 'sys-dept': return <SystemDeptView />;
@@ -11330,6 +11339,233 @@ type RecruiterQualityReportRow = {
   avgInterviewScore: number | null
   qualityScore: number | null
   sampleInsufficient: boolean
+}
+
+type ResumeVolumeDailyPoint = { date: string; count: number }
+
+function shiftReportDateRange(days: number): { from: string; to: string } {
+  const to = new Date()
+  const from = new Date(to)
+  from.setDate(from.getDate() - (days - 1))
+  const fmt = (d: Date) => {
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day}`
+  }
+  return { from: fmt(from), to: fmt(to) }
+}
+
+function ResumeVolumeStatsView() {
+  const initialRange = useMemo(() => defaultReportDateRange(), [])
+  const [dateFrom, setDateFrom] = useState(initialRange.from)
+  const [dateTo, setDateTo] = useState(initialRange.to)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [daily, setDaily] = useState<ResumeVolumeDailyPoint[]>([])
+  const [summary, setSummary] = useState({
+    total: 0,
+    dayCount: 0,
+    avgPerDay: 0,
+    peak: null as { date: string; count: number } | null
+  })
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const qs = new URLSearchParams()
+      if (dateFrom) qs.set('dateFrom', dateFrom)
+      if (dateTo) qs.set('dateTo', dateTo)
+      const r = await miniappApiFetch(`/api/admin/stats/resume-volume?${qs.toString()}`)
+      const payload = await miniappApiJson<{
+        daily?: ResumeVolumeDailyPoint[]
+        summary?: typeof summary
+        message?: string
+      }>(r, '加载统计失败')
+      if (!r.ok) throw adminJsonFailError(r, payload, '加载统计失败')
+      setDaily(Array.isArray(payload.daily) ? payload.daily : [])
+      setSummary(payload.summary ?? { total: 0, dayCount: 0, avgPerDay: 0, peak: null })
+    } catch (e) {
+      setError(userFacingApiError(e, '加载统计失败'))
+      setDaily([])
+    } finally {
+      setLoading(false)
+    }
+  }, [dateFrom, dateTo])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const maxCount = useMemo(() => Math.max(1, ...daily.map((d) => d.count)), [daily])
+  const labelStep = daily.length <= 14 ? 1 : daily.length <= 45 ? 3 : 7
+
+  const exportCsv = () => {
+    const lines = daily.map((d) => `${d.date},${d.count}`)
+    const blob = new Blob(['\uFEFF日期,简历数\n', ...lines.map((l) => `${l}\n`)], {
+      type: 'text/csv;charset=utf-8'
+    })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `简历量统计_${dateFrom}_${dateTo}.csv`
+    a.click()
+    URL.revokeObjectURL(a.href)
+  }
+
+  const applyQuickRange = (days: number) => {
+    const r = shiftReportDateRange(days)
+    setDateFrom(r.from)
+    setDateTo(r.to)
+  }
+
+  return (
+    <div className="space-y-4 sm:space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">简历量统计</h1>
+          <p className="mt-1 text-sm text-slate-500">按上传日期统计简历筛查数量，查看每日趋势（以 created_at 为准）</p>
+        </div>
+        <button type="button" onClick={exportCsv} disabled={!daily.length} className={btnSecondarySm}>
+          <Download className="inline h-4 w-4 mr-1" />
+          导出 CSV
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-slate-500">开始日期</label>
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            className="rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-slate-500">结束日期</label>
+          <input
+            type="date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            className="rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+        </div>
+        <div className="flex flex-wrap gap-2 pb-0.5">
+          {[7, 30, 90].map((d) => (
+            <button
+              key={d}
+              type="button"
+              onClick={() => applyQuickRange(d)}
+              className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
+            >
+              近{d}天
+            </button>
+          ))}
+        </div>
+        <button type="button" onClick={() => void load()} disabled={loading} className={btnPrimarySmFlex}>
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+          查询
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="text-xs text-slate-500">期间简历总量</div>
+          <div className="text-xl font-bold text-slate-900">{summary.total}</div>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="text-xs text-slate-500">统计天数</div>
+          <div className="text-xl font-bold text-slate-900">{summary.dayCount}</div>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="text-xs text-slate-500">日均上传</div>
+          <div className="text-xl font-bold text-indigo-700">{summary.avgPerDay}</div>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="text-xs text-slate-500">单日最高</div>
+          <div className="text-xl font-bold text-emerald-700">
+            {summary.peak ? `${summary.peak.count}（${summary.peak.date.slice(5)}）` : '—'}
+          </div>
+        </div>
+      </div>
+
+      {error ? (
+        <div className="rounded-lg border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
+      ) : null}
+
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+        <h2 className="mb-4 text-sm font-semibold text-slate-800">每日趋势</h2>
+        {loading ? (
+          <div className="flex items-center justify-center gap-2 py-20 text-slate-500">
+            <Loader2 className="h-5 w-5 animate-spin" />
+            加载中…
+          </div>
+        ) : daily.length === 0 ? (
+          <div className="py-20 text-center text-sm text-slate-500">所选条件下暂无数据</div>
+        ) : (
+          <div className="overflow-x-auto pb-2">
+            <div className="min-w-[640px]">
+              <div className="flex h-52 items-end gap-1 border-b border-slate-200 pb-1">
+                {daily.map((d) => (
+                  <div
+                    key={d.date}
+                    className="group relative flex min-w-[10px] flex-1 flex-col items-center justify-end"
+                    title={`${d.date}：${d.count} 份`}
+                  >
+                    <div className="pointer-events-none absolute -top-7 z-10 hidden rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-white group-hover:block">
+                      {d.count}
+                    </div>
+                    <div
+                      className="w-full max-w-[28px] rounded-t bg-indigo-500 transition hover:bg-indigo-600"
+                      style={{
+                        height: `${Math.max(d.count > 0 ? 4 : 0, (d.count / maxCount) * 100)}%`
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+              <div className="mt-2 flex gap-1">
+                {daily.map((d, i) => (
+                  <div key={`${d.date}-label`} className="min-w-[10px] flex-1 text-center">
+                    {i % labelStep === 0 || i === daily.length - 1 ? (
+                      <span className="text-[10px] text-slate-400">{d.date.slice(5)}</span>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-100 px-4 py-3 text-sm font-semibold text-slate-800">明细</div>
+        {loading ? null : daily.length === 0 ? (
+          <div className="py-12 text-center text-sm text-slate-500">暂无明细</div>
+        ) : (
+          <div className="max-h-[420px] overflow-auto">
+            <table className="min-w-full text-sm">
+              <thead className="sticky top-0 bg-slate-50 text-left text-xs text-slate-500">
+                <tr>
+                  <th className="px-4 py-2 font-medium">日期</th>
+                  <th className="px-4 py-2 font-medium text-right">简历数</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...daily].reverse().map((d) => (
+                  <tr key={d.date} className="border-t border-slate-100 hover:bg-slate-50/80">
+                    <td className="px-4 py-2 text-slate-800">{d.date}</td>
+                    <td className="px-4 py-2 text-right font-medium tabular-nums text-slate-900">{d.count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  )
 }
 
 function defaultReportDateRange(): { from: string; to: string } {
