@@ -1082,6 +1082,19 @@ export default function InterviewPage() {
   })
 
   const current = questions[index]
+  const isFollowUp = current?.type === 'follow_up'
+  const mainQuestionCount = useMemo(
+    () => questions.filter((q) => q.type !== 'follow_up').length,
+    [questions]
+  )
+  const currentMainOrdinal = useMemo(
+    () => questions.slice(0, index + 1).filter((q) => q.type !== 'follow_up').length,
+    [questions, index]
+  )
+  const parentQuestion = useMemo(() => {
+    if (!current?.parentQuestionId) return null
+    return questions.find((q) => q.id === current.parentQuestionId) ?? null
+  }, [current, questions])
   const isLast = questions.length > 0 && index === questions.length - 1
   const composedAnswer = useMemo(
     () => (transcriptFinalized.join('') + transcriptStreaming).trim(),
@@ -1166,6 +1179,7 @@ export default function InterviewPage() {
       ummAvatarActivatedRef.current = false
       setDigitalHumanMode('idle')
       pendingTtsAfterStopRef.current = followUp.text
+      setCallStatusLine('面试官有一则追问，请听题后补充作答')
       setIndex(nextIdx)
       void startWechatSiTranscribe(sessionId, true)
       return
@@ -1326,9 +1340,15 @@ export default function InterviewPage() {
         <View className='interview-job-block'>
           <Text className='call-status-line'>{callStatusLine}</Text>
           <Text className='job-title'>{job?.title || '岗位面试'}</Text>
-          <Text className='progress'>
-            第 {questions.length ? Math.min(index + 1, questions.length) : 0} 题 / 共 {questions.length || '--'} 题
-          </Text>
+          {isFollowUp ? (
+            <Text className='progress progress--follow-up'>
+              追问 · 第 {currentMainOrdinal || 1} 题的补充说明
+            </Text>
+          ) : (
+            <Text className='progress'>
+              第 {currentMainOrdinal || 0} 题 / 共 {mainQuestionCount || '--'} 题
+            </Text>
+          )}
           {initError ? (
             <View className='init-error-box'>
               <Text className='init-error-text'>{initError}</Text>
@@ -1340,7 +1360,23 @@ export default function InterviewPage() {
         </View>
         {cameraError ? <Text className='camera-error-text'>{cameraError}</Text> : null}
         <View className='question-box'>
-          <Text className='question-text'>{current?.text || (questions.length ? '题目索引异常' : '正在加载题目…')}</Text>
+          {isFollowUp ? (
+            <View className='follow-up-notice'>
+              <View className='follow-up-notice-head'>
+                <Text className='follow-up-badge'>追问</Text>
+                <Text className='follow-up-hint'>面试官希望进一步了解您刚才的回答</Text>
+              </View>
+              {parentQuestion?.text ? (
+                <View className='follow-up-parent'>
+                  <Text className='follow-up-parent-label'>刚才的问题</Text>
+                  <Text className='follow-up-parent-text'>{parentQuestion.text}</Text>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
+          <Text className={`question-text${isFollowUp ? ' question-text--follow-up' : ''}`}>
+            {current?.text || (questions.length ? '题目索引异常' : '正在加载题目…')}
+          </Text>
           <View className='answer-box'>
             <Text className='answer-label'>实时转写回答</Text>
             <View className='transcript-composer'>
@@ -1369,7 +1405,7 @@ export default function InterviewPage() {
           disabled={!canNext || loading || !current}
           onClick={() => void handleNext()}
         >
-          {isLast ? '提交面试' : '下一题'}
+          {isLast ? '提交面试' : isFollowUp ? '完成追问，继续' : '下一题'}
         </Button>
         <Text className='transcript-tip'>本服务为AI生成内容，结果仅供参考</Text>
       </View>
