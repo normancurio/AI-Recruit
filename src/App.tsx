@@ -8262,20 +8262,68 @@ const RESUME_UPLOAD_MAX_BATCH = 30;
 const RESUME_UPLOAD_CONCURRENCY = 3;
 
 function isAllowedResumeUploadFile(file: File): boolean {
-  const name = String(file.name || '').toLowerCase();
-  if (/\.(pdf|docx|txt|png|jpe?g|webp)$/i.test(name)) return true;
+  const name = String(file.name || '').trim().toLowerCase();
+  if (/\.(pdf|docx?|txt|png|jpe?g|webp)$/i.test(name)) return true;
   const type = String(file.type || '').toLowerCase();
-  return (
+  if (
     type === 'application/pdf' ||
+    type === 'application/x-pdf' ||
     type === 'text/plain' ||
+    type === 'application/msword' ||
     type.includes('wordprocessingml') ||
     type.startsWith('image/')
-  );
+  ) {
+    return true;
+  }
+  // 部分系统/网盘导出的 PDF 无 MIME 或标记为 octet-stream，靠扩展名放行
+  if ((type === '' || type === 'application/octet-stream') && /\.(pdf|docx?)$/i.test(name)) {
+    return true;
+  }
+  return false;
 }
 
-function collectResumeUploadFiles(fileList: FileList | File[] | null | undefined): File[] {
+async function sniffResumeUploadPdf(file: File): Promise<boolean> {
+  if (!file || file.size <= 0) return false;
+  try {
+    const buf = await file.slice(0, 4).arrayBuffer();
+    const sig = String.fromCharCode(...new Uint8Array(buf));
+    return sig === '%PDF';
+  } catch {
+    return false;
+  }
+}
+
+async function resolveResumeUploadFiles(
+  fileList: FileList | File[] | null | undefined
+): Promise<File[]> {
+  const raw = snapshotResumeUploadRawFiles(fileList);
+  if (!raw.length) return [];
+  const allowed = raw.filter(isAllowedResumeUploadFile);
+  if (allowed.length) return allowed;
+  const sniffed: File[] = [];
+  for (const file of raw) {
+    if (await sniffResumeUploadPdf(file)) sniffed.push(file);
+  }
+  return sniffed;
+}
+
+/** 同步拷贝 FileList：input.value 清空后部分浏览器会使原 FileList 变空 */
+function snapshotResumeUploadRawFiles(fileList: FileList | File[] | null | undefined): File[] {
   if (!fileList) return [];
-  return Array.from(fileList).filter(isAllowedResumeUploadFile);
+  return Array.from(fileList);
+}
+
+function collectResumeUploadFilesFromDataTransfer(dataTransfer: DataTransfer | null | undefined): File[] {
+  if (!dataTransfer) return [];
+  const fromFiles = Array.from(dataTransfer.files || []);
+  if (fromFiles.length) return fromFiles;
+  const fromItems: File[] = [];
+  for (const item of Array.from(dataTransfer.items || [])) {
+    if (item.kind !== 'file') continue;
+    const f = item.getAsFile();
+    if (f) fromItems.push(f);
+  }
+  return fromItems;
 }
 
 function ResumeScreeningView({
@@ -9201,7 +9249,7 @@ function ResumeScreeningView({
 
   const runUploadFiles = useCallback(
     async (rawFiles: FileList | File[] | null | undefined) => {
-      const files = collectResumeUploadFiles(rawFiles);
+      const files = await resolveResumeUploadFiles(rawFiles);
       if (!files.length) {
         setUploadHint('未识别到可上传的文件，请选择 PDF、DOCX、TXT 或图片');
         return;
@@ -10245,12 +10293,12 @@ function ResumeScreeningView({
                   ref={fileInputModalRef}
                   type="file"
                   multiple
-                  accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.webp,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*"
+                  accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.webp,application/pdf,application/msword,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*"
                   className="hidden"
                   onChange={(e) => {
-                    const list = e.target.files;
+                    const files = snapshotResumeUploadRawFiles(e.target.files);
                     e.target.value = '';
-                    void runUploadFiles(list);
+                    void runUploadFiles(files);
                   }}
                 />
                 <div
@@ -10270,7 +10318,8 @@ function ResumeScreeningView({
                     e.preventDefault();
                     e.stopPropagation();
                     if (uploading) return;
-                    void runUploadFiles(e.dataTransfer.files);
+                    const dropped = collectResumeUploadFilesFromDataTransfer(e.dataTransfer);
+                    void runUploadFiles(snapshotResumeUploadRawFiles(dropped.length ? dropped : e.dataTransfer.files));
                   }}
                   className={`flex min-h-[280px] flex-1 flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 px-4 py-8 text-center transition-colors group ${
                     uploading
