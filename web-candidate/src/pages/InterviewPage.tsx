@@ -105,7 +105,7 @@ export default function InterviewPage() {
     async (parent: InterviewQuestion, answer: string) => {
       const cfg = followUpConfigRef.current
       if (!cfg.enabled || !sessionId || parent.type === 'follow_up') return null
-      if (followUpCountRef.current >= cfg.maxPerInterview) return null
+      if (!cfg.demoMode && followUpCountRef.current >= cfg.maxPerInterview) return null
       if (followUpParentIdsRef.current.has(parent.id)) return null
       const got = await fetchPreparedFollowUp({
         sessionId,

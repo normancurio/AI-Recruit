@@ -556,6 +556,7 @@ export type InterviewFollowUpConfig = {
   modelWaitMs: number
   shortAnswerThreshold: number
   fallbackEnabled: boolean
+  demoMode?: boolean
   model?: string
   prompt?: string
 }
@@ -566,7 +567,8 @@ export const DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG: InterviewFollowUpConfig = {
   maxPerQuestion: 1,
   modelWaitMs: 700,
   shortAnswerThreshold: 18,
-  fallbackEnabled: true
+  fallbackEnabled: true,
+  demoMode: false
 }
 
 export async function fetchInterviewFollowUpConfig(jobId: string, sessionId?: string): Promise<InterviewFollowUpConfig> {

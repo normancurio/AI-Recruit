@@ -1193,7 +1193,7 @@ export default function InterviewPage() {
       if (!sessionId) return null
       if (parent.type === 'follow_up') return null
       if (cfg.maxPerInterview <= 0 || cfg.maxPerQuestion <= 0) return null
-      if (followUpCountRef.current >= cfg.maxPerInterview) return null
+      if (!cfg.demoMode && followUpCountRef.current >= cfg.maxPerInterview) return null
       if (followUpParentIdsRef.current.has(parent.id)) return null
 
       const mainOrdinal =

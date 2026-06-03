@@ -1225,9 +1225,13 @@ type InterviewFollowUpConfig = {
   modelWaitMs: number
   shortAnswerThreshold: number
   fallbackEnabled: boolean
+  demoMode: boolean
   model: string
   prompt: string
 }
+
+const DEMO_FOLLOW_UP_QUESTION =
+  '可以结合一个具体项目或经历，把刚才说的再展开说明一下吗？'
 
 const DEFAULT_FOLLOW_UP_PROMPT = [
   '你是结构化技术面试里的追问面试官。你的任务不是评价答案是否充分，而是从候选人的回答里继续追深一层，验证真实性、深度和个人贡献。',
@@ -1245,6 +1249,7 @@ const DEFAULT_FOLLOW_UP_CONFIG: InterviewFollowUpConfig = {
   modelWaitMs: 700,
   shortAnswerThreshold: 18,
   fallbackEnabled: true,
+  demoMode: false,
   model: '',
   prompt: DEFAULT_FOLLOW_UP_PROMPT
 }
@@ -1262,6 +1267,7 @@ function sanitizeFollowUpConfig(raw: Partial<InterviewFollowUpConfig> = {}): Int
     shortAnswerThreshold: clampInt(raw.shortAnswerThreshold, DEFAULT_FOLLOW_UP_CONFIG.shortAnswerThreshold, 2, 80),
     fallbackEnabled:
       raw.fallbackEnabled !== undefined ? Boolean(raw.fallbackEnabled) : DEFAULT_FOLLOW_UP_CONFIG.fallbackEnabled,
+    demoMode: raw.demoMode !== undefined ? Boolean(raw.demoMode) : DEFAULT_FOLLOW_UP_CONFIG.demoMode,
     model: String(raw.model || '').trim().slice(0, 80),
     prompt: String(raw.prompt || DEFAULT_FOLLOW_UP_PROMPT).trim().slice(0, 4000) || DEFAULT_FOLLOW_UP_PROMPT
   }
@@ -1275,6 +1281,7 @@ function followUpConfigForJson(config: InterviewFollowUpConfig) {
     modelWaitMs: config.modelWaitMs,
     shortAnswerThreshold: config.shortAnswerThreshold,
     fallbackEnabled: config.fallbackEnabled,
+    demoMode: config.demoMode,
     model: config.model,
     prompt: config.prompt
   }
@@ -1289,6 +1296,10 @@ function followUpConfigFromRow(row: Record<string, unknown> | null | undefined):
     modelWaitMs: Number(row.model_wait_ms),
     shortAnswerThreshold: Number(row.short_answer_threshold),
     fallbackEnabled: Number(row.fallback_enabled) !== 0,
+    demoMode:
+      row.demo_mode != null && row.demo_mode !== undefined
+        ? Number(row.demo_mode) !== 0
+        : DEFAULT_FOLLOW_UP_CONFIG.demoMode,
     model: String(row.model || ''),
     prompt: String(row.prompt || '')
   })
@@ -1298,7 +1309,7 @@ async function loadSystemFollowUpConfig(): Promise<InterviewFollowUpConfig> {
   try {
     const [rows] = await mysqlPool.query<any[]>(
       `SELECT enabled, max_per_interview, max_per_question, model_wait_ms,
-              short_answer_threshold, fallback_enabled, model, prompt
+              short_answer_threshold, fallback_enabled, demo_mode, model, prompt
        FROM interview_followup_settings WHERE id=1 LIMIT 1`
     )
     return followUpConfigFromRow(rows[0])
@@ -1307,13 +1318,18 @@ async function loadSystemFollowUpConfig(): Promise<InterviewFollowUpConfig> {
   }
 }
 
+async function overlaySystemDemoMode(config: InterviewFollowUpConfig): Promise<InterviewFollowUpConfig> {
+  const system = await loadSystemFollowUpConfig()
+  return { ...config, demoMode: system.demoMode }
+}
+
 async function saveSystemFollowUpConfig(raw: unknown): Promise<InterviewFollowUpConfig> {
   const config = sanitizeFollowUpConfig((raw || {}) as Partial<InterviewFollowUpConfig>)
   await mysqlPool.query(
     `INSERT INTO interview_followup_settings
        (id, enabled, max_per_interview, max_per_question, model_wait_ms,
-        short_answer_threshold, fallback_enabled, model, prompt)
-     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+        short_answer_threshold, fallback_enabled, demo_mode, model, prompt)
+     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON DUPLICATE KEY UPDATE
        enabled=VALUES(enabled),
        max_per_interview=VALUES(max_per_interview),
@@ -1321,6 +1337,7 @@ async function saveSystemFollowUpConfig(raw: unknown): Promise<InterviewFollowUp
        model_wait_ms=VALUES(model_wait_ms),
        short_answer_threshold=VALUES(short_answer_threshold),
        fallback_enabled=VALUES(fallback_enabled),
+       demo_mode=VALUES(demo_mode),
        model=VALUES(model),
        prompt=VALUES(prompt)`,
     [
@@ -1330,6 +1347,7 @@ async function saveSystemFollowUpConfig(raw: unknown): Promise<InterviewFollowUp
       config.modelWaitMs,
       config.shortAnswerThreshold,
       config.fallbackEnabled ? 1 : 0,
+      config.demoMode ? 1 : 0,
       config.model || null,
       config.prompt
     ]
@@ -1339,7 +1357,7 @@ async function saveSystemFollowUpConfig(raw: unknown): Promise<InterviewFollowUp
 
 async function loadFollowUpConfigByJobCode(jobCode: string): Promise<InterviewFollowUpConfig> {
   const jc = String(jobCode || '').trim().toUpperCase()
-  if (!jc) return loadSystemFollowUpConfig()
+  if (!jc) return await loadSystemFollowUpConfig()
   try {
     const [rows] = await mysqlPool.query<any[]>(
       `SELECT enabled, max_per_interview, max_per_question, model_wait_ms,
@@ -1347,15 +1365,17 @@ async function loadFollowUpConfigByJobCode(jobCode: string): Promise<InterviewFo
        FROM interview_followup_configs WHERE job_code=? LIMIT 1`,
       [jc]
     )
-    return rows.length ? followUpConfigFromRow(rows[0]) : loadSystemFollowUpConfig()
+    return rows.length
+      ? await overlaySystemDemoMode(followUpConfigFromRow(rows[0]))
+      : await loadSystemFollowUpConfig()
   } catch {
-    return loadSystemFollowUpConfig()
+    return await loadSystemFollowUpConfig()
   }
 }
 
 async function loadFollowUpConfigBySessionId(sessionId: string): Promise<InterviewFollowUpConfig> {
   const sid = String(sessionId || '').trim()
-  if (!sid) return loadSystemFollowUpConfig()
+  if (!sid) return await loadSystemFollowUpConfig()
   try {
     const [rows] = await mysqlPool.query<any[]>(
       `SELECT s.invitation_id, j.job_code
@@ -1365,10 +1385,10 @@ async function loadFollowUpConfigBySessionId(sessionId: string): Promise<Intervi
       [sid]
     )
     const inviteConfig = await loadFollowUpConfigByInvitationId(rows[0]?.invitation_id)
-    if (inviteConfig) return inviteConfig
-    return loadSystemFollowUpConfig()
+    if (inviteConfig) return await overlaySystemDemoMode(inviteConfig)
+    return await loadSystemFollowUpConfig()
   } catch {
-    return loadSystemFollowUpConfig()
+    return await loadSystemFollowUpConfig()
   }
 }
 
@@ -1527,9 +1547,15 @@ function buildInstantFollowUpQuestion(parentQuestion: string, answer: string): s
   return '你刚才提到的这段经历，最关键的处理细节是什么？'
 }
 
+function buildDemoFollowUpQuestion(parentQuestion: string, answer: string): string {
+  const instant = buildInstantFollowUpQuestion(parentQuestion, answer)
+  return instant || DEMO_FOLLOW_UP_QUESTION
+}
+
 function shouldPrepareFollowUp(answer: string, question: string, config: InterviewFollowUpConfig) {
   if (!config.enabled || config.maxPerInterview <= 0 || config.maxPerQuestion <= 0) return false
   const a = String(answer || '').replace(/\s+/g, '')
+  if (config.demoMode) return a.length >= 2
   const q = String(question || '').replace(/\s+/g, '')
   if (a.length < config.shortAnswerThreshold || a.length > 1600) return false
   if (q && (a.includes(q) || q.includes(a))) return false
@@ -1553,6 +1579,19 @@ async function prepareInterviewFollowUp(params: {
   const key = followUpCacheKey(sessionId, questionId)
   const existing = followUpCache.get(key)
   if (existing?.status === 'pending' || existing?.status === 'ready') return
+
+  if (config.demoMode) {
+    const followUp = buildDemoFollowUpQuestion(question, answer)
+    followUpCache.set(key, {
+      status: 'ready',
+      question: followUp,
+      parentQuestion: question,
+      answer,
+      updatedAt: Date.now()
+    })
+    return
+  }
+
   followUpCache.set(key, { status: 'pending', parentQuestion: question, answer, updatedAt: Date.now() })
 
   try {
@@ -11780,6 +11819,20 @@ app.get('/api/live/session/follow-up', async (req, res) => {
       await sleepMs(120)
       value = followUpCache.get(key)
     }
+    if (config.demoMode) {
+      const demoText = buildDemoFollowUpQuestion(value?.parentQuestion || '', value?.answer || '')
+      return res.json({
+        data: {
+          status: 'ready',
+          question: {
+            id: `FU-${questionId}-demo`,
+            text: demoText,
+            type: 'follow_up',
+            parentQuestionId: questionId
+          }
+        }
+      })
+    }
     if (!value) return res.json({ data: { status: 'none' } })
     if (value.status === 'ready' && value.question) {
       return res.json({
@@ -11856,7 +11909,12 @@ app.post('/api/live/session/qa', async (req, res) => {
       [sid, payload]
     )
     if (questionId && question && answer) {
-      void prepareInterviewFollowUp({ sessionId, questionId, question, answer })
+      const config = await loadFollowUpConfigBySessionId(sessionId)
+      if (config.demoMode) {
+        await prepareInterviewFollowUp({ sessionId, questionId, question, answer })
+      } else {
+        void prepareInterviewFollowUp({ sessionId, questionId, question, answer })
+      }
     }
     res.json({ ok: true })
   } catch (e) {

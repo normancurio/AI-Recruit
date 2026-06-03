@@ -411,6 +411,7 @@ type InterviewFollowUpConfig = {
   modelWaitMs: number;
   shortAnswerThreshold: number;
   fallbackEnabled: boolean;
+  demoMode: boolean;
   model?: string;
   prompt?: string;
 };
@@ -431,6 +432,7 @@ const DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG: InterviewFollowUpConfig = {
   modelWaitMs: 700,
   shortAnswerThreshold: 18,
   fallbackEnabled: true,
+  demoMode: false,
   model: '',
   prompt: DEFAULT_INTERVIEW_FOLLOW_UP_PROMPT
 };
@@ -455,6 +457,8 @@ function normalizeInterviewFollowUpConfig(raw?: Partial<InterviewFollowUpConfig>
       raw?.fallbackEnabled !== undefined
         ? Boolean(raw.fallbackEnabled)
         : DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.fallbackEnabled,
+    demoMode:
+      raw?.demoMode !== undefined ? Boolean(raw.demoMode) : DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.demoMode,
     model: String(raw?.model || '').trim(),
     prompt: String(raw?.prompt || DEFAULT_INTERVIEW_FOLLOW_UP_PROMPT).trim() || DEFAULT_INTERVIEW_FOLLOW_UP_PROMPT
   };
@@ -13704,6 +13708,21 @@ function SystemAiInterviewSettingsView() {
                       模型未就绪时使用兜底追问
                       <span className="mt-1 block text-xs font-normal leading-relaxed text-slate-500">
                         兜底会基于候选人回答提取关键词，避免等待过久导致面试卡顿。
+                      </span>
+                    </span>
+                  </label>
+                  <label className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-medium text-amber-950">
+                    <input
+                      type="checkbox"
+                      checked={config.demoMode}
+                      disabled={saving || !config.enabled}
+                      onChange={(e) => updateConfig({ demoMode: e.target.checked })}
+                      className="mt-0.5 rounded border-amber-300"
+                    />
+                    <span>
+                      演示模式 · 每道主题必出追问
+                      <span className="mt-1 block text-xs font-normal leading-relaxed text-amber-800">
+                        开启后跳过 AI 判定，候选人每答完一道主题题（≥2 字）都会插入追问。演示结束后请关闭。
                       </span>
                     </span>
                   </label>
