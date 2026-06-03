@@ -11400,6 +11400,26 @@ function ResumeVolumeStatsView() {
 
   const maxCount = useMemo(() => Math.max(1, ...daily.map((d) => d.count)), [daily])
   const labelStep = daily.length <= 14 ? 1 : daily.length <= 45 ? 3 : 7
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null)
+
+  const lineChart = useMemo(() => {
+    if (!daily.length) return null
+    const chartW = Math.max(640, daily.length * 18)
+    const chartH = 240
+    const pad = { top: 20, right: 20, bottom: 32, left: 40 }
+    const innerW = chartW - pad.left - pad.right
+    const innerH = chartH - pad.top - pad.bottom
+    const yTicks = [0, Math.round(maxCount / 2), maxCount]
+    const points = daily.map((d, i) => {
+      const x =
+        pad.left + (daily.length <= 1 ? innerW / 2 : (i / Math.max(daily.length - 1, 1)) * innerW)
+      const y = pad.top + innerH - (d.count / maxCount) * innerH
+      return { x, y, ...d }
+    })
+    const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ')
+    const areaPath = `${linePath} L ${points[points.length - 1]!.x.toFixed(1)} ${(pad.top + innerH).toFixed(1)} L ${points[0]!.x.toFixed(1)} ${(pad.top + innerH).toFixed(1)} Z`
+    return { chartW, chartH, pad, innerH, yTicks, points, linePath, areaPath }
+  }, [daily, maxCount])
 
   const exportCsv = () => {
     const lines = daily.map((d) => `${d.date},${d.count}`)
@@ -11503,39 +11523,100 @@ function ResumeVolumeStatsView() {
           </div>
         ) : daily.length === 0 ? (
           <div className="py-20 text-center text-sm text-slate-500">所选条件下暂无数据</div>
-        ) : (
+        ) : lineChart ? (
           <div className="overflow-x-auto pb-2">
-            <div className="min-w-[640px]">
-              <div className="flex h-52 items-end gap-1 border-b border-slate-200 pb-1">
-                {daily.map((d) => (
-                  <div
-                    key={d.date}
-                    className="group relative flex min-w-[10px] flex-1 flex-col items-center justify-end"
-                    title={`${d.date}：${d.count} 份`}
-                  >
-                    <div className="pointer-events-none absolute -top-7 z-10 hidden rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-white group-hover:block">
-                      {d.count}
-                    </div>
-                    <div
-                      className="w-full max-w-[28px] rounded-t bg-indigo-500 transition hover:bg-indigo-600"
-                      style={{
-                        height: `${Math.max(d.count > 0 ? 4 : 0, (d.count / maxCount) * 100)}%`
-                      }}
+            <svg
+              viewBox={`0 0 ${lineChart.chartW} ${lineChart.chartH}`}
+              className="min-w-full"
+              style={{ minWidth: lineChart.chartW, height: lineChart.chartH }}
+              role="img"
+              aria-label="简历上传每日趋势折线图"
+            >
+              <defs>
+                <linearGradient id="resumeVolumeArea" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#6366f1" stopOpacity="0.22" />
+                  <stop offset="100%" stopColor="#6366f1" stopOpacity="0.02" />
+                </linearGradient>
+              </defs>
+              {lineChart.yTicks.map((tick) => {
+                const y = lineChart.pad.top + lineChart.innerH - (tick / maxCount) * lineChart.innerH
+                return (
+                  <g key={tick}>
+                    <line
+                      x1={lineChart.pad.left}
+                      y1={y}
+                      x2={lineChart.chartW - lineChart.pad.right}
+                      y2={y}
+                      stroke="#e2e8f0"
+                      strokeDasharray="4 4"
                     />
-                  </div>
-                ))}
-              </div>
-              <div className="mt-2 flex gap-1">
-                {daily.map((d, i) => (
-                  <div key={`${d.date}-label`} className="min-w-[10px] flex-1 text-center">
-                    {i % labelStep === 0 || i === daily.length - 1 ? (
-                      <span className="text-[10px] text-slate-400">{d.date.slice(5)}</span>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-            </div>
+                    <text x={lineChart.pad.left - 8} y={y + 4} textAnchor="end" className="fill-slate-400 text-[10px]">
+                      {tick}
+                    </text>
+                  </g>
+                )
+              })}
+              <path d={lineChart.areaPath} fill="url(#resumeVolumeArea)" />
+              <path
+                d={lineChart.linePath}
+                fill="none"
+                stroke="#4f46e5"
+                strokeWidth="2.5"
+                strokeLinejoin="round"
+                strokeLinecap="round"
+              />
+              {lineChart.points.map((p, i) => (
+                <g key={p.date}>
+                  <circle
+                    cx={p.x}
+                    cy={p.y}
+                    r={hoverIdx === i ? 6 : 4}
+                    fill={hoverIdx === i ? '#4338ca' : '#4f46e5'}
+                    stroke="#fff"
+                    strokeWidth="2"
+                    className="cursor-pointer"
+                    onMouseEnter={() => setHoverIdx(i)}
+                    onMouseLeave={() => setHoverIdx(null)}
+                  />
+                  {hoverIdx === i ? (
+                    <g pointerEvents="none">
+                      <rect
+                        x={Math.min(Math.max(p.x - 42, lineChart.pad.left), lineChart.chartW - 84)}
+                        y={Math.max(p.y - 36, 4)}
+                        width="84"
+                        height="28"
+                        rx="6"
+                        fill="#1e293b"
+                      />
+                      <text
+                        x={Math.min(Math.max(p.x, lineChart.pad.left + 42), lineChart.chartW - lineChart.pad.right)}
+                        y={Math.max(p.y - 24, 16)}
+                        textAnchor="middle"
+                        className="fill-white text-[10px] font-medium"
+                      >
+                        {p.date.slice(5)} · {p.count} 份
+                      </text>
+                    </g>
+                  ) : null}
+                </g>
+              ))}
+              {lineChart.points.map((p, i) =>
+                i % labelStep === 0 || i === lineChart.points.length - 1 ? (
+                  <text
+                    key={`${p.date}-x`}
+                    x={p.x}
+                    y={lineChart.chartH - 8}
+                    textAnchor="middle"
+                    className="fill-slate-400 text-[10px]"
+                  >
+                    {p.date.slice(5)}
+                  </text>
+                ) : null
+              )}
+            </svg>
           </div>
+        ) : (
+          <div className="py-20 text-center text-sm text-slate-500">所选条件下暂无数据</div>
         )}
       </div>
 
