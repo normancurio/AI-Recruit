@@ -8245,17 +8245,17 @@ function ResumeLibraryView({
 }
 
 const RESUME_SCREENING_COLUMNS: ColumnSpec[] = [
-  { id: 'check', defaultWidth: 42, minWidth: 38, maxWidth: 56 },
-  { id: 'name', defaultWidth: 112, minWidth: 92, maxWidth: 280 },
-  { id: 'project', defaultWidth: 136, minWidth: 106, maxWidth: 320 },
-  { id: 'phone', defaultWidth: 112, minWidth: 92, maxWidth: 200 },
-  { id: 'job', defaultWidth: 160, minWidth: 126, maxWidth: 360 },
-  { id: 'score', defaultWidth: 72, minWidth: 62, maxWidth: 120 },
-  { id: 'stage', defaultWidth: 112, minWidth: 92, maxWidth: 260 },
-  { id: 'uploader', defaultWidth: 94, minWidth: 78, maxWidth: 200 },
-  { id: 'uploadTime', defaultWidth: 106, minWidth: 92, maxWidth: 190 },
-  { id: 'shenpuResume', defaultWidth: 120, minWidth: 104, maxWidth: 240 },
-  { id: 'actions', defaultWidth: 178, minWidth: 158, maxWidth: 360 }
+  { id: 'check', defaultWidth: 36, minWidth: 34, maxWidth: 52 },
+  { id: 'name', defaultWidth: 96, minWidth: 80, maxWidth: 260 },
+  { id: 'project', defaultWidth: 92, minWidth: 72, maxWidth: 280 },
+  { id: 'phone', defaultWidth: 98, minWidth: 88, maxWidth: 180 },
+  { id: 'job', defaultWidth: 124, minWidth: 100, maxWidth: 340 },
+  { id: 'score', defaultWidth: 56, minWidth: 50, maxWidth: 96 },
+  { id: 'stage', defaultWidth: 88, minWidth: 72, maxWidth: 240 },
+  { id: 'uploader', defaultWidth: 68, minWidth: 56, maxWidth: 160 },
+  { id: 'uploadTime', defaultWidth: 82, minWidth: 76, maxWidth: 160 },
+  { id: 'shenpuResume', defaultWidth: 88, minWidth: 76, maxWidth: 200 },
+  { id: 'actions', defaultWidth: 148, minWidth: 136, maxWidth: 300 }
 ];
 
 const RESUME_UPLOAD_MAX_BATCH = 30;
@@ -8333,7 +8333,7 @@ function ResumeScreeningView({
   currentRole: Role;
   authProfile: AdminLoginProfile | null;
 }) {
-  const cols = useColumnWidths('resume-screening', RESUME_SCREENING_COLUMNS);
+  const cols = useColumnWidths('resume-screening-v2', RESUME_SCREENING_COLUMNS);
   const [resumes, setResumes] = useState<Resume[]>([]);
   const [sessRev, setSessRev] = useState(0);
   useEffect(() => subscribeAdminSession(() => setSessRev((n) => n + 1)), []);
@@ -9735,7 +9735,7 @@ function ResumeScreeningView({
                     <colgroup>{cols.colNodes}</colgroup>
                     <thead className="bg-slate-50/95 text-slate-600 border-b border-slate-200 text-xs sticky top-0 z-10">
                       <tr>
-                        <ResizableTh col={cols.byId.check} className="px-1 py-2.5 text-center" resizable={false}>
+                        <ResizableTh col={cols.byId.check} className="px-0.5 py-2 text-center" resizable={false}>
                           <input
                             type="checkbox"
                             title="全选本页"
@@ -9769,16 +9769,16 @@ function ResumeScreeningView({
                             className="h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                           />
                         </ResizableTh>
-                        <ResizableTh col={cols.byId.name} className="py-2.5 pl-1.5 pr-1 font-medium">候选人</ResizableTh>
-                        <ResizableTh col={cols.byId.project} className="py-2.5 pl-1 pr-1 font-medium">项目</ResizableTh>
-                        <ResizableTh col={cols.byId.phone} className="px-1 py-2.5 font-medium">手机</ResizableTh>
-                        <ResizableTh col={cols.byId.job} className="py-2.5 pl-1 pr-1 font-medium">匹配岗位</ResizableTh>
-                        <ResizableTh col={cols.byId.score} className="py-2.5 pl-0 pr-1 text-center font-medium">匹配分</ResizableTh>
-                        <ResizableTh col={cols.byId.stage} className="px-1.5 py-2.5 font-medium">流程</ResizableTh>
-                        <ResizableTh col={cols.byId.uploader} className="px-1.5 py-2.5 font-medium">上传人</ResizableTh>
-                        <ResizableTh col={cols.byId.uploadTime} className="px-1 py-2.5 font-medium whitespace-nowrap">上传时间</ResizableTh>
-                        <ResizableTh col={cols.byId.shenpuResume} className="px-1.5 py-2.5 font-medium whitespace-nowrap">申朴简历</ResizableTh>
-                        <ResizableTh col={cols.byId.actions} className="border-l border-slate-200 bg-slate-50/95 pl-2 pr-1.5 py-2.5 font-medium text-right whitespace-nowrap">操作</ResizableTh>
+                        <ResizableTh col={cols.byId.name} className="py-2 pl-1 pr-0.5 font-medium">候选人</ResizableTh>
+                        <ResizableTh col={cols.byId.project} className="py-2 pl-0.5 pr-0.5 font-medium">项目</ResizableTh>
+                        <ResizableTh col={cols.byId.phone} className="px-0.5 py-2 font-medium">手机</ResizableTh>
+                        <ResizableTh col={cols.byId.job} className="py-2 pl-0.5 pr-0.5 font-medium">匹配岗位</ResizableTh>
+                        <ResizableTh col={cols.byId.score} className="py-2 pl-0 pr-0.5 text-center font-medium">匹配分</ResizableTh>
+                        <ResizableTh col={cols.byId.stage} className="px-1 py-2 font-medium">流程</ResizableTh>
+                        <ResizableTh col={cols.byId.uploader} className="px-1 py-2 font-medium">上传人</ResizableTh>
+                        <ResizableTh col={cols.byId.uploadTime} className="px-0.5 py-2 font-medium whitespace-nowrap">上传时间</ResizableTh>
+                        <ResizableTh col={cols.byId.shenpuResume} className="px-1 py-2 font-medium whitespace-nowrap">申朴简历</ResizableTh>
+                        <ResizableTh col={cols.byId.actions} className="border-l border-slate-200 bg-slate-50/95 pl-1.5 pr-1 py-2 font-medium text-right whitespace-nowrap">操作</ResizableTh>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -9797,7 +9797,7 @@ function ResumeScreeningView({
                         return (
                           <React.Fragment key={resume.id}>
                             <tr className={`align-middle transition-colors hover:bg-indigo-50/40 ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}`}>
-                              <td className="w-9 px-1 py-2.5 align-middle text-center">
+                              <td className="w-9 px-0.5 py-2 align-middle text-center">
                                 <input
                                   type="checkbox"
                                   disabled={isUploadPlaceholder || isResumeUploading || uploadTaskRowFailed || uploadTaskRowDuplicate}
@@ -9814,9 +9814,9 @@ function ResumeScreeningView({
                                   className="h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                                 />
                               </td>
-                              <td className="max-w-0 py-2.5 pl-1.5 pr-0">
-                                <div className="flex items-start gap-1.5" title={resume.name || ''}>
-                                  <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[11px] font-semibold text-indigo-700">
+                              <td className="max-w-0 py-2 pl-1 pr-0">
+                                <div className="flex items-start gap-1" title={resume.name || ''}>
+                                  <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[10px] font-semibold text-indigo-700">
                                     {String(resume.name || '候').trim().slice(0, 1)}
                                   </span>
                                   <div className="min-w-0 flex-1">
@@ -9829,12 +9829,12 @@ function ResumeScreeningView({
                                   </div>
                                 </div>
                               </td>
-                              <td className="max-w-0 py-2.5 pl-0 pr-1 text-xs text-slate-700">
+                              <td className="max-w-0 py-2 pl-0 pr-0.5 text-xs text-slate-700">
                                 <div className="truncate" title={resume.projectName || ''}>
                                   {resume.projectName || <span className="text-slate-400">—</span>}
                                 </div>
                               </td>
-                              <td className="max-w-0 px-1 py-3 text-xs text-slate-700">
+                              <td className="max-w-0 px-0.5 py-2 text-xs text-slate-700">
                                 {resume.phone ? (
                                   <div className="inline-flex max-w-full items-center gap-1 align-middle">
                                     <span className="min-w-0 truncate font-mono" title={maskedPhone}>
@@ -9843,7 +9843,7 @@ function ResumeScreeningView({
                                     <button
                                       type="button"
                                       onClick={() => void copyResumePhone(rid, resume.phone)}
-                                      className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border transition-colors ${
+                                      className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors ${
                                         phoneCopied
                                           ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
                                           : 'border-slate-200 bg-white text-slate-500 hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700'
@@ -9851,17 +9851,17 @@ function ResumeScreeningView({
                                       title={phoneCopied ? '已复制完整手机号' : '复制完整手机号'}
                                       aria-label={phoneCopied ? '已复制完整手机号' : '复制完整手机号'}
                                     >
-                                      {phoneCopied ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                                      {phoneCopied ? <CheckCircle2 className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
                                     </button>
                                   </div>
                                 ) : (
                                   <span className="text-slate-400">—</span>
                                 )}
                               </td>
-                              <td className="max-w-0 py-3 pl-1 pr-0 text-xs leading-snug text-slate-700">
-                                <div className="line-clamp-3 break-words">{resume.job}</div>
+                              <td className="max-w-0 py-2 pl-0.5 pr-0 text-xs leading-snug text-slate-700">
+                                <div className="line-clamp-2 break-words">{resume.job}</div>
                               </td>
-                              <td className="py-3 pl-0 pr-1 text-center tabular-nums">
+                              <td className="py-2 pl-0 pr-0.5 text-center tabular-nums">
                                 {isResumeUploading || uploadTaskRowFailed || uploadTaskRowDuplicate || isUploadPlaceholder ? (
                                   <div
                                     className={`mx-auto min-w-12 rounded-md px-1.5 py-1 text-[10px] font-semibold ${
@@ -9876,7 +9876,7 @@ function ResumeScreeningView({
                                   </div>
                                 ) : (
                                   <span
-                                    className={`inline-flex min-w-10 justify-center rounded-md px-2 py-1 text-xs font-semibold ${
+                                    className={`inline-flex min-w-9 justify-center rounded px-1.5 py-0.5 text-[11px] font-semibold ${
                                       resume.matchScore >= 80
                                         ? 'bg-emerald-50 text-emerald-700'
                                         : resume.matchScore >= 60
@@ -9888,10 +9888,10 @@ function ResumeScreeningView({
                                   </span>
                                 )}
                               </td>
-                              <td className="max-w-0 px-2 py-3 text-xs">
+                              <td className="max-w-0 px-1 py-2 text-xs">
                                 {resume.flowStage ? (
                                   <span
-                                    className="inline-block max-w-full truncate rounded-md bg-indigo-50 px-1.5 py-0.5 font-medium text-indigo-700"
+                                    className="inline-block max-w-full truncate rounded bg-indigo-50 px-1 py-0.5 text-[11px] font-medium text-indigo-700"
                                     title={resume.flowStage}
                                   >
                                     {resume.flowStage}
@@ -9900,23 +9900,23 @@ function ResumeScreeningView({
                                   <span className="text-slate-400">—</span>
                                 )}
                               </td>
-                              <td className="max-w-0 px-2 py-3 text-sm font-medium text-slate-900">
+                              <td className="max-w-0 px-1 py-2 text-xs font-medium text-slate-900">
                                 <div className="truncate" title={uploaderLabel}>
                                   {uploaderLabel}
                                 </div>
                               </td>
-                              <td className="w-[5.75rem] min-w-[5.75rem] max-w-[5.75rem] shrink-0 px-1 py-3 text-xs tabular-nums text-slate-500">
+                              <td className="max-w-0 px-0.5 py-2 text-xs tabular-nums text-slate-500">
                                 <span
-                                  className="block whitespace-nowrap font-mono text-[11px] tracking-tight"
+                                  className="block truncate whitespace-nowrap font-mono text-[11px] tracking-tight"
                                   title={resume.uploadTimeFull || resume.uploadTime}
                                 >
                                   {resume.uploadTime}
                                 </span>
                               </td>
-                              <td className="px-2 py-3 text-xs">
+                              <td className="max-w-0 px-1 py-2 text-xs">
                                 {resume.uploadTaskStatus ? (
                                   <span
-                                    className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 font-medium text-slate-500"
+                                    className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-medium text-slate-500"
                                     title="原始简历处理完成后可生成申朴简历"
                                   >
                                     未生成
@@ -9927,17 +9927,17 @@ function ResumeScreeningView({
                                       type="button"
                                       disabled={fileBusyId === resume.id}
                                       onClick={() => void downloadShenpuResume(resume)}
-                                      className="inline-flex items-center gap-1.5 rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 font-semibold text-blue-700 shadow-sm transition hover:border-blue-300 hover:bg-blue-100 disabled:opacity-60"
+                                      className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-700 shadow-sm transition hover:border-blue-300 hover:bg-blue-100 disabled:opacity-60"
                                       title="下载申朴简历"
                                     >
-                                      <Download className="h-3.5 w-3.5" aria-hidden />
-                                      可下载
+                                      <Download className="h-3 w-3" aria-hidden />
+                                      下载
                                     </button>
                                     <button
                                       type="button"
                                       disabled={fileBusyId === resume.id}
                                       onClick={() => void generateShenpuResume(resume)}
-                                      className="inline-flex items-center rounded-full border border-slate-200 bg-white px-1.5 py-1 text-slate-500 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-60"
+                                      className="inline-flex items-center rounded-full border border-slate-200 bg-white px-1 py-0.5 text-slate-500 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-60"
                                       title="重新生成申朴简历（覆盖现有文件）"
                                       aria-label="重新生成申朴简历"
                                     >
@@ -9979,20 +9979,20 @@ function ResumeScreeningView({
                                     type="button"
                                     disabled={fileBusyId === resume.id}
                                     onClick={() => void generateShenpuResume(resume)}
-                                    className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 font-semibold text-emerald-700 shadow-sm transition hover:border-emerald-300 hover:bg-emerald-100 disabled:opacity-60"
+                                    className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 shadow-sm transition hover:border-emerald-300 hover:bg-emerald-100 disabled:opacity-60"
                                     title="点击异步生成申朴标准简历"
                                   >
-                                    <Sparkles className="h-3.5 w-3.5" aria-hidden />
+                                    <Sparkles className="h-3 w-3" aria-hidden />
                                     生成
                                   </button>
                                 )}
                               </td>
                               <td
-                                className={`w-[10.75rem] min-w-[10.75rem] max-w-none shrink-0 border-l border-slate-200 py-2 pl-2 pr-1.5 text-right align-middle whitespace-nowrap ${
+                                className={`max-w-0 border-l border-slate-200 py-1.5 pl-1 pr-0.5 text-right align-middle whitespace-nowrap ${
                                   idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/90'
                                 }`}
                               >
-                                <div className="inline-flex flex-nowrap items-center justify-end gap-0.5">
+                                <div className="inline-flex flex-nowrap items-center justify-end gap-px">
                                   {isResumeUploading || uploadTaskRowFailed || uploadTaskRowDuplicate || isUploadPlaceholder ? (
                                     <div
                                       className={`min-w-[10rem] rounded-lg border px-2 py-1.5 text-left ${
@@ -10047,30 +10047,30 @@ function ResumeScreeningView({
                                       <button
                                         type="button"
                                         onClick={() => setReportResume(resume)}
-                                        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-400/35"
+                                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-400/35"
                                         title="查看报告"
                                         aria-label="查看报告"
                                       >
-                                        <FileBarChart className="h-3.5 w-3.5" aria-hidden />
+                                        <FileBarChart className="h-3 w-3" aria-hidden />
                                       </button>
                                       <button
                                         type="button"
                                         onClick={() => setProfileEditResume(resume)}
-                                        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-400/35"
+                                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-400/35"
                                         title="简历详情"
                                         aria-label="简历详情"
                                       >
-                                        <UserPen className="h-3.5 w-3.5" aria-hidden />
+                                        <UserPen className="h-3 w-3" aria-hidden />
                                       </button>
                                       <button
                                         type="button"
                                         onClick={() => handleInviteFromResume(resume)}
                                         disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
-                                        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-40"
+                                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-40"
                                         title="发起面试"
                                         aria-label="发起面试"
                                       >
-                                        <CalendarCheck className="h-3.5 w-3.5" aria-hidden />
+                                        <CalendarCheck className="h-3 w-3" aria-hidden />
                                       </button>
                                       {resume.hasOriginalFile ? (
                                         <>
@@ -10078,21 +10078,21 @@ function ResumeScreeningView({
                                         type="button"
                                         disabled={fileBusyId === resume.id}
                                         onClick={() => void openResumeOriginalFile(resume, 'preview')}
-                                        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300/60 disabled:opacity-50"
+                                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300/60 disabled:opacity-50"
                                         title="预览原件"
                                         aria-label="预览原件"
                                       >
-                                        <Eye className="h-3.5 w-3.5" aria-hidden />
+                                        <Eye className="h-3 w-3" aria-hidden />
                                       </button>
                                       <button
                                         type="button"
                                         disabled={fileBusyId === resume.id}
                                         onClick={() => void openResumeOriginalFile(resume, 'download')}
-                                        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300/60 disabled:opacity-50"
+                                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300/60 disabled:opacity-50"
                                         title="下载原件"
                                         aria-label="下载原件"
                                       >
-                                        <Download className="h-3.5 w-3.5" aria-hidden />
+                                        <Download className="h-3 w-3" aria-hidden />
                                       </button>
                                         </>
                                       ) : null}
