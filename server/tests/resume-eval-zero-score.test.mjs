@@ -10,7 +10,8 @@ test('parse uses server job type and retries suspicious zero scores', () => {
   assert.match(serverSource, /normalizeResumeEvalDimensionsForJobType/)
   assert.match(serverSource, /ensureDimensionEvidenceMinimum/)
   assert.match(serverSource, /job_type: jobType/)
-  assert.match(serverSource, /parseResumeEvalToScreeningResult\(text, params\.resumeText, \{/)
+  assert.match(serverSource, /const jobCtx = \{/)
+  assert.match(serverSource, /parseResumeEvalToScreeningResult\(text, params\.resumeText, jobCtx/)
 })
 
 test('total score trusts dimension average when model returns zero total', () => {

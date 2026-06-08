@@ -2433,7 +2433,8 @@ function backfillEmptyDimensionEvidence(
 function parseResumeEvalToScreeningResult(
   raw: string,
   resumePlain?: string,
-  jobContext?: { jobTitle: string; department: string; jdText: string }
+  jobContext?: { jobTitle: string; department: string; jdText: string },
+  options?: { acceptWeak?: boolean }
 ): ResumeScreeningAiResult | null {
   try {
     const cleaned = String(raw || '')
@@ -2473,7 +2474,12 @@ function parseResumeEvalToScreeningResult(
         jobType
       })
     ) {
-      return null
+      if (!options?.acceptWeak) return null
+      const summaryRaw = String(parsed.summary || '').trim()
+      const hasSummary = summaryRaw.length >= 8
+      const hasSignal =
+        totalScore > 0 || Object.values(dimCapped).some((v) => Number(v?.score) > 0)
+      if (!hasSummary || !hasSignal) return null
     }
     const sanitizedProfile = sanitizeCandidateProfile(
       (parsed as { candidate_profile?: unknown }).candidate_profile
@@ -3548,7 +3554,7 @@ async function extractResumePlainText(buffer: Buffer, originalname: string, mime
 function resumeAiMaxAttempts(): number {
   const n = Number(process.env.RESUME_AI_MAX_ATTEMPTS)
   if (Number.isFinite(n) && n >= 1) return Math.min(5, Math.floor(n))
-  return 2
+  return 3
 }
 
 function resumeAiTimeoutMs(): number {
@@ -3613,21 +3619,30 @@ async function runResumeScreeningWithAi(params: {
     reqBody.response_format = { type: 'json_object' }
   }
 
+  let bestWeak: ResumeScreeningAiResult | null = null
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const data = await dashScopeChatCompletions(reqBody, { timeoutMs: resumeAiTimeoutMs() })
       const raw = data?.choices?.[0]?.message?.content
       const text = typeof raw === 'string' ? raw : ''
-      const next = parseResumeEvalToScreeningResult(text, params.resumeText, {
+      const jobCtx = {
         jobTitle: params.jobTitle,
         department: params.department,
         jdText: params.jdText
+      }
+      const next = parseResumeEvalToScreeningResult(text, params.resumeText, jobCtx, {
+        acceptWeak: attempt === maxAttempts
       })
       if (next) {
         if (attempt > 1 && flowLogEnabled) {
           flowLog('resume-screen', true, `简历 AI 评估成功（第 ${attempt} 次调用）`)
         }
         return next
+      }
+      const weak = parseResumeEvalToScreeningResult(text, params.resumeText, jobCtx, { acceptWeak: true })
+      if (weak && (!bestWeak || weak.matchScore > bestWeak.matchScore)) {
+        bestWeak = weak
       }
       const parsed = parseResumeScreeningAiJson(text)
       if (parsed) {
@@ -3646,7 +3661,7 @@ async function runResumeScreeningWithAi(params: {
         await sleepMs(delayMs)
         continue
       }
-      return null
+      return bestWeak
     } catch (e: unknown) {
       if (attempt >= maxAttempts || !isRetryableResumeAiError(e)) {
         throw e

@@ -10,15 +10,24 @@ export type BuildResumeEvalPromptInput = {
 }
 
 const RISK_JOB_RE = /风控|反欺诈|信用|催收|合规|授信|风险/
+const RISK_OPS_TITLE_RE = /风控|反欺诈|信用|催收|合规|授信|风险运营|策略运营/
+/** 岗位名称已明确为测试/研发时，JD 里「事前风控」等产品模块名不算风控运营岗 */
+const ENGINEERING_JOB_TITLE_RE =
+  /测试(?:工程师|开发|员|岗)?|软件测试|研发|开发工程师|后端|前端|全栈|QA|质量保障|test engineer/i
+
+export function detectResumeEvalJobType(jobTitle: string, department: string, jdText: string): ResumeEvalJobType {
+  const title = String(jobTitle || '').trim()
+  const blob = `${title} ${department} ${jdText}`
+  if (ENGINEERING_JOB_TITLE_RE.test(title) && !RISK_OPS_TITLE_RE.test(title)) {
+    return 'engineering'
+  }
+  return RISK_JOB_RE.test(blob) ? 'risk_ops' : 'engineering'
+}
+
 const DATA_JOB_RE = /数据开发|数据工程|大数据|数仓|ETL|BI|数据分析|数据库开发|数据平台|数据治理|数据实施|hive|spark|kettle|doris|flink/i
 const FRONTEND_RE = /前端|web前端|h5|react|vue|angular|小程序/i
 const FULLSTACK_RE = /全栈|full[\s-]?stack/i
 const CLIENT_RE = /客户端|android|ios|移动端|flutter|react native/i
-
-export function detectResumeEvalJobType(jobTitle: string, department: string, jdText: string): ResumeEvalJobType {
-  const blob = `${jobTitle} ${department} ${jdText}`
-  return RISK_JOB_RE.test(blob) ? 'risk_ops' : 'engineering'
-}
 
 export function detectResumeEvalTechDirection(jobTitle: string, jdText: string): ResumeEvalTechDirection {
   const blob = `${jobTitle} ${jdText}`
