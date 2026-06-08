@@ -61,7 +61,7 @@ function extractExcerptFromEvidence(evidence: string): string {
   return (m?.[1] || s).trim()
 }
 
-/** 维度 evidence 中的「摘录」是否能在简历正文找到支撑 */
+/** 维度 evidence 中的「摘录」是否能在简历正文找到支撑（OCR/空格差异时做宽松匹配） */
 export function evidenceSupportedByResume(evidence: string, resumePlain: string): boolean {
   const resume = normalizeResumeMatchText(resumePlain)
   if (!resume) return true
@@ -70,7 +70,16 @@ export function evidenceSupportedByResume(evidence: string, resumePlain: string)
   if (norm.length < 4) return true
   if (resume.includes(norm)) return true
   const probe = norm.slice(0, Math.min(16, norm.length))
-  return probe.length >= 4 && resume.includes(probe)
+  if (probe.length >= 4 && resume.includes(probe)) return true
+  if (norm.length >= 8) {
+    const chunks: string[] = []
+    for (let i = 0; i + 1 < norm.length; i += 2) chunks.push(norm.slice(i, i + 2))
+    if (chunks.length >= 4) {
+      const hit = chunks.filter((c) => resume.includes(c)).length
+      if (hit / chunks.length >= 0.55) return true
+    }
+  }
+  return false
 }
 
 export function isSyntheticDimensionEvidence(evidence: string): boolean {
@@ -86,7 +95,9 @@ export function sanitizeDimensionEvidenceList(evidence: string[], resumePlain?: 
   if (!withoutSynthetic.length) return []
   if (!plain) return withoutSynthetic
   const kept = withoutSynthetic.filter((line) => evidenceSupportedByResume(line, plain))
-  return kept.length ? kept : []
+  if (kept.length) return kept
+  // 模型摘录与 OCR 正文略有偏差时保留原文，避免重新评估后维度评语全空
+  return withoutSynthetic.slice(0, 2)
 }
 
 export function sanitizeDimensionScoresEvidence(

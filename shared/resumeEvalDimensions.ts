@@ -102,6 +102,58 @@ export function resolveResumeEvalJobType(params: {
   return params.serverJobType
 }
 
+function mergeDimEntries(
+  a?: ResumeEvalDimEntry,
+  b?: ResumeEvalDimEntry
+): ResumeEvalDimEntry | undefined {
+  if (!a && !b) return undefined
+  const score = Math.max(Number(a?.score) || 0, Number(b?.score) || 0)
+  const evidence = [...(a?.evidence || []), ...(b?.evidence || [])]
+    .map((x) => String(x || '').trim())
+    .filter(Boolean)
+  return {
+    score: clampScore(score),
+    evidence: [...new Set(evidence)].slice(0, 3)
+  }
+}
+
+/** 模型返回了另一套维度键时，映射到当前岗位应有的六维（保留分数与 evidence） */
+export function normalizeResumeEvalDimensionsForJobType(
+  dim: Record<string, ResumeEvalDimEntry>,
+  jobType: ResumeEvalJobType
+): Record<string, ResumeEvalDimEntry> {
+  const inferred = inferResumeEvalJobTypeFromDimensions(dim)
+  if (!inferred || inferred === jobType) return dim
+
+  const common: Array<keyof typeof dim> = ['impact', 'stability_growth', 'education_fit']
+  const out: Record<string, ResumeEvalDimEntry> = {}
+  for (const k of common) {
+    if (dim[k]) out[k] = { ...dim[k], evidence: [...(dim[k].evidence || [])] }
+  }
+
+  if (jobType === 'engineering' && inferred === 'risk_ops') {
+    const tech = mergeDimEntries(dim.tech_fit, mergeDimEntries(dim.risk_fit, dim.data_skill))
+    const depth = mergeDimEntries(dim.engineering_depth, dim.depth)
+    const code = mergeDimEntries(dim.code_quality, dim.data_skill)
+    if (tech) out.tech_fit = tech
+    if (depth) out.engineering_depth = depth
+    if (code) out.code_quality = code
+    return out
+  }
+
+  if (jobType === 'risk_ops' && inferred === 'engineering') {
+    const risk = mergeDimEntries(dim.risk_fit, dim.tech_fit)
+    const depth = mergeDimEntries(dim.depth, dim.engineering_depth)
+    const data = mergeDimEntries(dim.data_skill, mergeDimEntries(dim.code_quality, dim.tech_fit))
+    if (risk) out.risk_fit = risk
+    if (depth) out.depth = depth
+    if (data) out.data_skill = data
+    return out
+  }
+
+  return dim
+}
+
 /** 正文充足但维度体系错误或几乎全 0 → 触发 AI 重试 */
 export function shouldRetryResumeEvalParse(params: {
   dim: Record<string, ResumeEvalDimEntry>
@@ -111,9 +163,6 @@ export function shouldRetryResumeEvalParse(params: {
 }): boolean {
   const plain = String(params.resumePlain || '').trim()
   if (plain.length < 300) return false
-
-  const fromDim = inferResumeEvalJobTypeFromDimensions(params.dim)
-  if (fromDim && fromDim !== params.jobType) return true
 
   const scores = Object.values(params.dim)
     .map((v) => Number(v?.score))

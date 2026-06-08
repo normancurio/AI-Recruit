@@ -6134,12 +6134,23 @@ function resumeDimensionEvidenceText(
 ): string {
   const dim = evaluationJson?.dimension_scores?.[dimKey]
   const ev = typeof dim === 'number' ? undefined : dim?.evidence
-  if (!Array.isArray(ev) || !ev.length) return '暂无评语'
+  const score = typeof dim === 'number' ? dim : Number(dim?.score)
+  if (!Array.isArray(ev) || !ev.length) {
+    if (Number.isFinite(score) && score > 0) {
+      return '模型未逐条摘录依据，请结合简历原文与该维度分数综合判断。'
+    }
+    return '暂无评语'
+  }
   const lines = ev
     .map((x) => String(x || '').trim())
     .filter(Boolean)
     .filter((line) => !/模型未返回该维度证据|请结合简历原文与JD人工复核/.test(line))
-  if (!lines.length) return '暂无评语'
+  if (!lines.length) {
+    if (Number.isFinite(score) && score > 0) {
+      return '模型未逐条摘录依据，请结合简历原文与该维度分数综合判断。'
+    }
+    return '暂无评语'
+  }
   return lines.slice(0, 2).join('；')
 }
 

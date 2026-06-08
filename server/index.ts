@@ -31,6 +31,7 @@ import {
 import {
   applyResumeEvalDimensionCaps,
   mapEvalDimensionsToLegacyScores,
+  normalizeResumeEvalDimensionsForJobType,
   resolveResumeEvalJobType,
   shouldRetryResumeEvalParse,
   weightedResumeEvalDimensionScore
@@ -2293,10 +2294,19 @@ function inferDimensionEvidenceFallback(dimKey: string, plain: string): string[]
     return `证据点：${label}｜摘录：${ex}`
   }
   if (dimKey === 'stability_growth') {
-    const jobs = t.match(/(?:\d{4}\.\d{2}\s*[-–—]\s*(?:\d{4}\.\d{2}|至今))[^\n]{0,48}/g)
+    const jobs =
+      t.match(/(?:\d{4}[\./年-]\d{1,2}\s*[-–—至到]\s*(?:\d{4}[\./年-]\d{1,2}|至今|现在))[^\n]{0,48}/g) ||
+      t.match(/(?:\d{4}\.\d{2}\s*[-–—]\s*(?:\d{4}\.\d{2}|至今))[^\n]{0,48}/g)
     if (jobs?.length) {
       const ev = line('工作履历与时间跨度', jobs.slice(0, 4).join('；'))
       return ev ? [ev] : []
+    }
+    for (const re of [/工作经历[^\n]{0,120}/, /工作履历[^\n]{0,120}/, /任职[^\n]{0,80}/]) {
+      const m = t.match(re)
+      if (m?.[0]) {
+        const ev = line('工作履历', m[0])
+        if (ev) return [ev]
+      }
     }
   }
   if (dimKey === 'education_fit' || dimKey === 'communication_business') {
@@ -2314,8 +2324,9 @@ function inferDimensionEvidenceFallback(dimKey: string, plain: string): string[]
   }
   if (dimKey === 'tech_fit' || dimKey === 'risk_fit') {
     for (const re of [
-      /(?:技能|技术栈|专业技能)[:：][^\n]{0,100}/i,
-      /(?:精通|熟悉|掌握)[^\n]{0,60}(?:Java|Python|SQL|Hive|Spark|React|Vue|MySQL)/i
+      /(?:技能|技术栈|专业技能|核心技能)[:：][^\n]{0,120}/i,
+      /(?:精通|熟悉|掌握|了解)[^\n]{0,80}/i,
+      /(?:Java|Python|SQL|Hive|Spark|React|Vue|MySQL|Jmeter|Postman)[^\n]{0,60}/i
     ]) {
       const m = t.match(re)
       if (m?.[0]) {
@@ -2367,8 +2378,38 @@ function inferDimensionEvidenceFallback(dimKey: string, plain: string): string[]
       const ev = line('量化成果', ctx.replace(/\s+/g, ' ').trim())
       if (ev) return [ev]
     }
+    for (const re of [
+      /(?:提升|提高|缩短|降低|优化|节省)[^。\n]{0,40}/,
+      /(?:效率|性能|质量|缺陷率|覆盖率)[^。\n]{0,40}(?:提升|提高|优化|改善)/,
+      /负责[^\n]{0,48}(?:系统|平台|项目|模块)/,
+      /(?:主导|参与|推动)[^\n]{0,48}(?:上线|交付|落地|发布)/
+    ]) {
+      const hit = t.match(re)
+      if (hit?.[0]) {
+        const ev = line('业务/项目影响', hit[0])
+        if (ev) return [ev]
+      }
+    }
   }
   return []
+}
+
+function ensureDimensionEvidenceMinimum(
+  dim: Record<string, { score: number; evidence: string[] }>,
+  resumePlain?: string
+): Record<string, { score: number; evidence: string[] }> {
+  const plain = String(resumePlain || '').trim()
+  if (!plain) return dim
+  const out: Record<string, { score: number; evidence: string[] }> = {}
+  for (const [k, v] of Object.entries(dim)) {
+    if (v.evidence?.length || Number(v.score) <= 0) {
+      out[k] = v
+      continue
+    }
+    const fb = inferDimensionEvidenceFallback(k, plain)
+    out[k] = fb.length ? { ...v, evidence: fb.slice(0, 2) } : v
+  }
+  return out
 }
 
 function backfillEmptyDimensionEvidence(
@@ -2383,9 +2424,7 @@ function backfillEmptyDimensionEvidence(
       out[k] = v
       continue
     }
-    const fb = inferDimensionEvidenceFallback(k, plain).filter((line) =>
-      evidenceSupportedByResume(line, plain)
-    )
+    const fb = inferDimensionEvidenceFallback(k, plain)
     out[k] = fb.length ? { ...v, evidence: fb.slice(0, 2) } : v
   }
   return out
@@ -2416,7 +2455,8 @@ function parseResumeEvalToScreeningResult(
         : 'engineering'
     const jobType = resolveResumeEvalJobType({ serverJobType, dim: rawDim })
     const plainText = String(resumePlain || '').trim()
-    const dimCapped = applyResumeEvalDimensionCaps(dim, jobType, plainText)
+    const dimNormalized = normalizeResumeEvalDimensionsForJobType(dim, jobType)
+    const dimCapped = applyResumeEvalDimensionCaps(dimNormalized, jobType, plainText)
     const decision = String(parsed.decision || '建议备选').trim()
     const hardGatePassed = resumeEvalHardGatePassed(parsed.hard_gate)
     const totalScore = normalizeResumeEvalTotalScore({
@@ -2469,8 +2509,11 @@ function parseResumeEvalToScreeningResult(
           .filter(Boolean) as Array<{ risk: string; interview_question: string }>
       : []
     const risksFiltered = filterContradictoryResumeRisks(risks, resumePlain)
-    const dimSanitized = backfillEmptyDimensionEvidence(
-      sanitizeDimensionScoresEvidence(dimCapped, resumePlain),
+    const dimSanitized = ensureDimensionEvidenceMinimum(
+      backfillEmptyDimensionEvidence(
+        sanitizeDimensionScoresEvidence(dimCapped, resumePlain),
+        resumePlain
+      ),
       resumePlain
     )
     const mergedSummary = [
