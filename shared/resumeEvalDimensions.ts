@@ -154,6 +154,59 @@ export function normalizeResumeEvalDimensionsForJobType(
   return dim
 }
 
+const ENGINEERING_CANONICAL_DIMS = [
+  'tech_fit',
+  'engineering_depth',
+  'impact',
+  'code_quality',
+  'stability_growth',
+  'education_fit'
+] as const
+const RISK_CANONICAL_DIMS = [
+  'risk_fit',
+  'depth',
+  'impact',
+  'data_skill',
+  'stability_growth',
+  'education_fit'
+] as const
+
+function inferMinScoreFromDimEvidence(dimKey: string, evidence: string[]): number | null {
+  const blob = evidence.join(' ').toLowerCase()
+  if (!blob.trim()) return null
+  if (/sql|python|java|jmeter|selenium|postman|自动化|接口测试|测试框架|playwright|pytest/.test(blob)) {
+    if (dimKey === 'code_quality') return 50
+    if (dimKey === 'tech_fit' || dimKey === 'risk_fit' || dimKey === 'data_skill') return 45
+  }
+  if (/大学|本科|硕士|学士|学历|统招/.test(blob)) return 40
+  if (/\d{4}[\./-年]\d{1,2}|至今|工作履历|任职/.test(blob)) return 45
+  if (/负责|项目|系统|平台|模块|主导|参与/.test(blob)) return 40
+  if (blob.length >= 12) return 35
+  return null
+}
+
+/** 入库/展示前：映射到岗位应有维度、去掉错体系字段、有证据但 0 分时做最低分兜底 */
+export function finalizeResumeEvalDimensionScores(
+  dim: Record<string, ResumeEvalDimEntry>,
+  jobType: ResumeEvalJobType
+): Record<string, ResumeEvalDimEntry> {
+  const normalized = normalizeResumeEvalDimensionsForJobType(dim, jobType)
+  const canonical = jobType === 'engineering' ? ENGINEERING_CANONICAL_DIMS : RISK_CANONICAL_DIMS
+  const out: Record<string, ResumeEvalDimEntry> = {}
+  for (const k of canonical) {
+    const v = normalized[k]
+    if (!v) continue
+    let score = clampScore(v.score)
+    const evidence = [...(v.evidence || [])].map((x) => String(x || '').trim()).filter(Boolean)
+    if (score <= 0 && evidence.length) {
+      const inferred = inferMinScoreFromDimEvidence(k, evidence)
+      if (inferred != null) score = inferred
+    }
+    out[k] = { score, evidence: evidence.slice(0, 3) }
+  }
+  return out
+}
+
 /** 正文充足但维度体系错误或几乎全 0 → 触发 AI 重试 */
 export function shouldRetryResumeEvalParse(params: {
   dim: Record<string, ResumeEvalDimEntry>

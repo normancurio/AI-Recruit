@@ -25,6 +25,8 @@ import {
   jobRoleBaseValidationMessage
 } from '../shared/jobTaxonomy';
 import { deptNamesMatch } from '../shared/deptMatch';
+import { detectResumeEvalJobType } from '../shared/resumeEvalPrompt';
+import { finalizeResumeEvalDimensionScores } from '../shared/resumeEvalDimensions';
 import { MultiSelectPanel, SearchableSelect, TreeSelect, type PickerOption, type TreePickerOption } from './components/pickers';
 import { ResizableTh, useColumnWidths, type ColumnSpec } from './components/resizableColumns';
 import { 
@@ -6059,18 +6061,53 @@ function resumeEvalDimensionLabelCn(key: string): string {
   return map[k] || k
 }
 
+function resumeEvalDimEntriesFromRaw(
+  raw: Record<string, number | { score?: number; evidence?: string[] }> | undefined
+): Record<string, { score: number; evidence: string[] }> {
+  const out: Record<string, { score: number; evidence: string[] }> = {}
+  if (!raw || typeof raw !== 'object') return out
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === 'number') {
+      out[String(k)] = { score: Math.max(0, Math.min(100, Math.round(Number(v) || 0))), evidence: [] }
+      continue
+    }
+    out[String(k)] = {
+      score: Math.max(0, Math.min(100, Math.round(Number(v?.score) || 0))),
+      evidence: Array.isArray(v?.evidence)
+        ? v!.evidence!.map((x) => String(x || '').trim()).filter(Boolean)
+        : []
+    }
+  }
+  return out
+}
+
+function resolveResumeEvalJobTypeForDisplay(
+  evaluationJson: Resume['evaluationJson'] | undefined,
+  jobTitle?: string
+): 'risk_ops' | 'engineering' {
+  if (jobTitle?.trim()) return detectResumeEvalJobType(jobTitle, '', '')
+  return evaluationJson?.job_type === 'risk_ops' ? 'risk_ops' : 'engineering'
+}
+
+function finalizedResumeEvalDimensions(
+  evaluationJson: Resume['evaluationJson'] | undefined,
+  jobTitle?: string
+): Record<string, { score: number; evidence: string[] }> {
+  const raw = evaluationJson?.dimension_scores
+  if (!raw || typeof raw !== 'object') return {}
+  const jobType = resolveResumeEvalJobTypeForDisplay(evaluationJson, jobTitle)
+  return finalizeResumeEvalDimensionScores(resumeEvalDimEntriesFromRaw(raw), jobType)
+}
+
 function pickResumeDimensionScores(
   evaluationJson: Resume['evaluationJson'] | undefined,
-  fallback: { skill: number; experience: number; education: number; stability: number }
+  fallback: { skill: number; experience: number; education: number; stability: number },
+  jobTitle?: string
 ): Record<string, number> {
-  const raw = evaluationJson?.dimension_scores
+  const finalized = finalizedResumeEvalDimensions(evaluationJson, jobTitle)
   const out: Record<string, number> = {}
-  if (raw && typeof raw === 'object') {
-    for (const [k, v] of Object.entries(raw)) {
-      const n = typeof v === 'number' ? Number(v) : Number(v?.score)
-      if (!Number.isFinite(n)) continue
-      out[String(k)] = Math.max(0, Math.min(100, Math.round(n)))
-    }
+  for (const [k, v] of Object.entries(finalized)) {
+    out[k] = Math.max(0, Math.min(100, Math.round(Number(v.score) || 0)))
   }
   if (Object.keys(out).length > 0) return out
   return {
@@ -6130,11 +6167,12 @@ function resumeDimensionOrderedEntries(scores: Record<string, number>): Array<[s
 
 function resumeDimensionEvidenceText(
   evaluationJson: Resume['evaluationJson'] | undefined,
-  dimKey: string
+  dimKey: string,
+  jobTitle?: string
 ): string {
-  const dim = evaluationJson?.dimension_scores?.[dimKey]
-  const ev = typeof dim === 'number' ? undefined : dim?.evidence
-  const score = typeof dim === 'number' ? dim : Number(dim?.score)
+  const dim = finalizedResumeEvalDimensions(evaluationJson, jobTitle)[dimKey]
+  const ev = dim?.evidence
+  const score = Number(dim?.score)
   if (!Array.isArray(ev) || !ev.length) {
     if (Number.isFinite(score) && score > 0) {
       return '模型未逐条摘录依据，请结合简历原文与该维度分数综合判断。'
@@ -6432,7 +6470,7 @@ function mapScreeningRow(r: {
     experienceScore: d.experience,
     educationScore: d.education,
     stabilityScore: d.stability,
-    resumeDimensionScores: pickResumeDimensionScores(parsedEval, d),
+    resumeDimensionScores: pickResumeDimensionScores(parsedEval, d, String(r.matched_job_title || '')),
     status: aiConclusion,
     flowStage,
     uploadTime,
@@ -8943,7 +8981,7 @@ function ResumeScreeningView({
           status: d.status,
           reportSummary: d.reportSummary,
           evaluationJson: evalJson,
-          resumeDimensionScores: pickResumeDimensionScores(evalJson, fallbackDims)
+          resumeDimensionScores: pickResumeDimensionScores(evalJson, fallbackDims, resume.job || '')
         };
         setResumes((prev) => prev.map((x) => (x.id === resume.id ? updated : x)));
         setReportResume((prev) => (prev && prev.id === resume.id ? updated : prev));
@@ -10627,7 +10665,7 @@ function ResumeScreeningView({
                           {resumeEvalDimensionLabelCn(k)} · <span className="tabular-nums">{Number(v) || 0}</span>
                         </p>
                         <p className="mt-1 text-xs leading-relaxed text-slate-600">
-                          {resumeDimensionEvidenceText(reportResume.evaluationJson, k)}
+                          {resumeDimensionEvidenceText(reportResume.evaluationJson, k, reportResume.job)}
                         </p>
                       </div>
                     ))}
@@ -10865,7 +10903,7 @@ function ApplicationManagementView({
             resumeMatchScore: resumeMatch,
             interviewScore,
             hasInterviewReport,
-            resumeDimensionScores: pickResumeDimensionScores(parsedEval, d),
+            resumeDimensionScores: pickResumeDimensionScores(parsedEval, d, String(row.matched_job_title || '')),
             status: flowStage,
             interviewOutcome,
             referrerLabel: uploaderDisplayFromUsers(String(row.uploader_username ?? ''), hrUsers),

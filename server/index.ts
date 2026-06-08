@@ -32,6 +32,7 @@ import {
   applyResumeEvalDimensionCaps,
   mapEvalDimensionsToLegacyScores,
   normalizeResumeEvalDimensionsForJobType,
+  finalizeResumeEvalDimensionScores,
   resolveResumeEvalJobType,
   shouldRetryResumeEvalParse,
   weightedResumeEvalDimensionScore
@@ -2484,8 +2485,16 @@ function parseResumeEvalToScreeningResult(
     const sanitizedProfile = sanitizeCandidateProfile(
       (parsed as { candidate_profile?: unknown }).candidate_profile
     )
+    const dimSanitized = ensureDimensionEvidenceMinimum(
+      backfillEmptyDimensionEvidence(
+        sanitizeDimensionScoresEvidence(dimCapped, resumePlain),
+        resumePlain
+      ),
+      resumePlain
+    )
+    const dimFinal = finalizeResumeEvalDimensionScores(dimSanitized, jobType)
     const legacyScores = mapEvalDimensionsToLegacyScores({
-      dim: dimCapped,
+      dim: dimFinal,
       jobType,
       profile: sanitizedProfile as Record<string, unknown>,
       resumePlain: plainText,
@@ -2515,13 +2524,6 @@ function parseResumeEvalToScreeningResult(
           .filter(Boolean) as Array<{ risk: string; interview_question: string }>
       : []
     const risksFiltered = filterContradictoryResumeRisks(risks, resumePlain)
-    const dimSanitized = ensureDimensionEvidenceMinimum(
-      backfillEmptyDimensionEvidence(
-        sanitizeDimensionScoresEvidence(dimCapped, resumePlain),
-        resumePlain
-      ),
-      resumePlain
-    )
     const mergedSummary = [
       summary || '暂无总结',
       strengths.length ? `优势：${strengths.slice(0, 3).join('；')}` : '',
@@ -2544,7 +2546,7 @@ function parseResumeEvalToScreeningResult(
         ? { model_total_score_raw: rawTotalScore }
         : {}),
       total_score: totalScore,
-      dimension_scores: dimSanitized,
+      dimension_scores: dimFinal,
       risks: risksFiltered,
       ...(profileFinal ? { candidate_profile: profileFinal } : {}),
       ...(candidateNameAi ? { candidate_name: candidateNameAi } : {})

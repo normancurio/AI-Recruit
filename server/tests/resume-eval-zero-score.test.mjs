@@ -8,7 +8,7 @@ test('parse uses server job type and retries suspicious zero scores', () => {
   assert.match(serverSource, /resolveResumeEvalJobType/)
   assert.match(serverSource, /shouldRetryResumeEvalParse/)
   assert.match(serverSource, /normalizeResumeEvalDimensionsForJobType/)
-  assert.match(serverSource, /ensureDimensionEvidenceMinimum/)
+  assert.match(serverSource, /finalizeResumeEvalDimensionScores/)
   assert.match(serverSource, /job_type: jobType/)
   assert.match(serverSource, /const jobCtx = \{/)
   assert.match(serverSource, /parseResumeEvalToScreeningResult\(text, params\.resumeText, jobCtx/)
