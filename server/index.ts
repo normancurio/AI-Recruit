@@ -31,6 +31,8 @@ import {
 import {
   applyResumeEvalDimensionCaps,
   mapEvalDimensionsToLegacyScores,
+  resolveResumeEvalJobType,
+  shouldRetryResumeEvalParse,
   weightedResumeEvalDimensionScore
 } from '../shared/resumeEvalDimensions'
 import { clipResumeTextForAi } from '../shared/resumeTextClip'
@@ -2270,6 +2272,9 @@ function normalizeResumeEvalTotalScore(input: {
       : input.dimensionScore != null
         ? clampResumeScore(input.dimensionScore)
         : clampResumeScore(rawTotal)
+  if (rawInRange && rawTotal === 0 && input.dimensionScore != null && input.dimensionScore > 0) {
+    score = clampResumeScore(input.dimensionScore)
+  }
   if (input.dimensionScore != null && score - input.dimensionScore > 25) {
     score = clampResumeScore(input.dimensionScore)
   }
@@ -2386,7 +2391,11 @@ function backfillEmptyDimensionEvidence(
   return out
 }
 
-function parseResumeEvalToScreeningResult(raw: string, resumePlain?: string): ResumeScreeningAiResult | null {
+function parseResumeEvalToScreeningResult(
+  raw: string,
+  resumePlain?: string,
+  jobContext?: { jobTitle: string; department: string; jdText: string }
+): ResumeScreeningAiResult | null {
   try {
     const cleaned = String(raw || '')
       .trim()
@@ -2400,8 +2409,12 @@ function parseResumeEvalToScreeningResult(raw: string, resumePlain?: string): Re
     for (const [k, v] of Object.entries(rawDim)) {
       dim[String(k)] = normalizeResumeEvalDimension(v, String(k))
     }
-    const jobTypeRaw = String(parsed.job_type || '').trim()
-    const jobType: 'risk_ops' | 'engineering' = jobTypeRaw === 'risk_ops' ? 'risk_ops' : 'engineering'
+    const serverJobType = jobContext
+      ? detectResumeEvalJobType(jobContext.jobTitle, jobContext.department, jobContext.jdText)
+      : String(parsed.job_type || '').trim() === 'risk_ops'
+        ? 'risk_ops'
+        : 'engineering'
+    const jobType = resolveResumeEvalJobType({ serverJobType, dim: rawDim })
     const plainText = String(resumePlain || '').trim()
     const dimCapped = applyResumeEvalDimensionCaps(dim, jobType, plainText)
     const decision = String(parsed.decision || '建议备选').trim()
@@ -2412,6 +2425,16 @@ function parseResumeEvalToScreeningResult(raw: string, resumePlain?: string): Re
       decision,
       hardGatePassed
     })
+    if (
+      shouldRetryResumeEvalParse({
+        dim: dimCapped,
+        totalScore,
+        resumePlain: plainText,
+        jobType
+      })
+    ) {
+      return null
+    }
     const sanitizedProfile = sanitizeCandidateProfile(
       (parsed as { candidate_profile?: unknown }).candidate_profile
     )
@@ -2467,6 +2490,7 @@ function parseResumeEvalToScreeningResult(raw: string, resumePlain?: string): Re
     const candidateNameAi = extractCandidateNameFromEvalParsed(parsed, rawProfile)
     const normalizedEval = {
       ...parsedRest,
+      job_type: jobType,
       ...(Number.isFinite(rawTotalScore) && (rawTotalScore < 0 || rawTotalScore > 100)
         ? { model_total_score_raw: rawTotalScore }
         : {}),
@@ -3551,7 +3575,11 @@ async function runResumeScreeningWithAi(params: {
       const data = await dashScopeChatCompletions(reqBody, { timeoutMs: resumeAiTimeoutMs() })
       const raw = data?.choices?.[0]?.message?.content
       const text = typeof raw === 'string' ? raw : ''
-      const next = parseResumeEvalToScreeningResult(text, params.resumeText)
+      const next = parseResumeEvalToScreeningResult(text, params.resumeText, {
+        jobTitle: params.jobTitle,
+        department: params.department,
+        jdText: params.jdText
+      })
       if (next) {
         if (attempt > 1 && flowLogEnabled) {
           flowLog('resume-screen', true, `简历 AI 评估成功（第 ${attempt} 次调用）`)

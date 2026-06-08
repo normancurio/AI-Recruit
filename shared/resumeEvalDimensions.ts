@@ -61,7 +61,7 @@ function resolveEducationColumnScore(
     dim.education_fit?.score,
     dim.communication_business?.score
   )
-  if (fromDim != null) return clampScore(fromDim)
+  if (fromDim != null && fromDim > 0) return clampScore(fromDim)
   return clampScore(inferEducationFitScore(profile, resumePlain) ?? 70)
 }
 
@@ -71,6 +71,58 @@ function firstFinite(...vals: unknown[]): number | null {
     if (Number.isFinite(n)) return n
   }
   return null
+}
+
+const ENGINEERING_DIM_KEYS = new Set(['tech_fit', 'code_quality', 'engineering_depth'])
+const RISK_DIM_KEYS = new Set(['risk_fit', 'data_skill', 'depth'])
+
+/** 从模型返回的 dimension_scores 键推断岗位维度体系 */
+export function inferResumeEvalJobTypeFromDimensions(
+  dim: Record<string, unknown>
+): ResumeEvalJobType | null {
+  const keys = Object.keys(dim || {})
+  let eng = 0
+  let risk = 0
+  for (const k of keys) {
+    if (ENGINEERING_DIM_KEYS.has(k)) eng++
+    if (RISK_DIM_KEYS.has(k)) risk++
+  }
+  if (eng >= 2 && eng > risk) return 'engineering'
+  if (risk >= 2 && risk > eng) return 'risk_ops'
+  return null
+}
+
+/** 岗位上下文优先：不信模型 JSON 里的 job_type */
+export function resolveResumeEvalJobType(params: {
+  serverJobType: ResumeEvalJobType
+  dim: Record<string, unknown>
+}): ResumeEvalJobType {
+  const fromDim = inferResumeEvalJobTypeFromDimensions(params.dim)
+  if (fromDim && fromDim !== params.serverJobType) return params.serverJobType
+  return params.serverJobType
+}
+
+/** 正文充足但维度体系错误或几乎全 0 → 触发 AI 重试 */
+export function shouldRetryResumeEvalParse(params: {
+  dim: Record<string, ResumeEvalDimEntry>
+  totalScore: number
+  resumePlain: string
+  jobType: ResumeEvalJobType
+}): boolean {
+  const plain = String(params.resumePlain || '').trim()
+  if (plain.length < 300) return false
+
+  const fromDim = inferResumeEvalJobTypeFromDimensions(params.dim)
+  if (fromDim && fromDim !== params.jobType) return true
+
+  const scores = Object.values(params.dim)
+    .map((v) => Number(v?.score))
+    .filter((n) => Number.isFinite(n))
+  if (scores.length === 0) return true
+
+  const nonZero = scores.filter((s) => s > 0)
+  if (params.totalScore <= 0 && nonZero.length === 0) return true
+  return false
 }
 
 /** 六维 AI 分 → 库表四维（申朴画像仍读这四列，仅改善映射语义） */
