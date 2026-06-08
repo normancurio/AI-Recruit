@@ -28,8 +28,14 @@ import {
   detectResumeEvalJobType,
   detectResumeEvalTechDirection
 } from '../shared/resumeEvalPrompt'
+import {
+  applyResumeEvalDimensionCaps,
+  mapEvalDimensionsToLegacyScores,
+  weightedResumeEvalDimensionScore
+} from '../shared/resumeEvalDimensions'
 import { clipResumeTextForAi } from '../shared/resumeTextClip'
 import {
+  evidenceSupportedByResume,
   filterContradictoryResumeRisks,
   sanitizeDimensionScoresEvidence
 } from './resumeRiskContradiction'
@@ -1235,6 +1241,9 @@ const DEMO_FOLLOW_UP_PROMPT_SUFFIX = [
   '禁止返回 should_follow_up=false，禁止泛泛而谈的追问，禁止重复原题。'
 ].join('\n')
 
+const DEMO_FOLLOW_UP_FALLBACK_QUESTION =
+  '可以结合一个具体项目或经历，把刚才说的再展开说明一下吗？'
+
 const DEFAULT_FOLLOW_UP_PROMPT = [
   '你是结构化技术面试里的追问面试官。你的任务不是评价答案是否充分，而是从候选人的回答里继续追深一层，验证真实性、深度和个人贡献。',
   '只要候选人回答了有效内容，默认 should_follow_up=true，并生成 1 个具体追问。',
@@ -1261,15 +1270,17 @@ function sanitizeFollowUpConfig(raw: Partial<InterviewFollowUpConfig> = {}): Int
     const n = Number(v)
     return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fallback
   }
+  const demoMode = raw.demoMode !== undefined ? Boolean(raw.demoMode) : DEFAULT_FOLLOW_UP_CONFIG.demoMode
+  const modelWaitMs = clampInt(raw.modelWaitMs, DEFAULT_FOLLOW_UP_CONFIG.modelWaitMs, 0, demoMode ? 10000 : 5000)
   return {
     enabled: raw.enabled !== undefined ? Boolean(raw.enabled) : DEFAULT_FOLLOW_UP_CONFIG.enabled,
     maxPerInterview: clampInt(raw.maxPerInterview, DEFAULT_FOLLOW_UP_CONFIG.maxPerInterview, 0, 10),
     maxPerQuestion: clampInt(raw.maxPerQuestion, DEFAULT_FOLLOW_UP_CONFIG.maxPerQuestion, 0, 1),
-    modelWaitMs: clampInt(raw.modelWaitMs, DEFAULT_FOLLOW_UP_CONFIG.modelWaitMs, 0, 5000),
+    modelWaitMs: demoMode ? Math.max(modelWaitMs, 3000) : modelWaitMs,
     shortAnswerThreshold: clampInt(raw.shortAnswerThreshold, DEFAULT_FOLLOW_UP_CONFIG.shortAnswerThreshold, 2, 80),
     fallbackEnabled:
       raw.fallbackEnabled !== undefined ? Boolean(raw.fallbackEnabled) : DEFAULT_FOLLOW_UP_CONFIG.fallbackEnabled,
-    demoMode: raw.demoMode !== undefined ? Boolean(raw.demoMode) : DEFAULT_FOLLOW_UP_CONFIG.demoMode,
+    demoMode,
     model: String(raw.model || '').trim().slice(0, 80),
     prompt: String(raw.prompt || DEFAULT_FOLLOW_UP_PROMPT).trim().slice(0, 4000) || DEFAULT_FOLLOW_UP_PROMPT
   }
@@ -1524,11 +1535,11 @@ function normalizeFollowUpQuestion(raw: string, parentQuestion: string): string 
   return text
 }
 
-function buildInstantFollowUpQuestion(parentQuestion: string, answer: string): string {
+function buildInstantFollowUpQuestion(parentQuestion: string, answer: string, minAnswerLen = 18): string {
   const q = String(parentQuestion || '').trim()
   const a = String(answer || '').replace(/\s+/g, ' ').trim()
   const compact = a.replace(/\s+/g, '')
-  if (compact.length < 18) return ''
+  if (compact.length < Math.max(2, minAnswerLen)) return ''
 
   const mentioned = (pattern: RegExp) => pattern.test(a) || pattern.test(q)
   if (mentioned(/(指标|提升|降低|优化|性能|耗时|并发|响应|成功率|准确率|效率|成本)/i)) {
@@ -1547,6 +1558,12 @@ function buildInstantFollowUpQuestion(parentQuestion: string, answer: string): s
     return '这个项目里最能体现你能力的一点是什么？'
   }
   return '你刚才提到的这段经历，最关键的处理细节是什么？'
+}
+
+function resolveDemoFollowUpFallback(parentQuestion: string, answer: string): string {
+  return (
+    buildInstantFollowUpQuestion(parentQuestion, answer, 2) || DEMO_FOLLOW_UP_FALLBACK_QUESTION
+  )
 }
 
 function followUpSystemPrompt(config: InterviewFollowUpConfig): string {
@@ -1623,6 +1640,9 @@ async function prepareInterviewFollowUp(params: {
     let followUp = await generateFollowUpViaModel(config, question, answer)
     if (config.demoMode && !followUp) {
       followUp = await generateFollowUpViaModel(config, question, answer, { force: true })
+    }
+    if (config.demoMode && !followUp) {
+      followUp = resolveDemoFollowUpFallback(question, answer)
     }
     followUpCache.set(key, {
       status: followUp ? 'ready' : 'skipped',
@@ -2090,6 +2110,9 @@ const PLACEHOLDER_NAMES = new Set(
     '求职简历',
     '申朴简历',
     '测试简历',
+    '副本',
+    '复制',
+    '拷贝',
     'n/a',
     'na',
     'null',
@@ -2233,32 +2256,6 @@ function resumeEvalHardGatePassed(value: unknown): boolean | null {
   return null
 }
 
-function weightedResumeEvalDimensionScore(dim: Record<string, { score: number; evidence: string[] }>): number | null {
-  const weights: Record<string, number> = {
-    risk_fit: 25,
-    tech_fit: 25,
-    depth: 20,
-    engineering_depth: 20,
-    impact: 20,
-    data_skill: 15,
-    code_quality: 15,
-    stability_growth: 10,
-    communication_business: 10
-  }
-  let sum = 0
-  let totalWeight = 0
-  for (const [key, value] of Object.entries(dim)) {
-    const weight = weights[key] || 0
-    if (!weight) continue
-    const score = Number(value?.score)
-    if (!Number.isFinite(score)) continue
-    sum += clampResumeScore(score) * weight
-    totalWeight += weight
-  }
-  if (totalWeight <= 0) return null
-  return clampResumeScore(sum / totalWeight)
-}
-
 function normalizeResumeEvalTotalScore(input: {
   rawTotal: unknown
   dimensionScore: number | null
@@ -2283,6 +2280,112 @@ function normalizeResumeEvalTotalScore(input: {
   return clampResumeScore(score)
 }
 
+function inferDimensionEvidenceFallback(dimKey: string, plain: string): string[] {
+  const t = String(plain || '').replace(/\r\n/g, '\n')
+  const line = (label: string, excerpt: string): string => {
+    const ex = excerpt.trim().slice(0, 120)
+    if (ex.length < 4) return ''
+    return `证据点：${label}｜摘录：${ex}`
+  }
+  if (dimKey === 'stability_growth') {
+    const jobs = t.match(/(?:\d{4}\.\d{2}\s*[-–—]\s*(?:\d{4}\.\d{2}|至今))[^\n]{0,48}/g)
+    if (jobs?.length) {
+      const ev = line('工作履历与时间跨度', jobs.slice(0, 4).join('；'))
+      return ev ? [ev] : []
+    }
+  }
+  if (dimKey === 'education_fit' || dimKey === 'communication_business') {
+    for (const re of [
+      /(?:大学|学院|学校)[^\n]{0,40}(?:本科|硕士|博士|专科|学士|研究生)/,
+      /(?:本科|硕士|博士|专科|学士)[^\n]{0,24}(?:大学|学院)/,
+      /教育背景[^\n]{0,80}/
+    ]) {
+      const m = t.match(re)
+      if (m?.[0]) {
+        const ev = line('教育背景', m[0])
+        if (ev) return [ev]
+      }
+    }
+  }
+  if (dimKey === 'tech_fit' || dimKey === 'risk_fit') {
+    for (const re of [
+      /(?:技能|技术栈|专业技能)[:：][^\n]{0,100}/i,
+      /(?:精通|熟悉|掌握)[^\n]{0,60}(?:Java|Python|SQL|Hive|Spark|React|Vue|MySQL)/i
+    ]) {
+      const m = t.match(re)
+      if (m?.[0]) {
+        const ev = line('技术/岗位匹配', m[0])
+        if (ev) return [ev]
+      }
+    }
+  }
+  if (dimKey === 'engineering_depth' || dimKey === 'depth') {
+    for (const re of [
+      /负责[^\n]{0,48}(?:系统|平台|项目|模块|架构)/,
+      /(?:架构|核心模块|技术方案)[^\n]{0,60}/
+    ]) {
+      const m = t.match(re)
+      if (m?.[0]) {
+        const ev = line('项目深度', m[0])
+        if (ev) return [ev]
+      }
+    }
+  }
+  if (dimKey === 'data_skill') {
+    for (const re of [
+      /(?:SQL|Hive|Spark|ETL|Kettle|数据仓库|数仓|BI)[^\n]{0,50}/i
+    ]) {
+      const m = t.match(re)
+      if (m?.[0]) {
+        const ev = line('数据能力', m[0])
+        if (ev) return [ev]
+      }
+    }
+  }
+  if (dimKey === 'code_quality') {
+    for (const re of [
+      /优化(?:SQL|sql)?脚本性能[^。\n]{0,40}/,
+      /(?:SQL|脚本)[^。\n]{0,20}(?:优化|性能)[^。\n]{0,40}/,
+      /(?:代码|脚本)[^。\n]{0,16}(?:规范|质量|审查)[^。\n]{0,40}/
+    ]) {
+      const m = t.match(re)
+      if (m?.[0]) {
+        const ev = line('脚本/SQL 工程实践', m[0])
+        if (ev) return [ev]
+      }
+    }
+  }
+  if (dimKey === 'impact') {
+    const m = t.match(/\d{1,3}%/)
+    if (m) {
+      const ctx = t.slice(Math.max(0, (t.indexOf(m[0]) || 0) - 20), (t.indexOf(m[0]) || 0) + 40)
+      const ev = line('量化成果', ctx.replace(/\s+/g, ' ').trim())
+      if (ev) return [ev]
+    }
+  }
+  return []
+}
+
+function backfillEmptyDimensionEvidence(
+  dim: Record<string, { score: number; evidence: string[] }>,
+  resumePlain?: string
+): Record<string, { score: number; evidence: string[] }> {
+  const plain = String(resumePlain || '').trim()
+  if (!plain) return dim
+  const out: Record<string, { score: number; evidence: string[] }> = {}
+  for (const [k, v] of Object.entries(dim)) {
+    if (v.evidence?.length) {
+      out[k] = v
+      continue
+    }
+    const fb = inferDimensionEvidenceFallback(k, plain).filter((line) =>
+      evidenceSupportedByResume(line, plain)
+    )
+    out[k] = fb.length ? { ...v, evidence: fb.slice(0, 2) } : v
+  }
+  return out
+}
+
 function parseResumeEvalToScreeningResult(raw: string, resumePlain?: string): ResumeScreeningAiResult | null {
   try {
     const cleaned = String(raw || '')
@@ -2297,27 +2400,32 @@ function parseResumeEvalToScreeningResult(raw: string, resumePlain?: string): Re
     for (const [k, v] of Object.entries(rawDim)) {
       dim[String(k)] = normalizeResumeEvalDimension(v, String(k))
     }
+    const jobTypeRaw = String(parsed.job_type || '').trim()
+    const jobType: 'risk_ops' | 'engineering' = jobTypeRaw === 'risk_ops' ? 'risk_ops' : 'engineering'
+    const plainText = String(resumePlain || '').trim()
+    const dimCapped = applyResumeEvalDimensionCaps(dim, jobType, plainText)
     const decision = String(parsed.decision || '建议备选').trim()
     const hardGatePassed = resumeEvalHardGatePassed(parsed.hard_gate)
     const totalScore = normalizeResumeEvalTotalScore({
       rawTotal: parsed.total_score,
-      dimensionScore: weightedResumeEvalDimensionScore(dim),
+      dimensionScore: weightedResumeEvalDimensionScore(dimCapped),
       decision,
       hardGatePassed
     })
-    const fallback = deriveResumeDimensionScores(totalScore)
-    const skillScore = clampResumeScore(
-      firstFiniteNumber(dim.data_skill?.score, dim.code_quality?.score) ?? fallback.skillScore
+    const sanitizedProfile = sanitizeCandidateProfile(
+      (parsed as { candidate_profile?: unknown }).candidate_profile
     )
-    const experienceScore = clampResumeScore(
-      firstFiniteNumber(dim.depth?.score, dim.engineering_depth?.score) ?? fallback.experienceScore
-    )
-    const educationScore = clampResumeScore(
-      firstFiniteNumber(dim.communication_business?.score) ?? fallback.educationScore
-    )
-    const stabilityScore = clampResumeScore(
-      firstFiniteNumber(dim.stability_growth?.score) ?? fallback.stabilityScore
-    )
+    const legacyScores = mapEvalDimensionsToLegacyScores({
+      dim: dimCapped,
+      jobType,
+      profile: sanitizedProfile as Record<string, unknown>,
+      resumePlain: plainText,
+      fallbackOverall: totalScore
+    })
+    const skillScore = legacyScores.skillScore
+    const experienceScore = legacyScores.experienceScore
+    const educationScore = legacyScores.educationScore
+    const stabilityScore = legacyScores.stabilityScore
     const summary = String(parsed.summary || '').trim()
     const strengths = Array.isArray(parsed.strengths)
       ? parsed.strengths.map((x) => String(x || '').trim()).filter(Boolean)
@@ -2338,7 +2446,10 @@ function parseResumeEvalToScreeningResult(raw: string, resumePlain?: string): Re
           .filter(Boolean) as Array<{ risk: string; interview_question: string }>
       : []
     const risksFiltered = filterContradictoryResumeRisks(risks, resumePlain)
-    const dimSanitized = sanitizeDimensionScoresEvidence(dim, resumePlain)
+    const dimSanitized = backfillEmptyDimensionEvidence(
+      sanitizeDimensionScoresEvidence(dimCapped, resumePlain),
+      resumePlain
+    )
     const mergedSummary = [
       summary || '暂无总结',
       strengths.length ? `优势：${strengths.slice(0, 3).join('；')}` : '',
@@ -2395,10 +2506,15 @@ function normalizeCnMobile(raw: string): string | null {
 function extractPhoneFromResumeText(text: string): string | null {
   const slice = text.replace(/\r\n/g, '\n').slice(0, 12000)
   const labeled = slice.match(
-    /(?:手机|移动电话|联系电话|联系方式|电话|Phone|Tel|Mobile)[:：\s]*([+＋0-9\s\-—–]{11,22})/i
+    /(?:手机|移动电话|联系电话|联系方式|电话|Phone|Tel|Mobile)[:：\s]*([+＋0-9\s\-—–]{8,24})/i
   )
   if (labeled?.[1]) {
     const n = normalizeCnMobile(labeled[1])
+    if (n) return n
+  }
+  const spacedMobile = slice.match(/(?:^|[\s:：])1\s+(?:\d[\s\-—–]*){9,11}\d/m)
+  if (spacedMobile?.[0]) {
+    const n = normalizeCnMobile(spacedMobile[0])
     if (n) return n
   }
   const compact = slice.replace(/[\s\-—–]/g, '')
@@ -2481,6 +2597,47 @@ function extractEmailFromResumeText(text: string): string | null {
     if (m.length >= 5 && m.length <= 128) return m
   }
   return found[0].trim().length <= 128 ? found[0].trim() : null
+}
+
+/** BOSS 直聘等导出简历：候选人开启隐私保护，PDF/图片中不含手机号 */
+function isBossResumePhonePrivacyProtected(text: string): boolean {
+  return /牛人已开启手机号隐私保护|BOSS直聘APP|可使用BOSS直聘/i.test(String(text || ''))
+}
+
+/** 同邮箱历史投递中查找已入库手机号（BOSS 隐私简历等正文无号场景） */
+async function lookupCandidatePhoneByEmail(email: string): Promise<string | null> {
+  const em = String(email || '').trim().toLowerCase()
+  if (!em || em.length < 5) return null
+  try {
+    const [profileRows] = await mysqlPool.query<RowDataPacket[]>(
+      `SELECT candidate_phone FROM resume_screening_profiles
+       WHERE LOWER(TRIM(email)) = ? AND candidate_phone IS NOT NULL AND TRIM(candidate_phone) != ''
+       ORDER BY screening_id DESC LIMIT 1`,
+      [em]
+    )
+    const fromProfile = normalizeCnMobile(String((profileRows[0] as { candidate_phone?: unknown })?.candidate_phone || ''))
+    if (fromProfile) return fromProfile
+    const [screenRows] = await mysqlPool.query<RowDataPacket[]>(
+      `SELECT candidate_phone FROM resume_screenings
+       WHERE candidate_phone IS NOT NULL AND TRIM(candidate_phone) != ''
+         AND LOWER(resume_plaintext) LIKE ?
+       ORDER BY id DESC LIMIT 1`,
+      [`%${em}%`]
+    )
+    return normalizeCnMobile(String((screenRows[0] as { candidate_phone?: unknown })?.candidate_phone || ''))
+  } catch (e: unknown) {
+    const ex = e as { code?: string; errno?: number }
+    if (ex.code === 'ER_NO_SUCH_TABLE' || ex.errno === 1146) return null
+    console.warn('[resume-screen] lookup phone by email failed:', e instanceof Error ? e.message : e)
+    return null
+  }
+}
+
+async function resolveMissingCandidatePhoneFromPlain(plain: string): Promise<string | null> {
+  if (extractPhoneFromResumeText(plain)) return normalizeCnMobile(extractPhoneFromResumeText(plain) || '')
+  const email = extractEmailFromResumeText(plain)
+  if (!email) return null
+  return lookupCandidatePhoneByEmail(email)
 }
 
 /** PDF/OCR 常见异体字（康熙部首等）归一化后再做实体匹配 */
@@ -2759,7 +2916,7 @@ function normalizePdfExtractedText(s: string): string {
     if (next === t) break
     t = next
   }
-  return t.replace(/([:：])\s*\n\s*/g, '$1 ')
+  return stripOcrWatermarkNoise(t.replace(/([:：])\s*\n\s*/g, '$1 '))
 }
 
 let pdfParseCtorPromise: Promise<any> | null = null
@@ -2824,6 +2981,42 @@ function resumePlaintextMeaningfulLength(text: string): number {
   return n
 }
 
+/** 去掉扫描 PDF OCR 常见水印行、页码占位 */
+function stripOcrWatermarkNoise(text: string): string {
+  return String(text || '')
+    .split(/\r?\n/)
+    .filter((line) => {
+      const t = line.trim()
+      if (!t) return true
+      if (/^--\s*\d+\s*of\s*\d+\s*--$/i.test(t)) return false
+      const compact = t.replace(/\s+/g, '')
+      if (/^[0-9a-f]{20,}[A-Za-z0-9_]*$/i.test(compact)) return false
+      if (/^g$/i.test(compact)) return false
+      return true
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/** 带页码占位/重复 hash 水印的扫描 PDF（pdf-parse 能抽到字但顺序乱、缺页） */
+function isPdfWatermarkScannedHybrid(text: string): boolean {
+  const t = String(text || '')
+  if (/--\s*\d+\s*of\s*\d+\s*--/i.test(t)) return true
+  const hashLines =
+    t.match(/^[0-9a-f]{20,}[A-Za-z0-9_]*\s*$/gim) || []
+  return hashLines.length >= 2
+}
+
+/** 上传筛查 / 重新评估可用的简历正文下限（避免仅姓名性别就进入 AI 打分） */
+function isResumePlaintextSufficientForScreening(plain: string): boolean {
+  const t = stripOcrWatermarkNoise(String(plain || '').trim())
+  const meaningful = resumePlaintextMeaningfulLength(t)
+  if (meaningful < 120) return false
+  const hasResumeSignal = /(?:工作经|项目经|教育|技能|职责|公司|大学|学院|本科|硕士|求职|经历)/.test(t)
+  return hasResumeSignal || meaningful >= 260
+}
+
 /** 扫描 PDF / 图片简历常见：正文极短、中文占比低、缺少简历关键词 */
 function isResumePlaintextLowQuality(text: string, fileSizeBytes: number): boolean {
   const t = String(text || '').trim()
@@ -2860,13 +3053,94 @@ function buildPlainFromOcrIdentity(ocr: ResumeOcrIdentity): string {
   ]
     .filter(Boolean)
     .join('\n')
-  const body = String(ocr.rawText || '').trim()
+  const body = stripOcrWatermarkNoise(String(ocr.rawText || ''))
   if (header && body) {
     const headName = ocr.candidateName || ''
     if (headName && body.includes(headName)) return body
     return `${header}\n\n${body}`
   }
   return header || body
+}
+
+/** 正文像完整简历但抽不到手机号（常见于 PDF 文本层缺电话、扫描件电话只在图上） */
+function isResumePlaintextMissingPhone(text: string): boolean {
+  const t = String(text || '').trim()
+  if (!t || extractPhoneFromResumeText(t)) return false
+  if (resumePlaintextMeaningfulLength(t) < 80) return false
+  return /(?:@|[\u90ae\u7bb1]|[\u5e74\u9f84]|[\u7c4d\u8d2f]|[\u6c42\u804c]|[\u8054\u7cfb]|[\u6027\u522b])/.test(t)
+}
+
+function prependContactHeaderToPlain(plain: string, phone: string, email?: string): string {
+  if (extractPhoneFromResumeText(plain)) return plain
+  const header = [`手机：${phone}`, email ? `邮箱：${email}` : ''].filter(Boolean).join('\n')
+  return `${header}\n\n${plain}`
+}
+
+function mergeResumeOcrIdentity(
+  base: ResumeOcrIdentity | null,
+  patch: ResumeOcrIdentity | null
+): ResumeOcrIdentity | null {
+  if (!base && !patch) return null
+  const a = base || {}
+  const b = patch || {}
+  return {
+    ...(a.candidateName || b.candidateName
+      ? { candidateName: sanitizeCandidateName(a.candidateName || b.candidateName) }
+      : {}),
+    ...(a.candidatePhone || b.candidatePhone
+      ? { candidatePhone: normalizeCnMobile(String(a.candidatePhone || b.candidatePhone || '')) || undefined }
+      : {}),
+    ...(a.email || b.email ? { email: String(a.email || b.email).slice(0, 128) } : {}),
+    ...(a.gender || b.gender ? { gender: a.gender || b.gender } : {}),
+    ...(a.rawText || b.rawText ? { rawText: String(a.rawText || b.rawText) } : {})
+  }
+}
+
+async function supplementResumePlainWithIdentityOcr(params: {
+  buffer: Buffer
+  originalname: string
+  mimetype: string
+  plain: string
+  ocrIdentity: ResumeOcrIdentity | null
+  onStage?: (stage: string, progress: number) => void
+}): Promise<{ plain: string; ocrIdentity: ResumeOcrIdentity | null }> {
+  let { plain, ocrIdentity } = params
+  if (extractPhoneFromResumeText(plain)) return { plain, ocrIdentity }
+  if (isBossResumePhonePrivacyProtected(plain)) {
+    params.onStage?.('BOSS 简历已隐藏手机号，尝试按邮箱匹配历史记录', 28)
+    const phoneFromHistory = await resolveMissingCandidatePhoneFromPlain(plain)
+    if (phoneFromHistory) {
+      plain = prependContactHeaderToPlain(plain, phoneFromHistory, extractEmailFromResumeText(plain) || undefined)
+      ocrIdentity = mergeResumeOcrIdentity(ocrIdentity, { candidatePhone: phoneFromHistory })
+    }
+    return { plain, ocrIdentity }
+  }
+  if (!resumeFileSupportsOcr(params.originalname, params.mimetype)) return { plain, ocrIdentity }
+  if (!isResumePlaintextMissingPhone(plain) && !ocrIdentity?.candidateName) return { plain, ocrIdentity }
+  params.onStage?.('正文无手机号，尝试 OCR 识别联系方式', 28)
+  try {
+    const idOcr = await extractResumeIdentityByOcr(params.buffer, params.originalname, params.mimetype)
+    if (!idOcr) return { plain, ocrIdentity }
+    ocrIdentity = mergeResumeOcrIdentity(ocrIdentity, idOcr)
+    const phone =
+      normalizeCnMobile(String(idOcr.candidatePhone || '')) ||
+      extractPhoneFromResumeText(String(idOcr.rawText || '')) ||
+      null
+    if (phone) {
+      plain = prependContactHeaderToPlain(plain, phone, idOcr.email)
+      ocrIdentity = mergeResumeOcrIdentity(ocrIdentity, { candidatePhone: phone })
+    }
+  } catch (e) {
+    console.warn('[resume-screen] identity OCR for phone failed:', e instanceof Error ? e.message : e)
+  }
+  if (!extractPhoneFromResumeText(plain)) {
+    const phoneFromHistory = await resolveMissingCandidatePhoneFromPlain(plain)
+    if (phoneFromHistory) {
+      plain = prependContactHeaderToPlain(plain, phoneFromHistory, extractEmailFromResumeText(plain) || undefined)
+      ocrIdentity = mergeResumeOcrIdentity(ocrIdentity, { candidatePhone: phoneFromHistory })
+    }
+  }
+  return { plain, ocrIdentity }
 }
 
 function shouldPreferOcrPlaintext(extracted: string, ocr: ResumeOcrIdentity): boolean {
@@ -2934,6 +3208,29 @@ async function resumeFileToOcrImageDataUri(buffer: Buffer, originalname: string,
   return pages[0] || ''
 }
 
+function parseResumeOcrIdentityFromLooseText(text: string): ResumeOcrIdentity | null {
+  const pickJsonStr = (key: string): string => {
+    const re = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, 's')
+    const m = text.match(re)
+    if (!m) return ''
+    return m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+  }
+  const candidateName = sanitizeCandidateName(pickJsonStr('candidateName') || pickJsonStr('name'))
+  const candidatePhone = normalizeCnMobile(pickJsonStr('candidatePhone') || pickJsonStr('phone') || pickJsonStr('mobile'))
+  const email = pickProfileStr(pickJsonStr('email') || pickJsonStr('mail')) || ''
+  const genderRaw = pickProfileStr(pickJsonStr('gender'))
+  const gender = genderRaw === '男' || genderRaw === '女' ? genderRaw : ''
+  const rawText = pickProfileStr(pickJsonStr('rawText') || pickJsonStr('text')) || ''
+  if (!candidateName && !candidatePhone && !email && !gender && !rawText) return null
+  return {
+    ...(candidateName ? { candidateName } : {}),
+    ...(candidatePhone ? { candidatePhone } : {}),
+    ...(email ? { email: email.slice(0, 128) } : {}),
+    ...(gender ? { gender } : {}),
+    ...(rawText ? { rawText: stripOcrWatermarkNoise(rawText).slice(0, resumeOcrRawTextMaxChars()) } : {})
+  }
+}
+
 function parseResumeOcrIdentity(raw: unknown): ResumeOcrIdentity | null {
   const text = String(raw || '')
     .trim()
@@ -2954,11 +3251,43 @@ function parseResumeOcrIdentity(raw: unknown): ResumeOcrIdentity | null {
       ...(candidatePhone ? { candidatePhone } : {}),
       ...(email ? { email: email.slice(0, 128) } : {}),
       ...(gender ? { gender } : {}),
-      ...(rawText ? { rawText: rawText.slice(0, resumeOcrRawTextMaxChars()) } : {})
+      ...(rawText ? { rawText: stripOcrWatermarkNoise(rawText).slice(0, resumeOcrRawTextMaxChars()) } : {})
     }
   } catch {
-    return null
+    return parseResumeOcrIdentityFromLooseText(text)
   }
+}
+
+async function visionOcrTranscribePlainText(imageUrls: string[]): Promise<string> {
+  const data = await dashScopeChatCompletions(
+    {
+      model: resumeOcrModel(),
+      temperature: 0,
+      max_tokens: 8000,
+      messages: [
+        {
+          role: 'system',
+          content: '请逐字转写图片中的全部可见文字，保留换行，不要总结、不要省略。'
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: imageUrls.length > 1 ? `共 ${imageUrls.length} 页，按页顺序转写全部文字。` : '转写简历全文'
+            },
+            ...imageUrls.map((url) => ({ type: 'image_url', image_url: { url } }))
+          ]
+        }
+      ]
+    },
+    { timeoutMs: Math.max(resumeOcrTimeoutMs(), 90000) }
+  )
+  const raw = String(data?.choices?.[0]?.message?.content || '')
+    .trim()
+    .replace(/^```(?:text|markdown)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+  return stripOcrWatermarkNoise(raw)
 }
 
 async function extractResumeByOcr(
@@ -2975,7 +3304,7 @@ async function extractResumeByOcr(
     {
       type: 'text',
       text: isFull
-        ? `共 ${imageUrls.length} 张简历页面。请按页顺序逐字转写全部可见文字到 rawText（不要总结、不要省略）。同时提取 candidateName,candidatePhone,email,gender；姓名只保留人名本身。无法识别用空字符串。只输出 JSON。`
+        ? `共 ${imageUrls.length} 张简历页。按页顺序把全部可见文字写入 rawText，并提取 candidateName,candidatePhone,email,gender。`
         : '请从这张简历首页提取候选人身份信息。输出字段：candidateName,candidatePhone,email,gender,rawText。candidateName 只保留姓名本身，不要包含性别、年龄、职位；无法识别则为空字符串。'
     },
     ...imageUrls.map((url) => ({ type: 'image_url', image_url: { url } }))
@@ -2984,21 +3313,47 @@ async function extractResumeByOcr(
     {
       model: resumeOcrModel(),
       temperature: 0,
-      max_tokens: isFull ? 3800 : 800,
-      response_format: { type: 'json_object' },
+      max_tokens: isFull ? 8000 : 800,
       messages: [
         {
           role: 'system',
           content: isFull
-            ? '你是简历 OCR 转写器。只输出 JSON，rawText 尽量完整保留原文。'
-            : '你是简历首页 OCR 信息抽取器。只抽取图片中明确出现的信息，不要猜测，不要补全。只输出 JSON。'
+            ? '只输出 JSON：candidateName,candidatePhone,email,gender,rawText。rawText 为全文逐字转写，不要省略。'
+            : '你是简历首页 OCR 信息抽取器。只抽取图片中明确出现的信息，不要猜测，不要补全。只输出一个合法 JSON 对象。'
         },
         { role: 'user', content: userParts }
       ]
     },
-    { timeoutMs: isFull ? Math.max(resumeOcrTimeoutMs(), 45000) : resumeOcrTimeoutMs() }
+    { timeoutMs: isFull ? Math.max(resumeOcrTimeoutMs(), 90000) : resumeOcrTimeoutMs() }
   )
-  return parseResumeOcrIdentity(data?.choices?.[0]?.message?.content)
+  let identity = parseResumeOcrIdentity(data?.choices?.[0]?.message?.content) || {}
+  if (isFull) {
+    let rawText = stripOcrWatermarkNoise(String(identity.rawText || ''))
+    if (resumePlaintextMeaningfulLength(rawText) < 120) {
+      const plain = await visionOcrTranscribePlainText(imageUrls)
+      if (resumePlaintextMeaningfulLength(plain) >= 120) rawText = plain
+    }
+    if (resumePlaintextMeaningfulLength(rawText) < 120) return null
+    const candidateName =
+      sanitizeCandidateName(identity.candidateName) ||
+      guessCandidateNameFromResume(rawText) ||
+      undefined
+    const candidatePhone =
+      normalizeCnMobile(String(identity.candidatePhone || '')) ||
+      extractPhoneFromResumeText(rawText) ||
+      undefined
+    return {
+      ...(candidateName ? { candidateName } : {}),
+      ...(candidatePhone ? { candidatePhone } : {}),
+      ...(identity.email ? { email: identity.email } : {}),
+      ...(identity.gender ? { gender: identity.gender } : {}),
+      rawText: rawText.slice(0, resumeOcrRawTextMaxChars())
+    }
+  }
+  if (!identity.candidateName && !identity.candidatePhone && !identity.email && !identity.gender && !identity.rawText) {
+    return null
+  }
+  return identity as ResumeOcrIdentity
 }
 
 async function extractResumeIdentityByOcr(
@@ -3025,9 +3380,17 @@ async function resolveResumePlaintextForScreening(params: {
     extracted = ''
   }
   let ocrIdentity: ResumeOcrIdentity | null = null
-  const needOcr = isResumePlaintextLowQuality(extracted, fileSize)
+  const hybridScan = isPdfWatermarkScannedHybrid(extracted)
+  const needOcr = hybridScan || isResumePlaintextLowQuality(extracted, fileSize)
   if (!needOcr) {
-    return { plain: extracted.trim(), ocrIdentity: null }
+    return supplementResumePlainWithIdentityOcr({
+      buffer,
+      originalname,
+      mimetype,
+      plain: extracted.trim(),
+      ocrIdentity: null,
+      onStage
+    })
   }
   if (!resumeFileSupportsOcr(originalname, mimetype)) {
     const ext = path.extname(originalname || '').toLowerCase()
@@ -3043,35 +3406,51 @@ async function resolveResumePlaintextForScreening(params: {
     return { plain: extracted.trim(), ocrIdentity: null }
   }
   onStage?.(
-    extracted.trim() ? '正文质量偏低，尝试 OCR 转写' : '文本为空，尝试 OCR 转写',
+    hybridScan
+      ? '检测到扫描水印/多页占位，尝试 OCR 转写'
+      : extracted.trim()
+        ? '正文质量偏低，尝试 OCR 转写'
+        : '文本为空，尝试 OCR 转写',
     extracted.trim() ? 26 : 24
   )
   try {
     ocrIdentity = await extractResumeByOcr(buffer, originalname, mimetype, 'full')
   } catch (ocrErr) {
     console.warn('[resume-screen] OCR full failed:', ocrErr instanceof Error ? ocrErr.message : ocrErr)
-    try {
-      ocrIdentity = await extractResumeByOcr(buffer, originalname, mimetype, 'identity')
-    } catch (ocrErr2) {
-      console.warn('[resume-screen] OCR identity fallback failed:', ocrErr2 instanceof Error ? ocrErr2.message : ocrErr2)
-    }
   }
   if (ocrIdentity && (ocrIdentity.rawText || ocrIdentity.candidateName || ocrIdentity.candidatePhone)) {
     const ocrPlain = buildPlainFromOcrIdentity(ocrIdentity)
-    if (ocrPlain.trim() && shouldPreferOcrPlaintext(extracted, ocrIdentity)) {
-      return { plain: ocrPlain.trim(), ocrIdentity }
-    }
-    if (!extracted.trim() && ocrPlain.trim()) {
-      return { plain: ocrPlain.trim(), ocrIdentity }
+    if (ocrPlain.trim() && isResumePlaintextSufficientForScreening(ocrPlain)) {
+      if (
+        hybridScan ||
+        shouldPreferOcrPlaintext(extracted, ocrIdentity) ||
+        isResumePlaintextLowQuality(extracted, fileSize)
+      ) {
+        return supplementResumePlainWithIdentityOcr({
+          buffer,
+          originalname,
+          mimetype,
+          plain: ocrPlain.trim(),
+          ocrIdentity,
+          onStage
+        })
+      }
     }
   }
-  if (!extracted.trim()) {
+  if (needOcr && isResumePlaintextLowQuality(extracted, fileSize)) {
     throw new ResumeScreenTaskError(
-      '未能从文件中提取可读文本，OCR 也未识别到有效内容。请确认已安装 poppler（pdftoppm）并配置 DASHSCOPE_API_KEY，或改用可复制文字的 PDF/DOCX。',
+      '未能从扫描件 PDF 中 OCR 识别有效内容。请改用更清晰的可复制文字 PDF/DOCX，或直接上传 JPG/PNG 图片。',
       422
     )
   }
-  return { plain: extracted.trim(), ocrIdentity }
+  return supplementResumePlainWithIdentityOcr({
+    buffer,
+    originalname,
+    mimetype,
+    plain: extracted.trim(),
+    ocrIdentity,
+    onStage
+  })
 }
 
 async function extractResumePlainText(buffer: Buffer, originalname: string, mimetype: string): Promise<string> {
@@ -3217,17 +3596,22 @@ async function runResumeScreeningWithAi(params: {
 async function applyResumeScreeningAiResult(
   screeningId: number,
   result: ResumeScreeningAiResult,
-  candidateName: string
+  candidateName: string,
+  resumePlain?: string
 ): Promise<void> {
+  const plain = String(resumePlain || '').trim()
+  const phoneFromPlain = plain ? extractPhoneFromResumeText(plain) : null
   const evalJson = String(result.evaluationJson || '').trim() || null
   await mysqlPool.query(
     `UPDATE resume_screenings SET
        candidate_name = COALESCE(NULLIF(?, ''), candidate_name),
+       candidate_phone = COALESCE(?, candidate_phone),
        match_score = ?, skill_score = ?, experience_score = ?, education_score = ?, stability_score = ?,
        status = ?, report_summary = ?, evaluation_json = ?
      WHERE id = ?`,
     [
       candidateName,
+      phoneFromPlain,
       result.matchScore,
       result.skillScore,
       result.experienceScore,
@@ -3239,12 +3623,27 @@ async function applyResumeScreeningAiResult(
       screeningId
     ]
   )
+  if (phoneFromPlain) {
+    try {
+      const cid = await ensureResumeCandidateIdForPhone(phoneFromPlain, candidateName)
+      if (cid) {
+        await mysqlPool.query('UPDATE resume_screenings SET candidate_id = COALESCE(candidate_id, ?) WHERE id = ?', [
+          cid,
+          screeningId
+        ])
+      }
+    } catch (candErr) {
+      console.warn('[resume-screen] re-eval candidate phone link skipped:', candErr)
+    }
+  }
   try {
     const parsedEval =
       evalJson && String(evalJson).trim() ? (JSON.parse(String(evalJson)) as Record<string, unknown>) : {}
+    const profileBase = sanitizeCandidateProfile(parsedEval?.candidate_profile) || {}
+    const profileEnriched = plain ? enrichCandidateProfileFromPlainText(profileBase, plain) : profileBase
     const profile = resumeProfileRowFromValues({
       candidateName,
-      profile: parsedEval?.candidate_profile
+      profile: profileEnriched
     })
     await mysqlPool.query(
       `INSERT INTO resume_screening_profiles
@@ -3310,6 +3709,31 @@ async function applyResumeScreeningAiResult(
   }
 }
 
+async function loadStoredResumeFileForScreening(
+  screeningId: number
+): Promise<{ buffer: Buffer; originalname: string; mimetype: string } | null> {
+  try {
+    const [rows] = await mysqlPool.query<RowDataPacket[]>(
+      `SELECT original_name, mime_type, storage_path
+       FROM resume_screening_files WHERE screening_id = ? LIMIT 1`,
+      [screeningId]
+    )
+    const row = rows?.[0] as { original_name?: unknown; mime_type?: unknown; storage_path?: unknown } | undefined
+    if (!row) return null
+    const abs = resolveResumeStorageAbsPath(row.storage_path)
+    if (!abs || !fs.existsSync(abs)) return null
+    const buffer = fs.readFileSync(abs)
+    if (!buffer.length) return null
+    return {
+      buffer,
+      originalname: normalizeMultipartFilename(String(row.original_name || 'resume')).slice(0, 255) || 'resume',
+      mimetype: String(row.mime_type || '').trim()
+    }
+  } catch {
+    return null
+  }
+}
+
 async function reEvaluateResumeScreeningById(screeningId: number): Promise<ResumeScreeningAiResult> {
   const shenpuJobJoin = resumeScreeningsJobCodeMatchSql('j', 's')
   const [rows] = await mysqlPool.query<RowDataPacket[]>(
@@ -3321,9 +3745,48 @@ async function reEvaluateResumeScreeningById(screeningId: number): Promise<Resum
   )
   if (!rows.length) throw new ResumeScreenTaskError('简历筛查记录不存在', 404)
   const row = rows[0] as Record<string, unknown>
-  const resumeText = String(row.resume_plaintext || '').trim()
-  if (!resumeText) {
-    throw new ResumeScreenTaskError('该记录缺少简历正文，无法重新评估，请重新上传可解析的简历。', 422)
+  let resumeText = String(row.resume_plaintext || '').trim()
+  if (!isResumePlaintextSufficientForScreening(resumeText)) {
+    const stored = await loadStoredResumeFileForScreening(screeningId)
+    if (stored) {
+      const resolved = await resolveResumePlaintextForScreening({
+        buffer: stored.buffer,
+        originalname: stored.originalname,
+        mimetype: stored.mimetype
+      })
+      resumeText = resolved.plain.trim()
+      if (resumeText) {
+        await mysqlPool.query('UPDATE resume_screenings SET resume_plaintext = ? WHERE id = ?', [
+          resumeText.slice(0, RESUME_PLAINTEXT_MAX_SAVE),
+          screeningId
+        ])
+      }
+    }
+  }
+  if (!isResumePlaintextSufficientForScreening(resumeText)) {
+    throw new ResumeScreenTaskError(
+      '简历正文过短或 OCR 不完整，维度评分缺少依据。请重新上传扫描件，或在详情页点击「重新评估」前确认原文件仍可访问。',
+      422
+    )
+  }
+  if (!extractPhoneFromResumeText(resumeText)) {
+    const storedForPhone = await loadStoredResumeFileForScreening(screeningId)
+    if (storedForPhone) {
+      const supplemented = await supplementResumePlainWithIdentityOcr({
+        buffer: storedForPhone.buffer,
+        originalname: storedForPhone.originalname,
+        mimetype: storedForPhone.mimetype,
+        plain: resumeText,
+        ocrIdentity: null
+      })
+      if (supplemented.plain !== resumeText) {
+        resumeText = supplemented.plain.trim()
+        await mysqlPool.query('UPDATE resume_screenings SET resume_plaintext = ? WHERE id = ?', [
+          resumeText.slice(0, RESUME_PLAINTEXT_MAX_SAVE),
+          screeningId
+        ])
+      }
+    }
   }
   const jobTitle = String(row.job_title || '').trim()
   const department = String(row.department || '').trim()
@@ -3343,7 +3806,7 @@ async function reEvaluateResumeScreeningById(screeningId: number): Promise<Resum
   if (candidateName && result.evaluationJson) {
     result.evaluationJson = rewriteEvaluationCandidateName(result.evaluationJson, candidateName)
   }
-  await applyResumeScreeningAiResult(screeningId, result, candidateName)
+  await applyResumeScreeningAiResult(screeningId, result, candidateName, resumeText)
   return { ...result, candidateName: candidateName || result.candidateName }
 }
 
@@ -10033,6 +10496,31 @@ async function processResumeScreenTask(params: {
         const msg = ex instanceof Error ? ex.message : 'parse failed'
         throw new ResumeScreenTaskError(msg, 415)
       }
+      if (!isResumePlaintextSufficientForScreening(plain)) {
+        throw new ResumeScreenTaskError(
+          '简历正文过短或 OCR 不完整，无法生成有依据的维度评分。请重新上传更清晰的扫描件，或改用 JPG/PNG。',
+          422
+        )
+      }
+      if (!extractPhoneFromResumeText(plain)) {
+        patchResumeScreenTask(taskId, { uploadProgress: 28, uploadStage: '正文无手机号，尝试 OCR 识别联系方式' })
+        try {
+          const supplemented = await supplementResumePlainWithIdentityOcr({
+            buffer: file.buffer,
+            originalname: uploadFileName,
+            mimetype: file.mimetype || '',
+            plain,
+            ocrIdentity
+          })
+          plain = supplemented.plain
+          ocrIdentity = supplemented.ocrIdentity
+        } catch (phoneOcrErr) {
+          console.warn(
+            '[resume-screen] early identity OCR for phone failed:',
+            phoneOcrErr instanceof Error ? phoneOcrErr.message : phoneOcrErr
+          )
+        }
+      }
       patchResumeScreenTask(taskId, { uploadProgress: 30, uploadStage: '完成文本提取，开始去重' })
 
       const plainStore = plain.slice(0, RESUME_PLAINTEXT_MAX_SAVE)
@@ -10101,7 +10589,8 @@ async function processResumeScreenTask(params: {
       if (!manualCandidateName && (!candidateNameAuto || candidateNameAuto === '候选人' || isLikelyBadCandidateName(candidateNameAuto))) {
         patchResumeScreenTask(taskId, { uploadProgress: 62, uploadStage: '姓名不可靠，尝试 OCR 识别首页姓名' })
         try {
-          ocrIdentity = ocrIdentity || (await extractResumeIdentityByOcr(file.buffer, uploadFileName, file.mimetype || ''))
+          ocrIdentity =
+            ocrIdentity || (await extractResumeIdentityByOcr(file.buffer, uploadFileName, file.mimetype || ''))
         } catch (ocrErr) {
           console.warn('[resume-screen] OCR identity fallback failed:', ocrErr instanceof Error ? ocrErr.message : ocrErr)
         }
@@ -11916,7 +12405,9 @@ app.get('/api/live/session/follow-up', async (req, res) => {
     }
     cleanupFollowUpCache()
     const key = followUpCacheKey(sessionId, questionId)
-    const effectiveWaitMs = config.demoMode ? Math.max(waitMs, 3500) : waitMs
+    const effectiveWaitMs = config.demoMode
+      ? Math.max(waitMs, config.modelWaitMs, 3500)
+      : waitMs
     const startedAt = Date.now()
     let value = followUpCache.get(key)
     while (value?.status === 'pending' && effectiveWaitMs > 0 && Date.now() - startedAt < effectiveWaitMs) {
@@ -11938,7 +12429,11 @@ app.get('/api/live/session/follow-up', async (req, res) => {
       })
     }
     if (value.status === 'pending' && !requireModel && config.fallbackEnabled && !config.demoMode) {
-      const instant = buildInstantFollowUpQuestion(value.parentQuestion || '', value.answer || '')
+      const instant = buildInstantFollowUpQuestion(
+        value.parentQuestion || '',
+        value.answer || '',
+        config.shortAnswerThreshold
+      )
       if (instant) {
         return res.json({
           data: {
@@ -11952,6 +12447,22 @@ app.get('/api/live/session/follow-up', async (req, res) => {
           }
         })
       }
+    }
+    if (config.demoMode && !requireModel) {
+      const demoText =
+        (value.status === 'ready' && value.question) ||
+        resolveDemoFollowUpFallback(value.parentQuestion || '', value.answer || '')
+      return res.json({
+        data: {
+          status: 'ready',
+          question: {
+            id: `FU-${questionId}-demo`,
+            text: demoText,
+            type: 'follow_up',
+            parentQuestionId: questionId
+          }
+        }
+      })
     }
     return res.json({ data: { status: value.status } })
   } catch {

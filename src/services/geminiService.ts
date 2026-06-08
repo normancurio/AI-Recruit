@@ -7,6 +7,7 @@ import {
   type ResumeEvalJobType,
   type ResumeEvalTechDirection
 } from '../../shared/resumeEvalPrompt';
+import { mapEvalDimensionsToLegacyScores } from '../../shared/resumeEvalDimensions';
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -227,10 +228,19 @@ export function parseResumeEvalResult(
   }
 
   const ds = parsed.dimension_scores;
-  const skillScore = clampResumeEvalScore(parsed.job_type === 'risk_ops' ? ds.data_skill?.score : ds.code_quality?.score);
-  const experienceScore = clampResumeEvalScore(parsed.job_type === 'risk_ops' ? ds.depth?.score : ds.engineering_depth?.score);
-  const educationScore = clampResumeEvalScore(ds.communication_business?.score);
-  const stabilityScore = clampResumeEvalScore(ds.stability_growth?.score);
+  const dimForLegacy: Record<string, { score: number; evidence: string[] }> = {};
+  for (const [k, v] of Object.entries(ds)) {
+    dimForLegacy[k] = { score: v.score, evidence: v.evidence || [] };
+  }
+  const legacy = mapEvalDimensionsToLegacyScores({
+    dim: dimForLegacy,
+    jobType: parsed.job_type,
+    fallbackOverall: parsed.total_score,
+  });
+  const skillScore = legacy.skillScore;
+  const experienceScore = legacy.experienceScore;
+  const educationScore = legacy.educationScore;
+  const stabilityScore = legacy.stabilityScore;
   const shortRisks = parsed.risks.slice(0, 3).map((r, i) => `${i + 1}. ${r.risk}`).join('；');
   const reportSummary = [
     parsed.summary || '暂无总结',

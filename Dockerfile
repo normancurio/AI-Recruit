@@ -16,7 +16,7 @@ RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
         /etc/apt/sources.list.d/debian.sources; \
     fi \
   && apt-get update \
-  && apt-get install -y --no-install-recommends chromium fonts-noto-cjk libreoffice-writer-nogui \
+  && apt-get install -y --no-install-recommends chromium fonts-noto-cjk libreoffice-writer-nogui poppler-utils \
   && rm -rf /var/lib/apt/lists/*
 
 ENV SHENPU_PDF_ENGINE=chromium

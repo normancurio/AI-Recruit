@@ -27,6 +27,12 @@ test('guessCandidateNameFromFilename ignores generic resume labels without a per
   assert.equal(guessCandidateNameFromFilename('应届毕业生个人简历 (1).docx'), '')
 })
 
+test('guessCandidateNameFromFilename ignores trailing 副本 and parses Shenpu role-name pattern', () => {
+  assert.equal(guessCandidateNameFromFilename('申朴-前端-黄龙翔 - 副本.pdf'), '黄龙翔')
+  assert.equal(guessCandidateNameFromFilename('申朴-前端-黄龙翔-副本.pdf'), '黄龙翔')
+  assert.equal(guessCandidateNameFromFilename('申朴-前端-黄龙翔.pdf'), '黄龙翔')
+})
+
 test('isFilenameEnglishNoiseToken blocks common stack keywords', () => {
   assert.equal(isFilenameEnglishNoiseToken('Java'), true)
   assert.equal(isFilenameEnglishNoiseToken('Python'), true)

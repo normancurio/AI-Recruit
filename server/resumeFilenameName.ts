@@ -7,6 +7,11 @@ const FILENAME_NAME_STOP_WORDS = new Set([
   '求职简历',
   '候选人',
   '保单',
+  '前端',
+  '副本',
+  '复制',
+  '拷贝',
+  '复件',
   '可出差',
   '加水印',
   '北京',
@@ -83,6 +88,8 @@ export function guessCandidateNameFromFilename(filename: string): string {
     .replace(/\.[^.]+$/i, '')
     .replace(/[（(][^()（）]*[）)]/g, ' ')
     .replace(/[【\[][^】\]]*[】\]]/g, ' ')
+    .replace(/\s*[-－—–]?\s*(?:副本|复制|拷贝|复件)\s*$/gi, '')
+    .replace(/\s*[-－—–]?\s*copy\s*$/gi, '')
     .replace(/[_－—–]/g, '-')
     .replace(/pdf/gi, ' ')
     .replace(/加水印/g, ' ')
@@ -111,6 +118,11 @@ export function guessCandidateNameFromFilename(filename: string): string {
     if (FILENAME_NAME_STOP_WORDS.has(city) && isPlausibleFilenameCandidateName(name)) {
       return normalizeChineseNameToken(name)
     }
+  }
+
+  // 申朴-岗位-姓名（如 申朴-前端-黄龙翔.pdf；末尾「副本」已在 base 阶段剥离）
+  if (parts.length === 3 && parts[0] === '申朴' && isPlausibleFilenameCandidateName(parts[2]!)) {
+    return normalizeChineseNameToken(parts[2]!)
   }
 
   const candidates: string[] = []

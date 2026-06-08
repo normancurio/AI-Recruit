@@ -442,11 +442,18 @@ function normalizeInterviewFollowUpConfig(raw?: Partial<InterviewFollowUpConfig>
     const n = Number(v);
     return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fallback;
   };
-  return {
+  const demoMode =
+    raw?.demoMode !== undefined ? Boolean(raw.demoMode) : DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.demoMode;
+  const normalized: InterviewFollowUpConfig = {
     enabled: raw?.enabled !== undefined ? Boolean(raw.enabled) : DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.enabled,
     maxPerInterview: clamp(raw?.maxPerInterview, DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.maxPerInterview, 0, 10),
     maxPerQuestion: clamp(raw?.maxPerQuestion, DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.maxPerQuestion, 0, 1),
-    modelWaitMs: clamp(raw?.modelWaitMs, DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.modelWaitMs, 0, 5000),
+    modelWaitMs: clamp(
+      raw?.modelWaitMs,
+      DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.modelWaitMs,
+      0,
+      demoMode ? 10000 : 5000
+    ),
     shortAnswerThreshold: clamp(
       raw?.shortAnswerThreshold,
       DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.shortAnswerThreshold,
@@ -457,11 +464,14 @@ function normalizeInterviewFollowUpConfig(raw?: Partial<InterviewFollowUpConfig>
       raw?.fallbackEnabled !== undefined
         ? Boolean(raw.fallbackEnabled)
         : DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.fallbackEnabled,
-    demoMode:
-      raw?.demoMode !== undefined ? Boolean(raw.demoMode) : DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.demoMode,
+    demoMode,
     model: String(raw?.model || '').trim(),
     prompt: String(raw?.prompt || DEFAULT_INTERVIEW_FOLLOW_UP_PROMPT).trim() || DEFAULT_INTERVIEW_FOLLOW_UP_PROMPT
   };
+  if (normalized.demoMode) {
+    normalized.modelWaitMs = Math.max(normalized.modelWaitMs, 3000);
+  }
+  return normalized;
 }
 export interface Project {
   id: string;
@@ -6036,6 +6046,7 @@ function resumeEvalDimensionLabelCn(key: string): string {
     impact: '业务影响力',
     data_skill: '数据能力',
     stability_growth: '稳定与成长',
+    education_fit: '学历匹配',
     communication_business: '沟通与业务协同',
     tech_fit: '技术岗位匹配',
     engineering_depth: '工程深度',
@@ -6098,6 +6109,7 @@ function resumeDimensionOrderedEntries(scores: Record<string, number>): Array<[s
     'engineering_depth',
     'code_quality',
     'stability_growth',
+    'education_fit',
     'communication_business',
     'skill',
     'experience',
@@ -13672,7 +13684,7 @@ function SystemAiInterviewSettingsView() {
   }> = [
     { key: 'maxPerInterview', label: '每场最多追问', min: 0, max: 10, step: 1, hint: '控制一场面试里最多插入几次追问。' },
     { key: 'maxPerQuestion', label: '每题最多追问', min: 0, max: 1, step: 1, hint: '第一版建议保持 1，避免连续追问打断节奏。' },
-    { key: 'modelWaitMs', label: '等待模型 ms', min: 0, max: 5000, step: 100, hint: '超过该时间未返回时直接进入下一题或走兜底。' },
+    { key: 'modelWaitMs', label: '等待模型 ms', min: 0, max: 10000, step: 100, hint: '演示模式建议 3000 以上；超时后走兜底追问。' },
     { key: 'shortAnswerThreshold', label: '短回答阈值', min: 2, max: 80, step: 1, hint: '低于该字数时更倾向生成补充型追问。' }
   ];
 
@@ -13771,7 +13783,7 @@ function SystemAiInterviewSettingsView() {
                     <span>
                       演示模式 · 每道主题必出追问
                       <span className="mt-1 block text-xs font-normal leading-relaxed text-amber-800">
-                        开启后放宽触发条件并延长 AI 等待时间，仍由模型根据回答生成追问（不用固定兜底句）。演示结束后请关闭。
+                        开启后放宽触发条件、延长 AI 等待，并保证每题至少出现 1 次追问（模型失败时用内容相关兜底）。演示结束后请关闭。
                       </span>
                     </span>
                   </label>
