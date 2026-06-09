@@ -14,5 +14,6 @@ test('resume score parser caps scores when model says not recommended or hard ga
   assert.match(source, /decision === '不建议推进'/)
   assert.match(source, /hardGatePassed === false/)
   assert.match(source, /Math\.min\(score, 59\)/)
-  assert.match(source, /Math\.min\(score, 49\)/)
+  assert.match(source, /hardGateFailedNames/)
+  assert.match(source, /dimBase - penalty/)
 })

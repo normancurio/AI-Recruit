@@ -2260,11 +2260,25 @@ function resumeEvalHardGatePassed(value: unknown): boolean | null {
   return null
 }
 
+function extractHardGateFailedNames(value: unknown): string[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return []
+  const gate = value as { items?: unknown }
+  if (!Array.isArray(gate.items)) return []
+  return gate.items
+    .filter((item) => {
+      const result = String((item as { result?: unknown })?.result || '').trim().toLowerCase()
+      return result === 'fail' || result === 'failed' || result === 'false' || result === '不通过'
+    })
+    .map((item) => String((item as { name?: unknown })?.name || '').trim())
+    .filter(Boolean)
+}
+
 function normalizeResumeEvalTotalScore(input: {
   rawTotal: unknown
   dimensionScore: number | null
   decision: string
   hardGatePassed: boolean | null
+  hardGateFailedNames?: string[]
 }): number {
   const rawTotal = Number(input.rawTotal)
   const rawInRange = Number.isFinite(rawTotal) && rawTotal >= 0 && rawTotal <= 100
@@ -2283,7 +2297,13 @@ function normalizeResumeEvalTotalScore(input: {
   const decision = String(input.decision || '').trim()
   if (decision === '不建议推进') score = Math.min(score, 59)
   else if (decision === '建议备选') score = Math.min(score, 79)
-  if (input.hardGatePassed === false) score = Math.min(score, 49)
+  if (input.hardGatePassed === false) {
+    const dimBase = input.dimensionScore != null ? clampResumeScore(input.dimensionScore) : score
+    const failCount = Math.max(1, input.hardGateFailedNames?.length ?? 1)
+    const penalty = Math.min(28, 10 + (failCount - 1) * 5)
+    score = Math.min(score, dimBase - penalty, 69)
+    score = Math.max(42, score)
+  }
   return clampResumeScore(score)
 }
 
@@ -2459,13 +2479,19 @@ function parseResumeEvalToScreeningResult(
     const plainText = String(resumePlain || '').trim()
     const dimNormalized = normalizeResumeEvalDimensionsForJobType(dim, jobType)
     const dimCapped = applyResumeEvalDimensionCaps(dimNormalized, jobType, plainText)
-    const decision = String(parsed.decision || '建议备选').trim()
+    const hardGateFailedNames = extractHardGateFailedNames(parsed.hard_gate)
     const hardGatePassed = resumeEvalHardGatePassed(parsed.hard_gate)
+    let decision = String(parsed.decision || '建议备选').trim()
+    if (hardGatePassed === false && decision === '建议进入面试') {
+      decision = '建议备选'
+    }
+    const dimensionScore = weightedResumeEvalDimensionScore(dimCapped)
     const totalScore = normalizeResumeEvalTotalScore({
       rawTotal: parsed.total_score,
-      dimensionScore: weightedResumeEvalDimensionScore(dimCapped),
+      dimensionScore,
       decision,
-      hardGatePassed
+      hardGatePassed,
+      hardGateFailedNames
     })
     if (
       shouldRetryResumeEvalParse({
@@ -2505,6 +2531,10 @@ function parseResumeEvalToScreeningResult(
     const educationScore = legacyScores.educationScore
     const stabilityScore = legacyScores.stabilityScore
     const summary = String(parsed.summary || '').trim()
+    const hardGateNote =
+      hardGateFailedNames.length > 0
+        ? `硬性门槛未通过：${hardGateFailedNames.slice(0, 3).join('、')}`
+        : ''
     const strengths = Array.isArray(parsed.strengths)
       ? parsed.strengths.map((x) => String(x || '').trim()).filter(Boolean)
       : []
@@ -2526,6 +2556,7 @@ function parseResumeEvalToScreeningResult(
     const risksFiltered = filterContradictoryResumeRisks(risks, resumePlain)
     const mergedSummary = [
       summary || '暂无总结',
+      hardGateNote,
       strengths.length ? `优势：${strengths.slice(0, 3).join('；')}` : '',
       risksFiltered.length ? `风险：${risksFiltered.slice(0, 3).map((x) => x.risk).join('；')}` : '',
       `结论：${decision || '建议备选'}`
@@ -2542,6 +2573,8 @@ function parseResumeEvalToScreeningResult(
     const normalizedEval = {
       ...parsedRest,
       job_type: jobType,
+      decision,
+      ...(hardGateFailedNames.length ? { hard_gate_failed_items: hardGateFailedNames } : {}),
       ...(Number.isFinite(rawTotalScore) && (rawTotalScore < 0 || rawTotalScore > 100)
         ? { model_total_score_raw: rawTotalScore }
         : {}),

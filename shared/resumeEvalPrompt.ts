@@ -183,6 +183,7 @@ export function buildResumeEvalSystemPrompt(): string {
     'dimension_scores 每项 {"score":0-100,"evidence":["…"]}；evidence 不得为空，须摘录简历原文；无直接依据时选最接近的一句。' +
     'education_fit 须依据简历中的学校、学历层次、专业，不得编造。' +
     'risks 为 {"risk","interview_question"} 数组；每条风险必须可核验。' +
-    'decision 仅：建议进入面试|建议备选|不建议推进。'
+    'decision 仅：建议进入面试|建议备选|不建议推进。' +
+    'hard_gate 任一项 fail 时 passed 必须为 false，decision 不得为「建议进入面试」，total_score 应低于六维加权分。'
   )
 }
