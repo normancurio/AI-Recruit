@@ -202,7 +202,9 @@ export function parseResumeEvalResult(
 
     parsed = {
       schema_version: String(obj?.schema_version || 'v1.0'),
-      job_type: obj?.job_type === 'risk_ops' || obj?.job_type === 'engineering' ? obj.job_type : jobType,
+      job_type: obj?.job_type === 'risk_ops' || obj?.job_type === 'engineering' || obj?.job_type === 'product'
+        ? obj.job_type
+        : jobType,
       hard_gate: {
         passed: Boolean(obj?.hard_gate?.passed),
         items: safeArray<any>(obj?.hard_gate?.items).map((it) => ({

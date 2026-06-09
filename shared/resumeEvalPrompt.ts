@@ -1,4 +1,4 @@
-export type ResumeEvalJobType = 'risk_ops' | 'engineering'
+export type ResumeEvalJobType = 'risk_ops' | 'engineering' | 'product'
 export type ResumeEvalTechDirection = '后端' | '前端' | '全栈' | '客户端' | '数据'
 
 export type BuildResumeEvalPromptInput = {
@@ -14,12 +14,21 @@ const RISK_OPS_TITLE_RE = /风控|反欺诈|信用|催收|合规|授信|风险�
 /** 岗位名称已明确为测试/研发时，JD 里「事前风控」等产品模块名不算风控运营岗 */
 const ENGINEERING_JOB_TITLE_RE =
   /测试(?:工程师|开发|员|岗)?|软件测试|研发|开发工程师|后端|前端|全栈|QA|质量保障|test engineer/i
+const PRODUCT_JOB_TITLE_RE = /产品经理|产品专员|产品运营|产品负责人|product manager/i
+const PRODUCT_JD_RE = /产品经理|原型设计|产品原型|需求说明书|Axure|墨刀|需求分析|敏捷开发/i
 
 export function detectResumeEvalJobType(jobTitle: string, department: string, jdText: string): ResumeEvalJobType {
   const title = String(jobTitle || '').trim()
   const blob = `${title} ${department} ${jdText}`
   if (ENGINEERING_JOB_TITLE_RE.test(title) && !RISK_OPS_TITLE_RE.test(title)) {
     return 'engineering'
+  }
+  if (
+    (PRODUCT_JOB_TITLE_RE.test(title) || PRODUCT_JD_RE.test(blob)) &&
+    !RISK_OPS_TITLE_RE.test(title) &&
+    !ENGINEERING_JOB_TITLE_RE.test(title)
+  ) {
+    return 'product'
   }
   return RISK_JOB_RE.test(blob) ? 'risk_ops' : 'engineering'
 }
@@ -103,6 +112,66 @@ ${extraRequirements || '无'}
     "depth": {"score": 0, "weight": 20, "evidence": [""]},
     "impact": {"score": 0, "weight": 20, "evidence": [""]},
     "data_skill": {"score": 0, "weight": 15, "evidence": [""]},
+    "stability_growth": {"score": 0, "weight": 10, "evidence": [""]},
+    "education_fit": {"score": 0, "weight": 10, "evidence": [""]}
+  },
+  "total_score": 0,
+  "strengths": [""],
+  "risks": [{"risk": "", "interview_question": ""}],
+  "decision": "建议进入面试",
+  "summary": "",
+  "candidate_name": "",
+  "candidate_profile": {}
+}`.trim()
+  }
+
+  if (jobType === 'product') {
+    return `${commonHeader}
+
+# 评估场景
+岗位类型：产品经理（非研发/非写代码岗）
+
+# 流程
+1. 硬性门槛校验（Pass/Fail）
+- 产品/需求分析相关经验年限
+- 原型与需求文档能力（Axure/墨刀/Figma/需求说明书/PRD 等，按 JD）
+- 行业或业务域匹配（如 JD 要求的金融、租赁、信贷、B 端等）
+- 跨部门沟通与推动研发测试验收的能力
+
+2. 六维度评分（0-100）
+- product_fit（权重25，岗位/行业/工具栈匹配；看 Axure/墨刀、敏捷、业务域，不看编程语言）
+- product_depth（权重20，需求全链路、产品模块复杂度、独立负责边界）
+- impact（权重20，业务成果；上线、效率、指标优先）
+- collaboration（权重15，沟通协同、推动落地、跨团队协调）
+- stability_growth（权重10）
+- education_fit（权重10，学历/专业与岗位门槛匹配；须摘录学校、学历层次）
+
+3. 评分约束
+- 不得因「不会写代码/缺代码质量」扣分；产品经理不评估 code_quality/tech_fit
+- 无原型/PRD/需求文档证据 => product_fit 最高 65
+- 仅辅助执行、无独立负责产品模块 => product_depth 最高 70
+- 缺量化成果 => impact 最高 75
+
+4. 每个维度至少1条证据（来自简历原文），不得省略任一维度
+证据格式：["证据点：...｜摘录：..."]
+
+5. 输出最多5条风险，每条附面试核验问题（业务/产品追问，非代码题）
+
+6. 结论仅三选一
+- 建议进入面试
+- 建议备选
+- 不建议推进
+
+# 输出JSON格式
+{
+  "schema_version": "v1.0",
+  "job_type": "product",
+  "hard_gate": { "passed": true, "items": [{"name": "", "result": "pass", "reason": ""}] },
+  "dimension_scores": {
+    "product_fit": {"score": 0, "weight": 25, "evidence": [""]},
+    "product_depth": {"score": 0, "weight": 20, "evidence": [""]},
+    "impact": {"score": 0, "weight": 20, "evidence": [""]},
+    "collaboration": {"score": 0, "weight": 15, "evidence": [""]},
     "stability_growth": {"score": 0, "weight": 10, "evidence": [""]},
     "education_fit": {"score": 0, "weight": 10, "evidence": [""]}
   },

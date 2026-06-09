@@ -9,6 +9,9 @@ assert.equal(detectResumeEvalJobType('中级测试工程师', '深圳招聘团�
 assert.equal(detectResumeEvalJobType('风控策略运营', '风险部', testJd), 'risk_ops')
 assert.equal(detectResumeEvalJobType('后端开发工程师', '技术部', '信贷风控系统开发'), 'engineering')
 
+assert.equal(detectResumeEvalJobType('高级产品经理', '产品部', 'Axure 原型设计'), 'product')
+assert.equal(detectResumeEvalJobType('中级JAVA 开发工程师', '', ''), 'engineering')
+
 import { finalizeResumeEvalDimensionScores } from '../../shared/resumeEvalDimensions.ts'
 const riskDim = {
   risk_fit: { score: 0, evidence: ['证据点：技术/岗位匹配｜摘录：掌握 sql'] },
@@ -21,5 +24,20 @@ const riskDim = {
 const eng = finalizeResumeEvalDimensionScores(riskDim, 'engineering')
 assert.ok(eng.tech_fit && eng.tech_fit.score >= 45)
 assert.equal(eng.risk_fit, undefined)
+
+const engAsPm = finalizeResumeEvalDimensionScores(
+  {
+    tech_fit: { score: 30, evidence: ['证据点：工具｜摘录：Axure'] },
+    code_quality: { score: 35, evidence: [] },
+    engineering_depth: { score: 40, evidence: ['证据点：产品｜摘录：负责需求分析'] },
+    impact: { score: 60, evidence: [] },
+    stability_growth: { score: 40, evidence: [] },
+    education_fit: { score: 50, evidence: [] },
+  },
+  'product'
+)
+assert.ok(engAsPm.product_fit)
+assert.equal(engAsPm.code_quality, undefined)
+assert.equal(engAsPm.tech_fit, undefined)
 
 console.log('resume-eval-job-type tests passed')

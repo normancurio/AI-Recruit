@@ -10,6 +10,9 @@ export const RESUME_EVAL_DIMENSION_WEIGHTS: Record<string, number> = {
   impact: 20,
   data_skill: 15,
   code_quality: 15,
+  product_fit: 25,
+  product_depth: 20,
+  collaboration: 15,
   stability_growth: 10,
   education_fit: 10,
   /** @deprecated 旧版六维，与新记录 education_fit 二选一 */
@@ -75,6 +78,7 @@ function firstFinite(...vals: unknown[]): number | null {
 
 const ENGINEERING_DIM_KEYS = new Set(['tech_fit', 'code_quality', 'engineering_depth'])
 const RISK_DIM_KEYS = new Set(['risk_fit', 'data_skill', 'depth'])
+const PRODUCT_DIM_KEYS = new Set(['product_fit', 'product_depth', 'collaboration'])
 
 /** 从模型返回的 dimension_scores 键推断岗位维度体系 */
 export function inferResumeEvalJobTypeFromDimensions(
@@ -83,12 +87,17 @@ export function inferResumeEvalJobTypeFromDimensions(
   const keys = Object.keys(dim || {})
   let eng = 0
   let risk = 0
+  let product = 0
   for (const k of keys) {
     if (ENGINEERING_DIM_KEYS.has(k)) eng++
     if (RISK_DIM_KEYS.has(k)) risk++
+    if (PRODUCT_DIM_KEYS.has(k)) product++
   }
-  if (eng >= 2 && eng > risk) return 'engineering'
-  if (risk >= 2 && risk > eng) return 'risk_ops'
+  const max = Math.max(eng, risk, product)
+  if (max < 2) return null
+  if (product === max && product > eng && product > risk) return 'product'
+  if (eng >= 2 && eng > risk && eng >= product) return 'engineering'
+  if (risk >= 2 && risk > eng && risk > product) return 'risk_ops'
   return null
 }
 
@@ -141,6 +150,24 @@ export function normalizeResumeEvalDimensionsForJobType(
     return out
   }
 
+  if (jobType === 'product' && (inferred === 'engineering' || inferred === 'risk_ops' || inferred === null)) {
+    const fit = mergeDimEntries(
+      dim.product_fit,
+      mergeDimEntries(dim.tech_fit, mergeDimEntries(dim.risk_fit, dim.data_skill))
+    )
+    const depth = mergeDimEntries(
+      dim.product_depth,
+      mergeDimEntries(dim.engineering_depth, dim.depth)
+    )
+    const collab = mergeDimEntries(dim.collaboration, mergeDimEntries(dim.code_quality, dim.communication_business))
+    if (fit) out.product_fit = fit
+    if (depth) out.product_depth = depth
+    if (collab) out.collaboration = collab
+    return out
+  }
+
+  if (jobType === 'product' && inferred === 'product') return dim
+
   if (jobType === 'risk_ops' && inferred === 'engineering') {
     const risk = mergeDimEntries(dim.risk_fit, dim.tech_fit)
     const depth = mergeDimEntries(dim.depth, dim.engineering_depth)
@@ -170,10 +197,24 @@ const RISK_CANONICAL_DIMS = [
   'stability_growth',
   'education_fit'
 ] as const
+const PRODUCT_CANONICAL_DIMS = [
+  'product_fit',
+  'product_depth',
+  'impact',
+  'collaboration',
+  'stability_growth',
+  'education_fit'
+] as const
 
 function inferMinScoreFromDimEvidence(dimKey: string, evidence: string[]): number | null {
   const blob = evidence.join(' ').toLowerCase()
   if (!blob.trim()) return null
+  if (/axure|墨刀|figma|原型|prd|需求文档|需求分析|产品规划|用户故事/.test(blob)) {
+    if (dimKey === 'product_fit' || dimKey === 'product_depth') return 45
+  }
+  if (/沟通|协调|推动|跨部门|敏捷|scrum|评审|验收/.test(blob)) {
+    if (dimKey === 'collaboration' || dimKey === 'communication_business') return 45
+  }
   if (/sql|python|java|jmeter|selenium|postman|自动化|接口测试|测试框架|playwright|pytest/.test(blob)) {
     if (dimKey === 'code_quality') return 50
     if (dimKey === 'tech_fit' || dimKey === 'risk_fit' || dimKey === 'data_skill') return 45
@@ -191,7 +232,12 @@ export function finalizeResumeEvalDimensionScores(
   jobType: ResumeEvalJobType
 ): Record<string, ResumeEvalDimEntry> {
   const normalized = normalizeResumeEvalDimensionsForJobType(dim, jobType)
-  const canonical = jobType === 'engineering' ? ENGINEERING_CANONICAL_DIMS : RISK_CANONICAL_DIMS
+  const canonical =
+    jobType === 'product'
+      ? PRODUCT_CANONICAL_DIMS
+      : jobType === 'engineering'
+        ? ENGINEERING_CANONICAL_DIMS
+        : RISK_CANONICAL_DIMS
   const out: Record<string, ResumeEvalDimEntry> = {}
   for (const k of canonical) {
     const v = normalized[k]
@@ -267,6 +313,23 @@ export function mapEvalDimensionsToLegacyScores(params: {
     }
   }
 
+  if (jobType === 'product') {
+    return {
+      skillScore:
+        weightedDimScore(dim, [
+          ['product_fit', 15],
+          ['collaboration', 10]
+        ]) ?? fallback.skillScore,
+      experienceScore:
+        weightedDimScore(dim, [
+          ['product_depth', 11],
+          ['impact', 9]
+        ]) ?? fallback.experienceScore,
+      educationScore: resolveEducationColumnScore(dim, profile, resumePlain),
+      stabilityScore: clampScore(dim.stability_growth?.score ?? fallback.stabilityScore)
+    }
+  }
+
   return {
     skillScore:
       weightedDimScore(dim, [
@@ -334,6 +397,12 @@ export function applyResumeEvalDimensionCaps(
     if (!hasComplexProject) cap('engineering_depth', 70)
     if (!hasQuant) cap('impact', 75)
     if (looksLikeKeywordStack(plain)) cap('tech_fit', 65)
+  } else if (jobType === 'product') {
+    const hasPrototype = /axure|墨刀|figma|原型|prd|需求文档|需求说明书|产品原型/i.test(plain)
+    const hasOwnedModule = /负责.{0,12}(?:产品|需求|模块|功能)|主导.{0,12}(?:产品|需求)|从0到1|0到1/i.test(plain)
+    if (!hasPrototype) cap('product_fit', 65)
+    if (!hasOwnedModule) cap('product_depth', 70)
+    if (!hasQuant) cap('impact', 75)
   } else {
     if (!hasQuant) cap('impact', 70)
     if (!hasSqlData) cap('data_skill', 65)
