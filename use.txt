@@ -16,9 +16,9 @@ node -v 应显示 v26.1.0 左右。不要用 Node 24 启动 API；当前 pdf-par
 
 3. 确认当前本地配置使用的是本地环境数据库，不是线上库：
 
-.env 中应保持：
-MYSQL_HOST="100.79.134.17"
-REDIS_HOST="100.79.134.17"
+.env 中应保持（本机 MySQL / Redis，不要连线上库）：
+MYSQL_HOST="127.0.0.1"
+REDIS_HOST="127.0.0.1"
 PORT="3011"
 ADMIN_UI_PORT="3010"
 ADMIN_API_UPSTREAM="http://127.0.0.1:3011"
