@@ -202,7 +202,7 @@ export function parseResumeEvalResult(
 
     parsed = {
       schema_version: String(obj?.schema_version || 'v1.0'),
-      job_type: obj?.job_type === 'risk_ops' || obj?.job_type === 'engineering' || obj?.job_type === 'product'
+      job_type: obj?.job_type === 'risk_ops' || obj?.job_type === 'engineering' || obj?.job_type === 'product' || obj?.job_type === 'professional'
         ? obj.job_type
         : jobType,
       hard_gate: {

@@ -1,5 +1,7 @@
-export type ResumeEvalJobType = 'risk_ops' | 'engineering' | 'product'
+export type ResumeEvalJobType = 'risk_ops' | 'engineering' | 'product' | 'professional'
 export type ResumeEvalTechDirection = '后端' | '前端' | '全栈' | '客户端' | '数据'
+
+export { detectResumeEvalJobType } from './resumeEvalJobDetect.ts'
 
 export type BuildResumeEvalPromptInput = {
   jobType: ResumeEvalJobType
@@ -7,30 +9,6 @@ export type BuildResumeEvalPromptInput = {
   resumeText: string
   extraRequirements?: string
   techDirection?: ResumeEvalTechDirection
-}
-
-const RISK_JOB_RE = /风控|反欺诈|信用|催收|合规|授信|风险/
-const RISK_OPS_TITLE_RE = /风控|反欺诈|信用|催收|合规|授信|风险运营|策略运营/
-/** 岗位名称已明确为测试/研发时，JD 里「事前风控」等产品模块名不算风控运营岗 */
-const ENGINEERING_JOB_TITLE_RE =
-  /测试(?:工程师|开发|员|岗)?|软件测试|研发|开发工程师|后端|前端|全栈|QA|质量保障|test engineer/i
-const PRODUCT_JOB_TITLE_RE = /产品经理|产品专员|产品运营|产品负责人|product manager/i
-const PRODUCT_JD_RE = /产品经理|原型设计|产品原型|需求说明书|Axure|墨刀|需求分析|敏捷开发/i
-
-export function detectResumeEvalJobType(jobTitle: string, department: string, jdText: string): ResumeEvalJobType {
-  const title = String(jobTitle || '').trim()
-  const blob = `${title} ${department} ${jdText}`
-  if (ENGINEERING_JOB_TITLE_RE.test(title) && !RISK_OPS_TITLE_RE.test(title)) {
-    return 'engineering'
-  }
-  if (
-    (PRODUCT_JOB_TITLE_RE.test(title) || PRODUCT_JD_RE.test(blob)) &&
-    !RISK_OPS_TITLE_RE.test(title) &&
-    !ENGINEERING_JOB_TITLE_RE.test(title)
-  ) {
-    return 'product'
-  }
-  return RISK_JOB_RE.test(blob) ? 'risk_ops' : 'engineering'
 }
 
 const DATA_JOB_RE = /数据开发|数据工程|大数据|数仓|ETL|BI|数据分析|数据库开发|数据平台|数据治理|数据实施|hive|spark|kettle|doris|flink/i
@@ -170,6 +148,65 @@ ${extraRequirements || '无'}
   "dimension_scores": {
     "product_fit": {"score": 0, "weight": 25, "evidence": [""]},
     "product_depth": {"score": 0, "weight": 20, "evidence": [""]},
+    "impact": {"score": 0, "weight": 20, "evidence": [""]},
+    "collaboration": {"score": 0, "weight": 15, "evidence": [""]},
+    "stability_growth": {"score": 0, "weight": 10, "evidence": [""]},
+    "education_fit": {"score": 0, "weight": 10, "evidence": [""]}
+  },
+  "total_score": 0,
+  "strengths": [""],
+  "risks": [{"risk": "", "interview_question": ""}],
+  "decision": "建议进入面试",
+  "summary": "",
+  "candidate_name": "",
+  "candidate_profile": {}
+}`.trim()
+  }
+
+  if (jobType === 'professional') {
+    return `${commonHeader}
+
+# 评估场景
+岗位类型：专业/职能/项目/设计/运营/实施岗（非研发写代码岗）
+
+# 流程
+1. 硬性门槛校验（Pass/Fail）
+- 岗位相关经验年限与 JD 要求
+- 核心工具/方法论/行业域匹配（如 PMP、Axure、设计工具、运营指标、实施交付等，按 JD）
+- 学历/证书等硬要求（若有）
+
+2. 六维度评分（0-100）
+- role_fit（权重25，岗位/行业/工具/方法论匹配；不得用编程语言或代码质量评估）
+- role_depth（权重20，专业深度、项目负责边界、复杂问题处理）
+- impact（权重20，业务成果与量化指标）
+- collaboration（权重15，沟通协同、跨团队推动）
+- stability_growth（权重10）
+- education_fit（权重10）
+
+3. 评分约束
+- 不得评估 code_quality/tech_fit/engineering_depth；非研发岗禁止因「不会写代码」扣分
+- 无直接岗位相关工具/方法证据 => role_fit 最高 65
+- 仅辅助执行、无独立负责 => role_depth 最高 70
+- 缺量化成果 => impact 最高 75
+
+4. 每个维度至少1条证据（来自简历原文）
+证据格式：["证据点：...｜摘录：..."]
+
+5. 输出最多5条风险，每条附面试核验问题（岗位/业务追问，非代码题）
+
+6. 结论仅三选一
+- 建议进入面试
+- 建议备选
+- 不建议推进
+
+# 输出JSON格式
+{
+  "schema_version": "v1.0",
+  "job_type": "professional",
+  "hard_gate": { "passed": true, "items": [{"name": "", "result": "pass", "reason": ""}] },
+  "dimension_scores": {
+    "role_fit": {"score": 0, "weight": 25, "evidence": [""]},
+    "role_depth": {"score": 0, "weight": 20, "evidence": [""]},
     "impact": {"score": 0, "weight": 20, "evidence": [""]},
     "collaboration": {"score": 0, "weight": 15, "evidence": [""]},
     "stability_growth": {"score": 0, "weight": 10, "evidence": [""]},

@@ -2343,11 +2343,11 @@ function inferDimensionEvidenceFallback(dimKey: string, plain: string): string[]
       }
     }
   }
-  if (dimKey === 'tech_fit' || dimKey === 'risk_fit' || dimKey === 'product_fit') {
+  if (dimKey === 'tech_fit' || dimKey === 'risk_fit' || dimKey === 'product_fit' || dimKey === 'role_fit') {
     for (const re of [
       /(?:技能|技术栈|专业技能|核心技能|工具)[:：][^\n]{0,120}/i,
       /(?:精通|熟悉|掌握|了解)[^\n]{0,80}/i,
-      /(?:axure|墨刀|figma|原型|prd|需求文档)/i,
+      /(?:axure|墨刀|figma|原型|prd|需求文档|pmp|项目管理|运营|设计)/i,
       /(?:Java|Python|SQL|Hive|Spark|React|Vue|MySQL|Jmeter|Postman)[^\n]{0,60}/i
     ]) {
       const m = t.match(re)
@@ -2357,7 +2357,7 @@ function inferDimensionEvidenceFallback(dimKey: string, plain: string): string[]
       }
     }
   }
-  if (dimKey === 'engineering_depth' || dimKey === 'depth' || dimKey === 'product_depth') {
+  if (dimKey === 'engineering_depth' || dimKey === 'depth' || dimKey === 'product_depth' || dimKey === 'role_depth') {
     for (const re of [
       /负责[^\n]{0,48}(?:系统|平台|项目|模块|架构|产品|需求)/,
       /(?:架构|核心模块|技术方案|产品规划|需求分析)[^\n]{0,60}/
@@ -2490,7 +2490,9 @@ function parseResumeEvalToScreeningResult(
         ? 'risk_ops'
         : String(parsed.job_type || '').trim() === 'product'
           ? 'product'
-          : 'engineering'
+          : String(parsed.job_type || '').trim() === 'professional'
+            ? 'professional'
+            : 'engineering'
     const jobType = resolveResumeEvalJobType({ serverJobType, dim: rawDim })
     const plainText = String(resumePlain || '').trim()
     const dimNormalized = normalizeResumeEvalDimensionsForJobType(dim, jobType)

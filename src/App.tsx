@@ -6055,6 +6055,8 @@ function resumeEvalDimensionLabelCn(key: string): string {
     code_quality: '代码质量',
     product_fit: '产品岗位匹配',
     product_depth: '产品深度',
+    role_fit: '岗位匹配',
+    role_depth: '专业深度',
     collaboration: '沟通与推动',
     skill: '技能',
     experience: '经验',
@@ -6087,10 +6089,11 @@ function resumeEvalDimEntriesFromRaw(
 function resolveResumeEvalJobTypeForDisplay(
   evaluationJson: Resume['evaluationJson'] | undefined,
   jobTitle?: string
-): 'risk_ops' | 'engineering' | 'product' {
+): 'risk_ops' | 'engineering' | 'product' | 'professional' {
   if (jobTitle?.trim()) return detectResumeEvalJobType(jobTitle, '', '')
   if (evaluationJson?.job_type === 'risk_ops') return 'risk_ops'
   if (evaluationJson?.job_type === 'product') return 'product'
+  if (evaluationJson?.job_type === 'professional') return 'professional'
   return 'engineering'
 }
 
@@ -6145,6 +6148,8 @@ function resumeDimensionOrderedEntries(scores: Record<string, number>): Array<[s
   const preferred = [
     'product_fit',
     'product_depth',
+    'role_fit',
+    'role_depth',
     'collaboration',
     'risk_fit',
     'depth',
