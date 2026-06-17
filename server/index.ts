@@ -79,6 +79,16 @@ import {
 } from './resumeVolumeStatsReport.ts'
 import { buildXfyunIatAuthWsUrl, checkXfyunIatEnv } from './xfyunIat.ts'
 import { buildShenpuResumeDocx } from './shenpuResumeDocx.ts'
+import {
+  ALL_INTERVIEW_PROMPT_ROLES,
+  DEFAULT_INTERVIEW_PROMPT_EDITABLE_ROLES,
+  DEFAULT_INTERVIEW_PROMPT_VISIBLE_ROLES,
+  canEditPromptTemplate,
+  canViewPromptTemplate,
+  mergePromptRoleLists,
+  normalizePromptRoleList,
+  type PromptRoleCanonical
+} from './interviewPromptTemplateRoles.ts'
 
 const requireCjs = createRequire(import.meta.url)
 
@@ -940,54 +950,20 @@ type InterviewPromptTemplate = {
   systemPrompt: string
   enabled: boolean
   isDefault: boolean
-  visibleRoles: AdminUiRoleForPrompt[]
-  editableRoles: AdminUiRoleForPrompt[]
+  visibleRoles: PromptRoleCanonical[]
+  editableRoles: PromptRoleCanonical[]
   updatedBy: string
   updatedAt: string
 }
 
-const ALL_INTERVIEW_PROMPT_ROLES: AdminUiRoleForPrompt[] = [
-  'admin',
-  'delivery_manager',
-  'recruiter',
-  'recruiting_manager'
-]
-
-function parsePromptRoles(raw: unknown, fallback: AdminUiRoleForPrompt[]): AdminUiRoleForPrompt[] {
-  let arr: unknown = raw
-  if (typeof raw === 'string') {
-    try {
-      arr = JSON.parse(raw)
-    } catch {
-      arr = raw
-        .split(',')
-        .map((x) => x.trim())
-        .filter(Boolean)
-    }
-  }
-  const roles = Array.isArray(arr) ? arr.map((x) => String(x).trim()).filter(Boolean) : []
-  return roles.length ? Array.from(new Set(roles)) : fallback
+function parsePromptRoles(raw: unknown, fallback: PromptRoleCanonical[]): PromptRoleCanonical[] {
+  return normalizePromptRoleList(raw, fallback)
 }
 
 function actorPromptRole(actor: Awaited<ReturnType<typeof loadAdminSessionActor>> | null): AdminUiRoleForPrompt {
   const r = String(actor?.uiRole || '').trim()
   if (r) return r
   return 'admin'
-}
-
-function actorPromptRoleKeys(actor: Awaited<ReturnType<typeof loadAdminSessionActor>> | null): string[] {
-  const keys = [String(actor?.uiRole || '').trim(), ...(actor?.roleNames || [])].filter(Boolean)
-  return Array.from(new Set(keys))
-}
-
-function canViewPromptTemplate(role: AdminUiRoleForPrompt, t: Pick<InterviewPromptTemplate, 'visibleRoles'>, keys?: string[]): boolean {
-  const all = keys?.length ? keys : [role]
-  return all.includes('admin') || all.some((k) => t.visibleRoles.includes(k))
-}
-
-function canEditPromptTemplate(role: AdminUiRoleForPrompt, t: Pick<InterviewPromptTemplate, 'editableRoles'>, keys?: string[]): boolean {
-  const all = keys?.length ? keys : [role]
-  return all.includes('admin') || all.some((k) => t.editableRoles.includes(k))
 }
 
 function actorCanUseAiInterviewerMenu(actor: Awaited<ReturnType<typeof loadAdminSessionActor>> | null): boolean {
@@ -1034,10 +1010,11 @@ async function ensureInterviewPromptTemplateStorage(): Promise<void> {
     [
       BUILTIN_INTERVIEW_PROMPT_TEMPLATE_NAME,
       DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE,
-      JSON.stringify(['平台管理员', AI_INTERVIEWER_MANAGER_ROLE_NAME]),
-      JSON.stringify(['平台管理员', AI_INTERVIEWER_MANAGER_ROLE_NAME])
+      JSON.stringify(DEFAULT_INTERVIEW_PROMPT_VISIBLE_ROLES),
+      JSON.stringify(DEFAULT_INTERVIEW_PROMPT_EDITABLE_ROLES)
     ]
   )
+  await reconcileDefaultInterviewPromptTemplateRoles()
   await mysqlPool.query(
     `UPDATE ai_interview_prompt_templates
      SET system_prompt = ?
@@ -1051,6 +1028,40 @@ async function ensureInterviewPromptTemplateStorage(): Promise<void> {
     if (err.code !== 'ER_DUP_FIELDNAME' && err.errno !== 1060) throw e
   }
   interviewPromptTemplateStorageReady = true
+}
+
+/** 将默认模板的可见角色补齐为招聘相关角色，修复历史仅含「平台管理员」的配置 */
+async function reconcileDefaultInterviewPromptTemplateRoles(): Promise<void> {
+  const [rows] = await mysqlPool.query<RowDataPacket[]>(
+    `SELECT id, visible_roles, editable_roles
+     FROM ai_interview_prompt_templates
+     WHERE id = 1 AND name = ?
+     LIMIT 1`,
+    [BUILTIN_INTERVIEW_PROMPT_TEMPLATE_NAME]
+  )
+  const row = rows[0] as { visible_roles?: unknown; editable_roles?: unknown } | undefined
+  if (!row) return
+  const currentVisible = parsePromptRoles(row.visible_roles, [])
+  const mergedVisible = mergePromptRoleLists(currentVisible, DEFAULT_INTERVIEW_PROMPT_VISIBLE_ROLES)
+  const currentEditable = parsePromptRoles(row.editable_roles, DEFAULT_INTERVIEW_PROMPT_EDITABLE_ROLES)
+  const mergedEditable = mergePromptRoleLists(currentEditable, DEFAULT_INTERVIEW_PROMPT_EDITABLE_ROLES)
+  const visibleChanged =
+    mergedVisible.length !== currentVisible.length ||
+    mergedVisible.some((role) => !currentVisible.includes(role))
+  const editableChanged =
+    mergedEditable.length !== currentEditable.length ||
+    mergedEditable.some((role) => !currentEditable.includes(role))
+  if (!visibleChanged && !editableChanged) return
+  await mysqlPool.query(
+    `UPDATE ai_interview_prompt_templates
+     SET visible_roles = ?, editable_roles = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE id = 1 AND name = ?`,
+    [
+      JSON.stringify(mergedVisible),
+      JSON.stringify(mergedEditable),
+      BUILTIN_INTERVIEW_PROMPT_TEMPLATE_NAME
+    ]
+  )
 }
 
 function builtinInterviewPromptTemplate(): InterviewPromptTemplate {
@@ -9358,7 +9369,11 @@ app.get('/api/admin/interview-question-prompt-templates', async (req, res) => {
   const token = extractAdminRequestToken(req)
   const actor = await loadAdminSessionActor(token)
   const role = actorPromptRole(actor)
-  if (!actorCanUseAiInterviewerMenu(actor)) return res.status(403).json({ message: '当前角色没有 AI 面试官菜单权限' })
+  const scope = String(req.query.scope || '').trim().toLowerCase()
+  const forInvite = scope === 'invite'
+  if (!forInvite && !actorCanUseAiInterviewerMenu(actor)) {
+    return res.status(403).json({ message: '当前角色没有 AI 面试官菜单权限' })
+  }
   try {
     await ensureInterviewPromptTemplateStorage()
     const [rows] = await mysqlPool.query<RowDataPacket[]>(
@@ -9367,12 +9382,14 @@ app.get('/api/admin/interview-question-prompt-templates', async (req, res) => {
        FROM ai_interview_prompt_templates
        ORDER BY is_default DESC, enabled DESC, id ASC`
     )
-    const data = rows
-      .map(mapPromptTemplateRow)
-      .map((t) => ({
-        ...t,
-        canEdit: true
-      }))
+    const mapped = rows.map(mapPromptTemplateRow)
+    const data = (forInvite
+      ? mapped.filter((t) => t.enabled && canViewPromptTemplate(actor, t))
+      : mapped
+    ).map((t) => ({
+      ...t,
+      canEdit: canEditPromptTemplate(actor, t)
+    }))
     res.json({
       data,
       role,
@@ -11358,14 +11375,13 @@ app.post('/api/admin/invitations', async (req, res) => {
   const promptTemplateIdRaw = Number(req.body?.promptTemplateId)
   const promptTemplateId =
     Number.isFinite(promptTemplateIdRaw) && promptTemplateIdRaw > 0 ? Math.floor(promptTemplateIdRaw) : null
+  const token = extractAdminRequestToken(req)
   try {
     await ensureInterviewPromptTemplateStorage()
     if (promptTemplateId) {
-      const token = extractAdminRequestToken(req)
       const actor = await loadAdminSessionActor(token)
-      const role = actorPromptRole(actor)
       const tpl = await loadInterviewPromptTemplateById(promptTemplateId)
-      if (!tpl || String(tpl.id) !== String(promptTemplateId) || !tpl.enabled || !canViewPromptTemplate(role, tpl)) {
+      if (!tpl || String(tpl.id) !== String(promptTemplateId) || !tpl.enabled || !canViewPromptTemplate(actor, tpl)) {
         return res.status(400).json({ message: '请选择当前角色可用的面试提示词模板' })
       }
     }

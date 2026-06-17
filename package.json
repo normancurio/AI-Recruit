@@ -23,6 +23,8 @@
     "db:pull-prod-test": "tsx server/scripts/pull-prod-db-to-test.ts",
     "db:migrate-dev": "tsx server/scripts/run-dev-db-migrations.ts",
     "db:verify-ai-permissions": "tsx server/scripts/verify-ai-interviewer-role-permissions.ts",
+    "db:verify-interview-prompt-roles": "tsx server/scripts/verify-interview-prompt-template-roles.ts",
+    "test:interview-prompt-roles": "node --import tsx --test server/tests/interview-prompt-template-roles.test.mjs",
     "start": "tsx server.ts"
   },
   "dependencies": {

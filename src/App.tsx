@@ -9172,7 +9172,7 @@ function ResumeScreeningView({
       return;
     }
     setInvitePromptLoading(true);
-    miniappApiFetch('/api/admin/interview-question-prompt-templates')
+    miniappApiFetch('/api/admin/interview-question-prompt-templates?scope=invite')
       .then(async (r) => {
         const j = (await r.json().catch(() => ({}))) as InterviewPromptTemplatesPayload;
         if (!r.ok || !Array.isArray(j.data)) throw new Error(j.message || '加载提示词模板失败');

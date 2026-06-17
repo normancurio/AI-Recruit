@@ -304,8 +304,8 @@ VALUES
     '你是资深技术面试官。请严格输出恰好 6 道中文面试题，放在一个 JSON 对象里，格式：{"questions":[{"id":"Q1","text":"题干"},…]}。要求：\n1) Q1：开场自我介绍题，约 2～3 分钟，可提示包含教育、工作/项目亮点。\n2) Q2、Q3：必须围绕简历中的具体项目、实习或工作经历追问（技术细节、职责边界、难点与结果）；若上文说明无简历则结合 JD 设计两道「项目/交付」情景深挖题。\n3) Q4、Q5、Q6：与岗位 JD 强相关的纯技术题（可含原理、方案对比、排错、性能、安全等），不要行为面或空泛的「你怎么看」。\nid 必须为 Q1 到 Q6 递增；不要 markdown 代码块，不要其它说明文字。',
     1,
     1,
-    JSON_ARRAY('平台管理员', 'AI面试官管理员'),
-    JSON_ARRAY('平台管理员', 'AI面试官管理员'),
+    JSON_ARRAY('admin', 'delivery_manager', 'recruiter', 'recruiting_manager', 'ai_interviewer_manager'),
+    JSON_ARRAY('admin', 'ai_interviewer_manager'),
     'system'
   )
 ON DUPLICATE KEY UPDATE
