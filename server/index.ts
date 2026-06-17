@@ -5126,7 +5126,7 @@ function assertDashScopeForInterview(): { apiKey: string; model: string } {
     if (flowLogEnabled) flowLog('interview-questions AI', false, '未配置 DASHSCOPE_API_KEY')
     throwInterviewQuestionsHttp(503, '未配置大模型密钥（DASHSCOPE_API_KEY），面试题仅由模型生成')
   }
-  const model = process.env.QWEN_QUESTION_MODEL || 'qwen3.5-plus'
+  const model = process.env.QWEN_QUESTION_MODEL || 'qwen3.6-flash-2026-04-16'
   return { apiKey, model }
 }
 
@@ -11220,7 +11220,7 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
       behaviorSignals
     }
 
-    const model = process.env.QWEN_QUESTION_MODEL || 'qwen3.5-plus'
+    const model = process.env.QWEN_QUESTION_MODEL || 'qwen3.6-flash-2026-04-16'
 	    const data = await dashScopeChatCompletions({
 	      model,
 	      messages: [
