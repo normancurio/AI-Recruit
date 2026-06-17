@@ -90,10 +90,44 @@ export async function validateInviteCode(code: string): Promise<JobInfo> {
   return res.data.data
 }
 
+export type InterviewQuestionFetchOpts = {
+  inviteCode?: string
+  sessionId?: string
+}
+
+type QuestionsApiBody =
+  | InterviewQuestion[]
+  | { questions?: InterviewQuestion[]; partial?: boolean; expectedTotal?: number }
+
+function normalizeQuestionsResponse(body: QuestionsApiBody | undefined): {
+  questions: InterviewQuestion[]
+  partial: boolean
+} {
+  if (Array.isArray(body)) return { questions: body, partial: false }
+  const questions = Array.isArray(body?.questions) ? body.questions : []
+  return { questions, partial: Boolean(body?.partial) }
+}
+
+function questionFetchQuery(
+  jobId: string,
+  candidateName?: string,
+  resumeScreeningId?: number,
+  opts?: InterviewQuestionFetchOpts
+) {
+  return {
+    jobId,
+    candidateName: candidateName?.trim() || '',
+    inviteCode: opts?.inviteCode?.trim() || '',
+    sessionId: opts?.sessionId?.trim() || '',
+    ...(typeof resumeScreeningId === 'number' && resumeScreeningId > 0 ? { resumeScreeningId } : {})
+  }
+}
+
 export async function fetchInterviewQuestions(
   jobId: string,
   candidateName?: string,
-  resumeScreeningId?: number
+  resumeScreeningId?: number,
+  opts?: InterviewQuestionFetchOpts
 ): Promise<InterviewQuestion[]> {
   if (useMock()) {
     throw new Error(
@@ -101,26 +135,74 @@ export async function fetchInterviewQuestions(
     )
   }
 
-  const res = await Taro.request<{ data: InterviewQuestion[]; message?: string }>({
+  const res = await Taro.request<{ data: QuestionsApiBody; message?: string }>({
+    url: `${getApiBase()}/api/candidate/interview-questions`,
+    method: 'GET',
+    data: questionFetchQuery(jobId, candidateName, resumeScreeningId, opts)
+  })
+
+  if (res.statusCode >= 400) {
+    throw new Error(res.data?.message || `拉取题目失败（HTTP ${res.statusCode}）`)
+  }
+  const { questions } = normalizeQuestionsResponse(res.data?.data)
+  if (!questions.length) throw new Error(res.data?.message || '拉取题目失败')
+  return questions
+}
+
+async function fetchInterviewQuestionsFirst(
+  jobId: string,
+  candidateName?: string,
+  resumeScreeningId?: number,
+  opts?: InterviewQuestionFetchOpts
+): Promise<{ questions: InterviewQuestion[]; partial: boolean }> {
+  const res = await Taro.request<{ data: QuestionsApiBody; message?: string }>({
     url: `${getApiBase()}/api/candidate/interview-questions`,
     method: 'GET',
     data: {
-      jobId,
-      candidateName: candidateName?.trim() || '',
-      ...(typeof resumeScreeningId === 'number' && resumeScreeningId > 0 ? { resumeScreeningId } : {})
+      ...questionFetchQuery(jobId, candidateName, resumeScreeningId, opts),
+      phase: 'first'
     }
   })
-
-  if (res.statusCode >= 400 || !Array.isArray(res.data?.data)) {
-    throw new Error(res.data?.message || `拉取题目失败（HTTP ${res.statusCode}）`)
+  if (res.statusCode >= 400) {
+    throw new Error(res.data?.message || `拉取首题失败（HTTP ${res.statusCode}）`)
   }
-  return res.data.data
+  const parsed = normalizeQuestionsResponse(res.data?.data)
+  if (!parsed.questions.length) throw new Error(res.data?.message || '拉取首题失败')
+  return parsed
+}
+
+async function fetchInterviewQuestionsRest(
+  jobId: string,
+  candidateName: string | undefined,
+  firstQuestionText: string,
+  resumeScreeningId?: number,
+  opts?: InterviewQuestionFetchOpts
+): Promise<InterviewQuestion[]> {
+  const res = await Taro.request<{ data: QuestionsApiBody; message?: string }>({
+    url: `${getApiBase()}/api/candidate/interview-questions-rest`,
+    method: 'POST',
+    data: {
+      ...questionFetchQuery(jobId, candidateName, resumeScreeningId, opts),
+      firstQuestionText
+    }
+  })
+  if (res.statusCode >= 400) {
+    throw new Error(res.data?.message || `拉取后续题目失败（HTTP ${res.statusCode}）`)
+  }
+  return normalizeQuestionsResponse(res.data?.data).questions
 }
 
 const QUESTIONS_PREFETCH_STORAGE_KEY = 'interview_questions_prefetch_v1'
 
-function cacheKeyForInterviewQuestions(jobId: string, candidateName: string, resumeScreeningId?: number) {
+export function buildInterviewQuestionsCacheKey(
+  jobId: string,
+  candidateName: string,
+  resumeScreeningId?: number,
+  inviteCode?: string
+) {
   const jid = String(jobId || '').trim().toUpperCase()
+  const invite = String(inviteCode || '').trim().toUpperCase()
+  if (invite) return `${jid}\t${invite}`
   const name = String(candidateName || '').trim()
   const rs =
     typeof resumeScreeningId === 'number' && Number.isFinite(resumeScreeningId) && resumeScreeningId > 0
@@ -129,79 +211,260 @@ function cacheKeyForInterviewQuestions(jobId: string, candidateName: string, res
   return `${jid}\t${name}\t${rs}`
 }
 
+function readPrefetchedQuestionsForKey(key: string, consume: boolean): InterviewQuestion[] | null {
+  return readPrefetchedQuestions(key, consume)
+}
+
+function findPrefetchedQuestions(
+  jobId: string,
+  candidateName: string,
+  resumeScreeningId: number | undefined,
+  inviteCode: string | undefined,
+  consume: boolean
+): InterviewQuestion[] | null {
+  const keys = [
+    buildInterviewQuestionsCacheKey(jobId, candidateName, resumeScreeningId, inviteCode),
+    buildInterviewQuestionsCacheKey(jobId, candidateName, resumeScreeningId),
+    buildInterviewQuestionsCacheKey(jobId, '', undefined, inviteCode)
+  ]
+  for (const key of keys) {
+    const hit = readPrefetchedQuestionsForKey(key, false)
+    if (hit?.length) {
+      if (consume) {
+        for (const k of keys) readPrefetchedQuestionsForKey(k, true)
+      }
+      return hit
+    }
+  }
+  return null
+}
+
 const inflightQuestionsByKey = new Map<string, Promise<InterviewQuestion[]>>()
 /** 预取成功但 Storage 写入失败时仍可供面试页消费，避免再次打大模型 */
 const resolvedQuestionsMemory = new Map<string, InterviewQuestion[]>()
+/** 预取已完成、in-flight 已清理时，避免面试页重复请求大模型 */
+const settledQuestionsByKey = new Map<string, InterviewQuestion[]>()
 
-/**
- * 等候页可调用：在候选人阅读说明时后台请求大模型出题，缩短进入答题页的等待。
- * 与 fetchInterviewQuestionsOrPrefetched 共享同一 in-flight Promise，避免重复请求。
- */
-export function prefetchInterviewQuestions(
-  jobId: string,
-  candidateName?: string,
-  resumeScreeningId?: number
-): void {
-  if (useMock()) return
-  const key = cacheKeyForInterviewQuestions(jobId, String(candidateName || ''), resumeScreeningId)
-  if (inflightQuestionsByKey.has(key)) return
-
-  const p = fetchInterviewQuestions(jobId, candidateName, resumeScreeningId).then((questions) => {
-    resolvedQuestionsMemory.set(key, questions)
-    try {
-      Taro.setStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY, {
-        cacheKey: key,
-        questions,
-        at: Date.now()
-      })
-    } catch {
-      /* 存储配额等；仍保留内存供面试页读取 */
-    }
-    return questions
-  })
-
-  inflightQuestionsByKey.set(key, p)
-  p.catch(() => {
-    /* 预取失败时用户仍可在面试页重新拉题 */
-  }).finally(() => {
-    inflightQuestionsByKey.delete(key)
-  })
+function persistPrefetchedQuestions(key: string, questions: InterviewQuestion[]) {
+  resolvedQuestionsMemory.set(key, questions)
+  settledQuestionsByKey.set(key, questions)
+  try {
+    Taro.setStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY, {
+      cacheKey: key,
+      questions,
+      at: Date.now()
+    })
+  } catch {
+    /* 存储配额等；仍保留内存 / settled 供面试页读取 */
+  }
 }
 
-/** 优先使用等候页预取 / 进行中的预取，再回落到实时请求 */
-export async function fetchInterviewQuestionsOrPrefetched(
-  jobId: string,
-  candidateName?: string,
-  resumeScreeningId?: number
-): Promise<InterviewQuestion[]> {
-  if (useMock()) {
-    return fetchInterviewQuestions(jobId, candidateName, resumeScreeningId)
-  }
-  const key = cacheKeyForInterviewQuestions(jobId, String(candidateName || ''), resumeScreeningId)
-
+function readPrefetchedQuestions(key: string, consume: boolean): InterviewQuestion[] | null {
   try {
     const raw = Taro.getStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY) as
       | { cacheKey?: string; questions?: InterviewQuestion[] }
       | undefined
     if (raw?.cacheKey === key && Array.isArray(raw.questions) && raw.questions.length) {
-      Taro.removeStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY)
-      resolvedQuestionsMemory.delete(key)
+      if (consume) {
+        Taro.removeStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY)
+        resolvedQuestionsMemory.delete(key)
+        settledQuestionsByKey.delete(key)
+      }
       return raw.questions
     }
   } catch {
     /* ignore */
   }
-
-  const memHit = resolvedQuestionsMemory.get(key)
-  if (memHit?.length) {
+  const mem = resolvedQuestionsMemory.get(key) || settledQuestionsByKey.get(key)
+  if (!mem?.length) return null
+  if (consume) {
     resolvedQuestionsMemory.delete(key)
+    settledQuestionsByKey.delete(key)
     try {
       Taro.removeStorageSync(QUESTIONS_PREFETCH_STORAGE_KEY)
     } catch {
       /* ignore */
     }
-    return memHit
   }
+  return mem
+}
+
+async function fetchInterviewQuestionsPhased(
+  jobId: string,
+  candidateName?: string,
+  resumeScreeningId?: number,
+  opts?: InterviewQuestionFetchOpts
+): Promise<InterviewQuestion[]> {
+  const key = buildInterviewQuestionsCacheKey(
+    jobId,
+    String(candidateName || ''),
+    resumeScreeningId,
+    opts?.inviteCode
+  )
+  const { questions: first, partial } = await fetchInterviewQuestionsFirst(
+    jobId,
+    candidateName,
+    resumeScreeningId,
+    opts
+  )
+  persistPrefetchedQuestions(key, first)
+  if (!partial || first.length >= 6) return first
+
+  const firstText = String(first[0]?.text || '').trim()
+  if (!firstText) return first
+
+  void fetchInterviewQuestionsRest(jobId, candidateName, firstText, resumeScreeningId, opts)
+    .then((rest) => {
+      const merged = [...first, ...rest].filter((q) => q && String(q.text || '').trim())
+      if (merged.length) persistPrefetchedQuestions(key, merged)
+      return merged
+    })
+    .catch(() => {
+      /* 后续题失败时面试页可再拉 */
+    })
+
+  return first
+}
+
+/** 首题已展示后补拉 Q2～Q6，并回调合并结果 */
+export function ensureInterviewQuestionsRest(
+  jobId: string,
+  candidateName: string,
+  firstQuestionText: string,
+  resumeScreeningId: number | undefined,
+  opts: InterviewQuestionFetchOpts | undefined,
+  onMerged: (questions: InterviewQuestion[]) => void
+): void {
+  const key = buildInterviewQuestionsCacheKey(jobId, candidateName, resumeScreeningId, opts?.inviteCode)
+  const cached = readPrefetchedQuestions(key, false)
+  if (cached && cached.length >= 6) {
+    onMerged(cached)
+    return
+  }
+
+  void fetchInterviewQuestionsRest(jobId, candidateName, firstQuestionText, resumeScreeningId, opts)
+    .then((rest) => {
+      const base = cached?.length ? cached : [{ id: 'Q1', text: firstQuestionText }]
+      const merged = [...base.slice(0, 1), ...rest].filter((q) => q && String(q.text || '').trim())
+      if (merged.length) {
+        persistPrefetchedQuestions(key, merged)
+        onMerged(merged)
+      }
+    })
+    .catch(() => {
+      /* ignore */
+    })
+}
+
+/**
+ * 登录/候场可调用：先快出 Q1，再后台拉 Q2～Q6，与 fetchInterviewQuestionsOrPrefetched 共享 in-flight。
+ */
+export function prefetchInterviewQuestions(
+  jobId: string,
+  candidateName?: string,
+  resumeScreeningId?: number,
+  opts?: InterviewQuestionFetchOpts
+): Promise<InterviewQuestion[]> {
+  if (useMock()) return Promise.resolve([])
+  const key = buildInterviewQuestionsCacheKey(
+    jobId,
+    String(candidateName || ''),
+    resumeScreeningId,
+    opts?.inviteCode
+  )
+  const cached = findPrefetchedQuestions(
+    jobId,
+    String(candidateName || ''),
+    resumeScreeningId,
+    opts?.inviteCode,
+    false
+  )
+  if (cached?.length) return Promise.resolve(cached)
+
+  const existing = inflightQuestionsByKey.get(key)
+  if (existing) return existing
+
+  const p = fetchInterviewQuestionsPhased(jobId, candidateName, resumeScreeningId, opts)
+    .then((questions) => {
+      persistPrefetchedQuestions(key, questions)
+      return questions
+    })
+    .finally(() => {
+      inflightQuestionsByKey.delete(key)
+    })
+
+  inflightQuestionsByKey.set(key, p)
+  return p
+}
+
+/**
+ * 进入答题前等待预取完成（已有缓存则立刻返回），避免面试页卡在「正在准备题目」。
+ */
+export async function waitForInterviewQuestionsPrefetch(
+  jobId: string,
+  candidateName?: string,
+  resumeScreeningId?: number,
+  opts?: { timeoutMs?: number; inviteCode?: string; sessionId?: string }
+): Promise<InterviewQuestion[]> {
+  const timeoutMs = opts?.timeoutMs ?? 120_000
+  const key = buildInterviewQuestionsCacheKey(
+    jobId,
+    String(candidateName || ''),
+    resumeScreeningId,
+    opts?.inviteCode
+  )
+  const hit = findPrefetchedQuestions(
+    jobId,
+    String(candidateName || ''),
+    resumeScreeningId,
+    opts?.inviteCode,
+    false
+  )
+  if (hit?.length) return hit
+
+  let p = inflightQuestionsByKey.get(key)
+  if (!p) {
+    p = prefetchInterviewQuestions(jobId, candidateName, resumeScreeningId, opts)
+  }
+
+  let timer: ReturnType<typeof setTimeout> | null = null
+  try {
+    return await Promise.race([
+      p,
+      new Promise<InterviewQuestion[]>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('prefetch_timeout')), timeoutMs)
+      })
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+/** 优先使用等候页预取 / 进行中的预取（含首题快出），再回落到实时分段请求 */
+export async function fetchInterviewQuestionsOrPrefetched(
+  jobId: string,
+  candidateName?: string,
+  resumeScreeningId?: number,
+  opts?: InterviewQuestionFetchOpts
+): Promise<InterviewQuestion[]> {
+  if (useMock()) {
+    return fetchInterviewQuestions(jobId, candidateName, resumeScreeningId, opts)
+  }
+  const key = buildInterviewQuestionsCacheKey(
+    jobId,
+    String(candidateName || ''),
+    resumeScreeningId,
+    opts?.inviteCode
+  )
+
+  const cached = findPrefetchedQuestions(
+    jobId,
+    String(candidateName || ''),
+    resumeScreeningId,
+    opts?.inviteCode,
+    true
+  )
+  if (cached?.length) return cached
 
   const inflight = inflightQuestionsByKey.get(key)
   if (inflight) {
@@ -213,7 +476,7 @@ export async function fetchInterviewQuestionsOrPrefetched(
     }
   }
 
-  return fetchInterviewQuestions(jobId, candidateName, resumeScreeningId)
+  return fetchInterviewQuestionsPhased(jobId, candidateName, resumeScreeningId, opts)
 }
 
 export async function submitInterview(
@@ -293,6 +556,7 @@ export type InterviewFollowUpConfig = {
   modelWaitMs: number
   shortAnswerThreshold: number
   fallbackEnabled: boolean
+  demoMode?: boolean
   model?: string
   prompt?: string
 }
@@ -303,7 +567,8 @@ export const DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG: InterviewFollowUpConfig = {
   maxPerQuestion: 1,
   modelWaitMs: 700,
   shortAnswerThreshold: 18,
-  fallbackEnabled: true
+  fallbackEnabled: true,
+  demoMode: false
 }
 
 export async function fetchInterviewFollowUpConfig(jobId: string, sessionId?: string): Promise<InterviewFollowUpConfig> {

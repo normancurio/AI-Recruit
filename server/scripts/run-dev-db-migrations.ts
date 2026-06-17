@@ -20,8 +20,10 @@ const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '0.0.0.0'])
 
 const businessMigrations = [
   'server/migration_interview_followup_configs.sql',
+  'server/migration_add_followup_demo_mode.sql',
   'server/migration_ai_interview_prompt_templates.sql',
   'server/migration_interview_invitations_prompt_template_id.sql',
+  'server/migration_interview_prompt_template_visible_roles.sql',
   'server/migration_resume_screening_shenpu_resumes.sql',
   'server/migration_projects_shenpu_resume_template.sql'
 ]

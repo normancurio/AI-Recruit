@@ -50,8 +50,8 @@ VALUES
     @default_system_prompt,
     1,
     1,
-    JSON_ARRAY('平台管理员', 'AI面试官管理员'),
-    JSON_ARRAY('平台管理员', 'AI面试官管理员'),
+    JSON_ARRAY('admin', 'delivery_manager', 'recruiter', 'recruiting_manager', 'ai_interviewer_manager'),
+    JSON_ARRAY('admin', 'ai_interviewer_manager'),
     'migration'
   )
 ON DUPLICATE KEY UPDATE

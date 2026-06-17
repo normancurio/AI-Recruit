@@ -25,6 +25,8 @@ import {
   jobRoleBaseValidationMessage
 } from '../shared/jobTaxonomy';
 import { deptNamesMatch } from '../shared/deptMatch';
+import { detectResumeEvalJobType } from '../shared/resumeEvalPrompt';
+import { finalizeResumeEvalDimensionScores } from '../shared/resumeEvalDimensions';
 import { MultiSelectPanel, SearchableSelect, TreeSelect, type PickerOption, type TreePickerOption } from './components/pickers';
 import { ResizableTh, useColumnWidths, type ColumnSpec } from './components/resizableColumns';
 import { 
@@ -34,7 +36,7 @@ import {
   ChevronRight, ChevronLeft, MoreHorizontal, CheckCircle2, XCircle,
   LogOut, Bell, LayoutDashboard, FolderOpen, Bot,
   Clock, Calendar, Pencil, Trash2, Loader2, KeyRound, Sparkles, UserRound, Lock, X, RotateCcw,
-  FileBarChart, UserPen, CalendarCheck, Eye, Download, History, Copy
+  FileBarChart, UserPen, CalendarCheck, Eye, Download, History, Copy, TrendingUp
 } from 'lucide-react';
 
 /**
@@ -187,7 +189,8 @@ const ADMIN_ROLE_MENU_OPTIONS: { group: string; items: { id: string; label: stri
       { id: 'resume-library', label: '简历库' },
       { id: 'application-mgmt', label: '初面管理' },
       { id: 'delivery-performance-report', label: '交付业绩报表' },
-      { id: 'recruiter-quality-report', label: '招聘质量报表' }
+      { id: 'recruiter-quality-report', label: '招聘质量报表' },
+      { id: 'resume-volume-stats', label: '简历量统计' }
     ]
   },
   {
@@ -351,6 +354,12 @@ const NAV_TEMPLATE: NavItem[] = [
         icon: <FileBarChart className="w-4 h-4" />
       },
       {
+        id: 'resume-volume-stats',
+        title: '简历量统计',
+        roles: ['admin', 'recruiting_manager', 'delivery_manager', 'recruiter'],
+        icon: <TrendingUp className="w-4 h-4" />
+      },
+      {
         id: 'delivery-performance-report',
         title: '交付业绩报表',
         roles: ['admin', 'delivery_manager'],
@@ -404,6 +413,7 @@ type InterviewFollowUpConfig = {
   modelWaitMs: number;
   shortAnswerThreshold: number;
   fallbackEnabled: boolean;
+  demoMode: boolean;
   model?: string;
   prompt?: string;
 };
@@ -424,6 +434,7 @@ const DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG: InterviewFollowUpConfig = {
   modelWaitMs: 700,
   shortAnswerThreshold: 18,
   fallbackEnabled: true,
+  demoMode: false,
   model: '',
   prompt: DEFAULT_INTERVIEW_FOLLOW_UP_PROMPT
 };
@@ -433,11 +444,18 @@ function normalizeInterviewFollowUpConfig(raw?: Partial<InterviewFollowUpConfig>
     const n = Number(v);
     return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fallback;
   };
-  return {
+  const demoMode =
+    raw?.demoMode !== undefined ? Boolean(raw.demoMode) : DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.demoMode;
+  const normalized: InterviewFollowUpConfig = {
     enabled: raw?.enabled !== undefined ? Boolean(raw.enabled) : DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.enabled,
     maxPerInterview: clamp(raw?.maxPerInterview, DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.maxPerInterview, 0, 10),
     maxPerQuestion: clamp(raw?.maxPerQuestion, DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.maxPerQuestion, 0, 1),
-    modelWaitMs: clamp(raw?.modelWaitMs, DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.modelWaitMs, 0, 5000),
+    modelWaitMs: clamp(
+      raw?.modelWaitMs,
+      DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.modelWaitMs,
+      0,
+      demoMode ? 10000 : 5000
+    ),
     shortAnswerThreshold: clamp(
       raw?.shortAnswerThreshold,
       DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.shortAnswerThreshold,
@@ -448,9 +466,14 @@ function normalizeInterviewFollowUpConfig(raw?: Partial<InterviewFollowUpConfig>
       raw?.fallbackEnabled !== undefined
         ? Boolean(raw.fallbackEnabled)
         : DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG.fallbackEnabled,
+    demoMode,
     model: String(raw?.model || '').trim(),
     prompt: String(raw?.prompt || DEFAULT_INTERVIEW_FOLLOW_UP_PROMPT).trim() || DEFAULT_INTERVIEW_FOLLOW_UP_PROMPT
   };
+  if (normalized.demoMode) {
+    normalized.modelWaitMs = Math.max(normalized.modelWaitMs, 3000);
+  }
+  return normalized;
 }
 export interface Project {
   id: string;
@@ -1297,6 +1320,8 @@ export default function App() {
       case 'application-mgmt': return <ApplicationManagementView currentRole={currentRole} authProfile={authProfile} />;
       case 'recruiter-quality-report':
         return <RecruiterQualityReportView currentRole={currentRole} />;
+      case 'resume-volume-stats':
+        return <ResumeVolumeStatsView />;
       case 'delivery-performance-report':
         return <DeliveryPerformanceReportView currentRole={currentRole} />;
       case 'sys-dept': return <SystemDeptView />;
@@ -1815,12 +1840,12 @@ export default function App() {
 // --- View Components ---
 
 const CLIENT_MGMT_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 280, minWidth: 180, maxWidth: 560 },
-  { id: 'creditCode', defaultWidth: 300, minWidth: 200, maxWidth: 560 },
-  { id: 'industry', defaultWidth: 180, minWidth: 130, maxWidth: 360 },
-  { id: 'contact', defaultWidth: 160, minWidth: 120, maxWidth: 280 },
-  { id: 'phone', defaultWidth: 180, minWidth: 140, maxWidth: 280 },
-  { id: 'actions', defaultWidth: 160, minWidth: 120, maxWidth: 240 }
+  { id: 'name', defaultWidth: 220, minWidth: 150, maxWidth: 520 },
+  { id: 'creditCode', defaultWidth: 240, minWidth: 180, maxWidth: 520 },
+  { id: 'industry', defaultWidth: 140, minWidth: 110, maxWidth: 320 },
+  { id: 'contact', defaultWidth: 120, minWidth: 96, maxWidth: 240 },
+  { id: 'phone', defaultWidth: 140, minWidth: 120, maxWidth: 240 },
+  { id: 'actions', defaultWidth: 120, minWidth: 96, maxWidth: 220 }
 ];
 
 function ClientManagementView() {
@@ -1854,23 +1879,23 @@ function ClientManagementView() {
           <colgroup>{cols.colNodes}</colgroup>
           <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
             <tr>
-              <ResizableTh col={cols.byId.name} className="px-6 py-4 font-medium">企业名称</ResizableTh>
-              <ResizableTh col={cols.byId.creditCode} className="px-6 py-4 font-medium">统一社会信用代码 (主键)</ResizableTh>
-              <ResizableTh col={cols.byId.industry} className="px-6 py-4 font-medium">所属行业</ResizableTh>
-              <ResizableTh col={cols.byId.contact} className="px-6 py-4 font-medium">联系人</ResizableTh>
-              <ResizableTh col={cols.byId.phone} className="px-6 py-4 font-medium">联系电话</ResizableTh>
-              <ResizableTh col={cols.byId.actions} className="px-6 py-4 font-medium text-right">操作</ResizableTh>
+                <ResizableTh col={cols.byId.name} className="px-3 py-3 font-medium sm:px-4">企业名称</ResizableTh>
+                <ResizableTh col={cols.byId.creditCode} className="px-3 py-3 font-medium sm:px-4">统一社会信用代码 (主键)</ResizableTh>
+                <ResizableTh col={cols.byId.industry} className="px-3 py-3 font-medium sm:px-4">所属行业</ResizableTh>
+                <ResizableTh col={cols.byId.contact} className="px-3 py-3 font-medium sm:px-4">联系人</ResizableTh>
+                <ResizableTh col={cols.byId.phone} className="px-3 py-3 font-medium sm:px-4">联系电话</ResizableTh>
+                <ResizableTh col={cols.byId.actions} className="px-3 py-3 font-medium text-right sm:px-4">操作</ResizableTh>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {clients.map(client => (
               <tr key={client.id} className="hover:bg-slate-50 transition-colors">
-                <td className="px-6 py-4 font-medium text-slate-900">{client.name}</td>
-                <td className="px-6 py-4 font-mono text-slate-500">{client.creditCode}</td>
-                <td className="px-6 py-4 text-slate-600">{client.industry}</td>
-                <td className="px-6 py-4 text-slate-600">{client.contact}</td>
-                <td className="px-6 py-4 text-slate-600">{client.phone}</td>
-                <td className="px-6 py-4 text-right">
+                <td className="px-3 py-3 font-medium text-slate-900 sm:px-4">{client.name}</td>
+                <td className="px-3 py-3 font-mono text-slate-500 sm:px-4">{client.creditCode}</td>
+                <td className="px-3 py-3 text-slate-600 sm:px-4">{client.industry}</td>
+                <td className="px-3 py-3 text-slate-600 sm:px-4">{client.contact}</td>
+                <td className="px-3 py-3 text-slate-600 sm:px-4">{client.phone}</td>
+                <td className="px-3 py-3 text-right sm:px-4">
                   <button className="text-indigo-600 hover:text-indigo-800 font-medium">编辑</button>
                 </td>
               </tr>
@@ -2672,10 +2697,7 @@ function ProjectManagementView({
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">项目管理</h1>
-        </div>
+      <div className="flex flex-wrap items-center justify-end gap-2">
         <div className="flex flex-wrap items-center gap-2 shrink-0">
           {canManage && dmDeptReady ? (
             <button
@@ -3626,10 +3648,6 @@ function WorkbenchView({
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-900">工作台</h1>
-      </div>
-
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
         {statCards.map((c) => (
           <div
@@ -4868,19 +4886,19 @@ function JobEditorModal({
 }
 
 const JOB_QUERY_BASE_COLUMNS: ColumnSpec[] = [
-  { id: 'project', defaultWidth: 240, minWidth: 180, maxWidth: 520 },
-  { id: 'deliveryOwner', defaultWidth: 190, minWidth: 140, maxWidth: 360 },
-  { id: 'recruitDept', defaultWidth: 200, minWidth: 150, maxWidth: 360 },
-  { id: 'title', defaultWidth: 240, minWidth: 180, maxWidth: 460 },
-  { id: 'demand', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
-  { id: 'salary', defaultWidth: 160, minWidth: 120, maxWidth: 280 },
-  { id: 'location', defaultWidth: 170, minWidth: 120, maxWidth: 320 },
-  { id: 'jobDate', defaultWidth: 170, minWidth: 130, maxWidth: 260 },
-  { id: 'status', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
-  { id: 'actions', defaultWidth: 240, minWidth: 180, maxWidth: 420 }
+  { id: 'project', defaultWidth: 180, minWidth: 140, maxWidth: 480 },
+  { id: 'deliveryOwner', defaultWidth: 140, minWidth: 110, maxWidth: 320 },
+  { id: 'recruitDept', defaultWidth: 150, minWidth: 120, maxWidth: 320 },
+  { id: 'title', defaultWidth: 190, minWidth: 150, maxWidth: 420 },
+  { id: 'demand', defaultWidth: 92, minWidth: 76, maxWidth: 180 },
+  { id: 'salary', defaultWidth: 120, minWidth: 96, maxWidth: 240 },
+  { id: 'location', defaultWidth: 120, minWidth: 96, maxWidth: 260 },
+  { id: 'jobDate', defaultWidth: 130, minWidth: 110, maxWidth: 220 },
+  { id: 'status', defaultWidth: 100, minWidth: 82, maxWidth: 180 },
+  { id: 'actions', defaultWidth: 180, minWidth: 150, maxWidth: 360 }
 ];
 const JOB_QUERY_COLUMNS_WITH_CHECK: ColumnSpec[] = [
-  { id: 'check', defaultWidth: 56, minWidth: 48, maxWidth: 72 },
+  { id: 'check', defaultWidth: 44, minWidth: 40, maxWidth: 60 },
   ...JOB_QUERY_BASE_COLUMNS
 ];
 
@@ -5495,10 +5513,6 @@ function JobQueryView({
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-900">岗位分配</h1>
-      </div>
-
       {currentRole === 'delivery_manager' &&
       (!String(authProfile?.dept || '').trim() || String(authProfile?.dept || '').trim() === '-') ? (
         <div className="rounded-xl border border-amber-200 bg-amber-50/90 text-amber-950 px-5 py-4 text-sm leading-relaxed max-w-3xl">
@@ -5621,8 +5635,8 @@ function JobQueryView({
                     />
                   </ResizableTh>
                 ) : null}
-                <ResizableTh col={cols.byId.project} className="px-5 py-3 font-medium whitespace-nowrap">项目</ResizableTh>
-                <ResizableTh col={cols.byId.deliveryOwner} className="px-5 py-3 font-medium whitespace-nowrap">交付负责人</ResizableTh>
+                <ResizableTh col={cols.byId.project} className="px-3 py-3 font-medium whitespace-nowrap">项目</ResizableTh>
+                <ResizableTh col={cols.byId.deliveryOwner} className="px-3 py-3 font-medium whitespace-nowrap">交付负责人</ResizableTh>
                 <ResizableTh
                   col={cols.byId.recruitDept}
                   className="px-5 py-3 font-medium whitespace-nowrap"
@@ -5630,15 +5644,15 @@ function JobQueryView({
                 >
                   招聘部门
                 </ResizableTh>
-                <ResizableTh col={cols.byId.title} className="px-5 py-3 font-medium whitespace-nowrap">岗位名称</ResizableTh>
-                <ResizableTh col={cols.byId.demand} className="px-5 py-3 font-medium whitespace-nowrap" title="需求人数（Headcount）">
+                <ResizableTh col={cols.byId.title} className="px-3 py-3 font-medium whitespace-nowrap">岗位名称</ResizableTh>
+                <ResizableTh col={cols.byId.demand} className="px-3 py-3 font-medium whitespace-nowrap" title="需求人数（Headcount）">
                   招聘人数（HC）
                 </ResizableTh>
-                <ResizableTh col={cols.byId.salary} className="px-5 py-3 font-medium whitespace-nowrap">薪资范围</ResizableTh>
-                <ResizableTh col={cols.byId.location} className="px-5 py-3 font-medium whitespace-nowrap">地点</ResizableTh>
-                <ResizableTh col={cols.byId.jobDate} className="px-5 py-3 font-medium whitespace-nowrap">岗位日期</ResizableTh>
-                <ResizableTh col={cols.byId.status} className="px-5 py-3 font-medium whitespace-nowrap">项目状态</ResizableTh>
-                <ResizableTh col={cols.byId.actions} className="px-5 py-3 font-medium text-right whitespace-nowrap">操作</ResizableTh>
+                <ResizableTh col={cols.byId.salary} className="px-3 py-3 font-medium whitespace-nowrap">薪资范围</ResizableTh>
+                <ResizableTh col={cols.byId.location} className="px-3 py-3 font-medium whitespace-nowrap">地点</ResizableTh>
+                <ResizableTh col={cols.byId.jobDate} className="px-3 py-3 font-medium whitespace-nowrap">岗位日期</ResizableTh>
+                <ResizableTh col={cols.byId.status} className="px-3 py-3 font-medium whitespace-nowrap">项目状态</ResizableTh>
+                <ResizableTh col={cols.byId.actions} className="px-3 py-3 font-medium text-right whitespace-nowrap">操作</ResizableTh>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -6034,10 +6048,16 @@ function resumeEvalDimensionLabelCn(key: string): string {
     impact: '业务影响力',
     data_skill: '数据能力',
     stability_growth: '稳定与成长',
+    education_fit: '学历匹配',
     communication_business: '沟通与业务协同',
     tech_fit: '技术岗位匹配',
     engineering_depth: '工程深度',
     code_quality: '代码质量',
+    product_fit: '产品岗位匹配',
+    product_depth: '产品深度',
+    role_fit: '岗位匹配',
+    role_depth: '专业深度',
+    collaboration: '沟通与推动',
     skill: '技能',
     experience: '经验',
     education: '学历',
@@ -6046,18 +6066,56 @@ function resumeEvalDimensionLabelCn(key: string): string {
   return map[k] || k
 }
 
+function resumeEvalDimEntriesFromRaw(
+  raw: Record<string, number | { score?: number; evidence?: string[] }> | undefined
+): Record<string, { score: number; evidence: string[] }> {
+  const out: Record<string, { score: number; evidence: string[] }> = {}
+  if (!raw || typeof raw !== 'object') return out
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === 'number') {
+      out[String(k)] = { score: Math.max(0, Math.min(100, Math.round(Number(v) || 0))), evidence: [] }
+      continue
+    }
+    out[String(k)] = {
+      score: Math.max(0, Math.min(100, Math.round(Number(v?.score) || 0))),
+      evidence: Array.isArray(v?.evidence)
+        ? v!.evidence!.map((x) => String(x || '').trim()).filter(Boolean)
+        : []
+    }
+  }
+  return out
+}
+
+function resolveResumeEvalJobTypeForDisplay(
+  evaluationJson: Resume['evaluationJson'] | undefined,
+  jobTitle?: string
+): 'risk_ops' | 'engineering' | 'product' | 'professional' {
+  if (jobTitle?.trim()) return detectResumeEvalJobType(jobTitle, '', '')
+  if (evaluationJson?.job_type === 'risk_ops') return 'risk_ops'
+  if (evaluationJson?.job_type === 'product') return 'product'
+  if (evaluationJson?.job_type === 'professional') return 'professional'
+  return 'engineering'
+}
+
+function finalizedResumeEvalDimensions(
+  evaluationJson: Resume['evaluationJson'] | undefined,
+  jobTitle?: string
+): Record<string, { score: number; evidence: string[] }> {
+  const raw = evaluationJson?.dimension_scores
+  if (!raw || typeof raw !== 'object') return {}
+  const jobType = resolveResumeEvalJobTypeForDisplay(evaluationJson, jobTitle)
+  return finalizeResumeEvalDimensionScores(resumeEvalDimEntriesFromRaw(raw), jobType)
+}
+
 function pickResumeDimensionScores(
   evaluationJson: Resume['evaluationJson'] | undefined,
-  fallback: { skill: number; experience: number; education: number; stability: number }
+  fallback: { skill: number; experience: number; education: number; stability: number },
+  jobTitle?: string
 ): Record<string, number> {
-  const raw = evaluationJson?.dimension_scores
+  const finalized = finalizedResumeEvalDimensions(evaluationJson, jobTitle)
   const out: Record<string, number> = {}
-  if (raw && typeof raw === 'object') {
-    for (const [k, v] of Object.entries(raw)) {
-      const n = typeof v === 'number' ? Number(v) : Number(v?.score)
-      if (!Number.isFinite(n)) continue
-      out[String(k)] = Math.max(0, Math.min(100, Math.round(n)))
-    }
+  for (const [k, v] of Object.entries(finalized)) {
+    out[k] = Math.max(0, Math.min(100, Math.round(Number(v.score) || 0)))
   }
   if (Object.keys(out).length > 0) return out
   return {
@@ -6068,8 +6126,31 @@ function pickResumeDimensionScores(
   }
 }
 
+function reportSummaryBodyText(resume: Resume): string {
+  const summary = String(resume.evaluationJson?.summary || '').trim()
+  if (summary) return summary
+  const raw = String(resume.reportSummary || '').trim()
+  if (!raw) return ''
+  const stripped = raw.replace(/\s*\|\s*优势：[\s\S]*/u, '').trim()
+  return stripped || raw
+}
+
+function reportHasStructuredSections(resume: Resume): boolean {
+  const ej = resume.evaluationJson
+  return Boolean(
+    (Array.isArray(ej?.strengths) && ej!.strengths!.length) ||
+      (Array.isArray(ej?.risks) && ej!.risks!.length) ||
+      ej?.decision
+  )
+}
+
 function resumeDimensionOrderedEntries(scores: Record<string, number>): Array<[string, number]> {
   const preferred = [
+    'product_fit',
+    'product_depth',
+    'role_fit',
+    'role_depth',
+    'collaboration',
     'risk_fit',
     'depth',
     'impact',
@@ -6078,6 +6159,7 @@ function resumeDimensionOrderedEntries(scores: Record<string, number>): Array<[s
     'engineering_depth',
     'code_quality',
     'stability_growth',
+    'education_fit',
     'communication_business',
     'skill',
     'experience',
@@ -6098,16 +6180,29 @@ function resumeDimensionOrderedEntries(scores: Record<string, number>): Array<[s
 
 function resumeDimensionEvidenceText(
   evaluationJson: Resume['evaluationJson'] | undefined,
-  dimKey: string
+  dimKey: string,
+  jobTitle?: string
 ): string {
-  const dim = evaluationJson?.dimension_scores?.[dimKey]
-  const ev = typeof dim === 'number' ? undefined : dim?.evidence
-  if (!Array.isArray(ev) || !ev.length) return '暂无评语'
-  return ev
+  const dim = finalizedResumeEvalDimensions(evaluationJson, jobTitle)[dimKey]
+  const ev = dim?.evidence
+  const score = Number(dim?.score)
+  if (!Array.isArray(ev) || !ev.length) {
+    if (Number.isFinite(score) && score > 0) {
+      return '模型未逐条摘录依据，请结合简历原文与该维度分数综合判断。'
+    }
+    return '暂无评语'
+  }
+  const lines = ev
     .map((x) => String(x || '').trim())
     .filter(Boolean)
-    .slice(0, 2)
-    .join('；')
+    .filter((line) => !/模型未返回该维度证据|请结合简历原文与JD人工复核/.test(line))
+  if (!lines.length) {
+    if (Number.isFinite(score) && score > 0) {
+      return '模型未逐条摘录依据，请结合简历原文与该维度分数综合判断。'
+    }
+    return '暂无评语'
+  }
+  return lines.slice(0, 2).join('；')
 }
 
 /** 大模型未走通时的入库记录（含历史「关键词估算」文案） */
@@ -6388,7 +6483,7 @@ function mapScreeningRow(r: {
     experienceScore: d.experience,
     educationScore: d.education,
     stabilityScore: d.stability,
-    resumeDimensionScores: pickResumeDimensionScores(parsedEval, d),
+    resumeDimensionScores: pickResumeDimensionScores(parsedEval, d, String(r.matched_job_title || '')),
     status: aiConclusion,
     flowStage,
     uploadTime,
@@ -7317,22 +7412,22 @@ function LibraryTriCell({ v }: { v: boolean | null }) {
 }
 
 const RESUME_LIBRARY_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 160, minWidth: 120, maxWidth: 300 },
-  { id: 'gender', defaultWidth: 82, minWidth: 70, maxWidth: 130 },
-  { id: 'age', defaultWidth: 82, minWidth: 70, maxWidth: 130 },
-  { id: 'workYears', defaultWidth: 110, minWidth: 90, maxWidth: 180 },
-  { id: 'phone', defaultWidth: 150, minWidth: 120, maxWidth: 220 },
-  { id: 'major', defaultWidth: 130, minWidth: 100, maxWidth: 260 },
-  { id: 'education', defaultWidth: 110, minWidth: 90, maxWidth: 180 },
-  { id: 'position', defaultWidth: 170, minWidth: 130, maxWidth: 320 },
-  { id: 'hasDegree', defaultWidth: 120, minWidth: 100, maxWidth: 180 },
-  { id: 'unifiedEnroll', defaultWidth: 120, minWidth: 100, maxWidth: 180 },
-  { id: 'expectedSalary', defaultWidth: 140, minWidth: 110, maxWidth: 220 },
-  { id: 'checkable', defaultWidth: 120, minWidth: 100, maxWidth: 180 },
-  { id: 'channel', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
-  { id: 'uploaded', defaultWidth: 120, minWidth: 100, maxWidth: 180 },
-  { id: 'uploadTime', defaultWidth: 150, minWidth: 120, maxWidth: 220 },
-  { id: 'actions', defaultWidth: 150, minWidth: 120, maxWidth: 260 }
+  { id: 'name', defaultWidth: 124, minWidth: 96, maxWidth: 280 },
+  { id: 'gender', defaultWidth: 58, minWidth: 48, maxWidth: 110 },
+  { id: 'age', defaultWidth: 58, minWidth: 48, maxWidth: 110 },
+  { id: 'workYears', defaultWidth: 86, minWidth: 72, maxWidth: 160 },
+  { id: 'phone', defaultWidth: 114, minWidth: 96, maxWidth: 200 },
+  { id: 'major', defaultWidth: 94, minWidth: 80, maxWidth: 220 },
+  { id: 'education', defaultWidth: 82, minWidth: 68, maxWidth: 160 },
+  { id: 'position', defaultWidth: 124, minWidth: 100, maxWidth: 280 },
+  { id: 'hasDegree', defaultWidth: 92, minWidth: 78, maxWidth: 160 },
+  { id: 'unifiedEnroll', defaultWidth: 86, minWidth: 74, maxWidth: 150 },
+  { id: 'expectedSalary', defaultWidth: 102, minWidth: 84, maxWidth: 200 },
+  { id: 'checkable', defaultWidth: 86, minWidth: 74, maxWidth: 150 },
+  { id: 'channel', defaultWidth: 94, minWidth: 80, maxWidth: 200 },
+  { id: 'uploaded', defaultWidth: 90, minWidth: 78, maxWidth: 160 },
+  { id: 'uploadTime', defaultWidth: 112, minWidth: 96, maxWidth: 200 },
+  { id: 'actions', defaultWidth: 118, minWidth: 104, maxWidth: 230 }
 ];
 
 function ResumeLibraryView({
@@ -7935,7 +8030,7 @@ function ResumeLibraryView({
           {pagedRows.length > 0 ? (
             <div className="max-w-full overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
               <table
-                className="table-fixed border-collapse text-left text-sm text-slate-800 [&_th]:px-3 [&_th]:py-3 [&_td]:px-3 [&_td]:py-2.5"
+                className="table-fixed border-collapse text-left text-xs text-slate-800 [&_th]:px-2 [&_th]:py-2.5 [&_td]:px-2 [&_td]:py-2"
                 ref={cols.tableRef} style={cols.tableStyle}
               >
                 <colgroup>{cols.colNodes}</colgroup>
@@ -8224,19 +8319,86 @@ function ResumeLibraryView({
 }
 
 const RESUME_SCREENING_COLUMNS: ColumnSpec[] = [
-  { id: 'check', defaultWidth: 56, minWidth: 48, maxWidth: 72 },
-  { id: 'name', defaultWidth: 170, minWidth: 130, maxWidth: 340 },
-  { id: 'project', defaultWidth: 180, minWidth: 140, maxWidth: 360 },
-  { id: 'phone', defaultWidth: 150, minWidth: 120, maxWidth: 220 },
-  { id: 'job', defaultWidth: 220, minWidth: 170, maxWidth: 420 },
-  { id: 'score', defaultWidth: 100, minWidth: 82, maxWidth: 140 },
-  { id: 'conclusion', defaultWidth: 130, minWidth: 100, maxWidth: 240 },
-  { id: 'stage', defaultWidth: 180, minWidth: 140, maxWidth: 300 },
-  { id: 'uploader', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
-  { id: 'uploadTime', defaultWidth: 150, minWidth: 120, maxWidth: 220 },
-  { id: 'shenpuResume', defaultWidth: 180, minWidth: 140, maxWidth: 280 },
-  { id: 'actions', defaultWidth: 260, minWidth: 220, maxWidth: 420 }
+  { id: 'check', defaultWidth: 36, minWidth: 34, maxWidth: 52 },
+  { id: 'name', defaultWidth: 96, minWidth: 80, maxWidth: 260 },
+  { id: 'project', defaultWidth: 92, minWidth: 72, maxWidth: 280 },
+  { id: 'phone', defaultWidth: 98, minWidth: 88, maxWidth: 180 },
+  { id: 'job', defaultWidth: 124, minWidth: 100, maxWidth: 340 },
+  { id: 'score', defaultWidth: 56, minWidth: 50, maxWidth: 96 },
+  { id: 'stage', defaultWidth: 88, minWidth: 72, maxWidth: 240 },
+  { id: 'uploader', defaultWidth: 68, minWidth: 56, maxWidth: 160 },
+  { id: 'uploadTime', defaultWidth: 82, minWidth: 76, maxWidth: 160 },
+  { id: 'shenpuResume', defaultWidth: 88, minWidth: 76, maxWidth: 200 },
+  { id: 'actions', defaultWidth: 148, minWidth: 136, maxWidth: 300 }
 ];
+
+const RESUME_UPLOAD_MAX_BATCH = 30;
+const RESUME_UPLOAD_CONCURRENCY = 3;
+
+function isAllowedResumeUploadFile(file: File): boolean {
+  const name = String(file.name || '').trim().toLowerCase();
+  if (/\.(pdf|docx?|txt|png|jpe?g|webp)$/i.test(name)) return true;
+  const type = String(file.type || '').toLowerCase();
+  if (
+    type === 'application/pdf' ||
+    type === 'application/x-pdf' ||
+    type === 'text/plain' ||
+    type === 'application/msword' ||
+    type.includes('wordprocessingml') ||
+    type.startsWith('image/')
+  ) {
+    return true;
+  }
+  // 部分系统/网盘导出的 PDF 无 MIME 或标记为 octet-stream，靠扩展名放行
+  if ((type === '' || type === 'application/octet-stream') && /\.(pdf|docx?)$/i.test(name)) {
+    return true;
+  }
+  return false;
+}
+
+async function sniffResumeUploadPdf(file: File): Promise<boolean> {
+  if (!file || file.size <= 0) return false;
+  try {
+    const buf = await file.slice(0, 4).arrayBuffer();
+    const sig = String.fromCharCode(...new Uint8Array(buf));
+    return sig === '%PDF';
+  } catch {
+    return false;
+  }
+}
+
+async function resolveResumeUploadFiles(
+  fileList: FileList | File[] | null | undefined
+): Promise<File[]> {
+  const raw = snapshotResumeUploadRawFiles(fileList);
+  if (!raw.length) return [];
+  const allowed = raw.filter(isAllowedResumeUploadFile);
+  if (allowed.length) return allowed;
+  const sniffed: File[] = [];
+  for (const file of raw) {
+    if (await sniffResumeUploadPdf(file)) sniffed.push(file);
+  }
+  return sniffed;
+}
+
+/** 同步拷贝 FileList：input.value 清空后部分浏览器会使原 FileList 变空 */
+function snapshotResumeUploadRawFiles(fileList: FileList | File[] | null | undefined): File[] {
+  if (!fileList) return [];
+  return Array.from(fileList);
+}
+
+function collectResumeUploadFilesFromDataTransfer(dataTransfer: DataTransfer | null | undefined): File[] {
+  if (!dataTransfer) return [];
+  const fromFiles = Array.from(dataTransfer.files || []);
+  if (fromFiles.length) return fromFiles;
+  const fromItems: File[] = [];
+  for (const item of Array.from(dataTransfer.items || [])) {
+    if (item.kind !== 'file') continue;
+    const f = item.getAsFile();
+    if (f) fromItems.push(f);
+  }
+  return fromItems;
+}
 
 function ResumeScreeningView({
   currentRole,
@@ -8245,7 +8407,7 @@ function ResumeScreeningView({
   currentRole: Role;
   authProfile: AdminLoginProfile | null;
 }) {
-  const cols = useColumnWidths('resume-screening', RESUME_SCREENING_COLUMNS);
+  const cols = useColumnWidths('resume-screening-v2', RESUME_SCREENING_COLUMNS);
   const [resumes, setResumes] = useState<Resume[]>([]);
   const [sessRev, setSessRev] = useState(0);
   useEffect(() => subscribeAdminSession(() => setSessRev((n) => n + 1)), []);
@@ -8291,6 +8453,7 @@ function ResumeScreeningView({
   /** 服务端分页：符合筛选条件的总条数 */
   const [screenListTotal, setScreenListTotal] = useState(0);
   const [reportResume, setReportResume] = useState<Resume | null>(null);
+  const [reportReEvalBusy, setReportReEvalBusy] = useState(false);
   const [profileEditResume, setProfileEditResume] = useState<Resume | null>(null);
   const [fileBusyId, setFileBusyId] = useState<string | null>(null);
   const fileInputModalRef = useRef<HTMLInputElement>(null);
@@ -8594,7 +8757,6 @@ function ResumeScreeningView({
     if (duplicateUploadNotifiedTaskRef.current === duplicate.taskId) return;
     duplicateUploadNotifiedTaskRef.current = duplicate.taskId;
     setUploadTasks((prev) => prev.filter((t) => t.taskId !== duplicate.taskId));
-    setUploadModalOpen(false);
     setScreeningAdminMsg({
       title: '简历已存在',
       message: duplicate.message || '该岗位下已有这份简历，无需重复上传。'
@@ -8789,6 +8951,65 @@ function ResumeScreeningView({
     [apiBase, hasToken]
   );
 
+  const reEvaluateReport = useCallback(
+    async (resume: Resume) => {
+      if (!apiBase || !hasToken || reportReEvalBusy) return;
+      setReportReEvalBusy(true);
+      try {
+        const r = await miniappApiFetch(
+          `/api/admin/resume-screenings/${encodeURIComponent(resume.id)}/re-eval`,
+          { method: 'POST' }
+        );
+        const j = (await r.json()) as {
+          data?: {
+            matchScore: number;
+            status: string;
+            reportSummary?: string;
+            evaluationJson?: Resume['evaluationJson'];
+            skillScore?: number;
+            experienceScore?: number;
+            educationScore?: number;
+            stabilityScore?: number;
+            candidateName?: string;
+          };
+          message?: string;
+        };
+        if (!r.ok || !j.data) throw new Error(j.message || '重新评估失败');
+        const d = j.data;
+        const evalJson = d.evaluationJson;
+        const fallbackDims = {
+          skill: d.skillScore ?? resume.skillScore ?? 0,
+          experience: d.experienceScore ?? resume.experienceScore ?? 0,
+          education: d.educationScore ?? resume.educationScore ?? 0,
+          stability: d.stabilityScore ?? resume.stabilityScore ?? 0
+        };
+        const updated: Resume = {
+          ...resume,
+          name: d.candidateName?.trim() || resume.name,
+          matchScore: d.matchScore,
+          skillScore: d.skillScore,
+          experienceScore: d.experienceScore,
+          educationScore: d.educationScore,
+          stabilityScore: d.stabilityScore,
+          status: d.status,
+          reportSummary: d.reportSummary,
+          evaluationJson: evalJson,
+          resumeDimensionScores: pickResumeDimensionScores(evalJson, fallbackDims, resume.job || '')
+        };
+        setResumes((prev) => prev.map((x) => (x.id === resume.id ? updated : x)));
+        setReportResume((prev) => (prev && prev.id === resume.id ? updated : prev));
+      } catch (e) {
+        setScreeningAdminMsg({
+          title: '重新评估失败',
+          message: userFacingApiError(e, '重新评估失败，请稍后重试')
+        });
+      } finally {
+        setReportReEvalBusy(false);
+      }
+    },
+    [apiBase, hasToken, reportReEvalBusy]
+  );
+
   const deleteScreeningsByIds = useCallback(
     async (ids: string[]) => {
       /** 与库 BIGINT 一致：仅用数字串传参，避免 Number() 超过安全整数时与库 id 对不上导致删除 404 */
@@ -8951,7 +9172,7 @@ function ResumeScreeningView({
       return;
     }
     setInvitePromptLoading(true);
-    miniappApiFetch('/api/admin/interview-question-prompt-templates')
+    miniappApiFetch('/api/admin/interview-question-prompt-templates?scope=invite')
       .then(async (r) => {
         const j = (await r.json().catch(() => ({}))) as InterviewPromptTemplatesPayload;
         if (!r.ok || !Array.isArray(j.data)) throw new Error(j.message || '加载提示词模板失败');
@@ -9100,49 +9321,97 @@ function ResumeScreeningView({
     openInvitePromptPicker(matched.job_code, resume);
   };
 
-  const runUpload = (file: File | null) => {
-    if (!file || !apiBase || !hasToken) return;
-    if (!uploadJobCode) {
-      setUploadHint(
-        jobsForResumeUpload.length === 0 && uploadProjectFilter.trim()
-          ? '当前项目下没有可选岗位，请更换项目或为岗位绑定项目后再试。'
-          : '上传需绑定具体岗位。请先在「目标岗位」中选择某一岗位。'
-      );
-      return;
-    }
-    const selectedJob = jobsForResumeUpload.find((j) => j.job_code === uploadJobCode);
-    const selectedProject = projectFilterOptions.find((p) => p.id === uploadProjectFilter.trim());
-    setUploadHint('');
-    setUploadTaskJobLabel(selectedJob ? `${selectedJob.title} (${selectedJob.job_code})` : uploadJobCode);
-    setUploadTaskProjectLabel(selectedProject?.name || '');
-    setUploading(true);
-    const fd = new FormData();
-    fd.append('file', file);
-    fd.append('jobCode', uploadJobCode);
-    if (uploadCandidateName.trim()) fd.append('candidateName', uploadCandidateName.trim());
-    void miniappApiFetch('/api/admin/resume-screen', { method: 'POST', body: fd })
-      .then(async (r) => {
-        const j = (await r.json()) as { data?: ResumeUploadTask; message?: string }
-        if (!r.ok) throw new Error(j.message || 'upload failed');
-        if (!j.data?.taskId) throw new Error('上传任务创建失败');
+  const runUploadFiles = useCallback(
+    async (rawFiles: FileList | File[] | null | undefined) => {
+      const files = await resolveResumeUploadFiles(rawFiles);
+      if (!files.length) {
+        setUploadHint('未识别到可上传的文件，请选择 PDF、DOCX、TXT 或图片');
+        return;
+      }
+      if (!apiBase || !hasToken) return;
+      if (!uploadJobCode) {
+        setUploadHint(
+          jobsForResumeUpload.length === 0 && uploadProjectFilter.trim()
+            ? '当前项目下没有可选岗位，请更换项目或为岗位绑定项目后再试。'
+            : '上传需绑定具体岗位。请先在「目标岗位」中选择某一岗位。'
+        );
+        return;
+      }
+      const batch = files.slice(0, RESUME_UPLOAD_MAX_BATCH);
+      if (files.length > RESUME_UPLOAD_MAX_BATCH) {
+        setUploadHint(`一次最多 ${RESUME_UPLOAD_MAX_BATCH} 份，已取前 ${RESUME_UPLOAD_MAX_BATCH} 份`);
+      }
+      const selectedJob = jobsForResumeUpload.find((j) => j.job_code === uploadJobCode);
+      const selectedProject = projectFilterOptions.find((p) => p.id === uploadProjectFilter.trim());
+      setUploadTaskJobLabel(selectedJob ? `${selectedJob.title} (${selectedJob.job_code})` : uploadJobCode);
+      setUploadTaskProjectLabel(selectedProject?.name || '');
+      setUploading(true);
+      setUploadHint(`正在提交 ${batch.length} 份简历…`);
+
+      const manualName = batch.length === 1 ? uploadCandidateName.trim() : '';
+      let ok = 0;
+      let fail = 0;
+      let cursor = 0;
+
+      const uploadOne = async (file: File) => {
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('jobCode', uploadJobCode);
+        if (manualName) fd.append('candidateName', manualName);
+        const r = await miniappApiFetch('/api/admin/resume-screen', { method: 'POST', body: fd });
+        const j = (await r.json()) as { data?: ResumeUploadTask; message?: string };
+        if (!r.ok || !j.data?.taskId) throw new Error(j.message || 'upload failed');
         setUploadTasks((prev) => [j.data!, ...prev.filter((task) => task.taskId !== j.data!.taskId)]);
-        setUploadHint('');
-        setUploadModalOpen(false);
-      })
-      .catch((e: unknown) => {
-        setUploadHint(userFacingApiError(e, '上传或筛查失败'));
-      })
-      .finally(() => setUploading(false));
-  };
+      };
+
+      const worker = async () => {
+        while (cursor < batch.length) {
+          const file = batch[cursor]!;
+          cursor += 1;
+          try {
+            await uploadOne(file);
+            ok += 1;
+          } catch {
+            fail += 1;
+          }
+        }
+      };
+
+      await Promise.all(
+        Array.from({ length: Math.min(RESUME_UPLOAD_CONCURRENCY, batch.length) }, () => worker())
+      );
+
+      setUploading(false);
+      if (fail > 0) {
+        setUploadHint(`已提交 ${ok} 份，${fail} 份失败；成功项在下方列表解析中`);
+      } else {
+        setUploadHint(`已提交 ${ok} 份，后台解析中；可继续添加或关闭窗口`);
+      }
+      if (batch.length === 1 && ok === 1) setUploadCandidateName('');
+    },
+    [
+      apiBase,
+      hasToken,
+      uploadJobCode,
+      uploadCandidateName,
+      jobsForResumeUpload,
+      uploadProjectFilter,
+      projectFilterOptions
+    ]
+  );
 
   const uploadTaskActive =
-    Boolean(uploadTask) &&
-    uploadTask?.status !== 'failed' &&
-    uploadTask?.status !== 'duplicate' &&
-    uploadTask?.status !== 'done';
-  const uploadTaskFailed = uploadTask?.status === 'failed';
-  const uploadTaskDuplicate = uploadTask?.status === 'duplicate';
-  const uploadTaskAllDone = uploadTask?.status === 'done';
+    uploadTasks.some((task) => task.status === 'queued' || task.status === 'running');
+  const uploadModalTasks = useMemo(
+    () =>
+      uploadTasks.filter(
+        (task) =>
+          task.status === 'queued' ||
+          task.status === 'running' ||
+          task.status === 'failed'
+      ),
+    [uploadTasks]
+  );
   const displayResumes = useMemo(() => {
     if (uploadTasks.length === 0) return resumes;
     let decorated = resumes;
@@ -9217,12 +9486,6 @@ function ResumeScreeningView({
       ) : null}
       <div className="flex min-h-0 flex-1 flex-col gap-2">
         <div className="shrink-0 space-y-2.5">
-          <div>
-            <h1 className="text-xl font-bold text-slate-900">简历管理</h1>
-            <p className="mt-1 text-xs leading-relaxed text-slate-500 sm:text-sm">
-              项目、筛选条件与分页均由服务端计算；修改条件或翻页后会重新请求列表。上传请在弹窗内选择项目与目标岗位后提交文件。
-            </p>
-          </div>
           <form
             className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 shadow-sm"
             title="筛选与分页由服务端计算；点击搜索将重置到第 1 页并重新拉取"
@@ -9540,13 +9803,13 @@ function ResumeScreeningView({
               {hasDisplayResumes ? (
                 <div className="max-w-full overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
                   <table
-                    className="table-fixed text-left text-sm text-slate-800"
+                    className="table-fixed text-left text-xs text-slate-800"
                     ref={cols.tableRef} style={cols.tableStyle}
                   >
                     <colgroup>{cols.colNodes}</colgroup>
                     <thead className="bg-slate-50/95 text-slate-600 border-b border-slate-200 text-xs sticky top-0 z-10">
                       <tr>
-                        <ResizableTh col={cols.byId.check} className="px-1 py-3 text-center" resizable={false}>
+                        <ResizableTh col={cols.byId.check} className="px-0.5 py-2 text-center" resizable={false}>
                           <input
                             type="checkbox"
                             title="全选本页"
@@ -9580,17 +9843,16 @@ function ResumeScreeningView({
                             className="h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                           />
                         </ResizableTh>
-                        <ResizableTh col={cols.byId.name} className="py-3 pl-1.5 pr-2 font-medium">候选人</ResizableTh>
-                        <ResizableTh col={cols.byId.project} className="py-3 pl-1 pr-2 font-medium">项目</ResizableTh>
-                        <ResizableTh col={cols.byId.phone} className="px-1 py-3 font-medium">手机</ResizableTh>
-                        <ResizableTh col={cols.byId.job} className="py-3 pl-1 pr-2 font-medium">匹配岗位</ResizableTh>
-                        <ResizableTh col={cols.byId.score} className="py-3 pl-0 pr-1 text-center font-medium">匹配分</ResizableTh>
-                        <ResizableTh col={cols.byId.conclusion} className="px-1 py-3 font-medium">AI 结论</ResizableTh>
-                        <ResizableTh col={cols.byId.stage} className="px-2 py-3 font-medium">流程</ResizableTh>
-                        <ResizableTh col={cols.byId.uploader} className="px-2 py-3 font-medium">上传人</ResizableTh>
-                        <ResizableTh col={cols.byId.uploadTime} className="px-1 py-3 font-medium whitespace-nowrap">上传时间</ResizableTh>
-                        <ResizableTh col={cols.byId.shenpuResume} className="px-2 py-3 font-medium whitespace-nowrap">申朴简历</ResizableTh>
-                        <ResizableTh col={cols.byId.actions} className="border-l border-slate-200 bg-slate-50/95 pl-3 pr-2 py-3 font-medium text-right whitespace-nowrap">操作</ResizableTh>
+                        <ResizableTh col={cols.byId.name} className="py-2 pl-1 pr-0.5 font-medium">候选人</ResizableTh>
+                        <ResizableTh col={cols.byId.project} className="py-2 pl-0.5 pr-0.5 font-medium">项目</ResizableTh>
+                        <ResizableTh col={cols.byId.phone} className="px-0.5 py-2 font-medium">手机</ResizableTh>
+                        <ResizableTh col={cols.byId.job} className="py-2 pl-0.5 pr-0.5 font-medium">匹配岗位</ResizableTh>
+                        <ResizableTh col={cols.byId.score} className="py-2 pl-0 pr-0.5 text-center font-medium">匹配分</ResizableTh>
+                        <ResizableTh col={cols.byId.stage} className="px-1 py-2 font-medium">流程</ResizableTh>
+                        <ResizableTh col={cols.byId.uploader} className="px-1 py-2 font-medium">上传人</ResizableTh>
+                        <ResizableTh col={cols.byId.uploadTime} className="px-0.5 py-2 font-medium whitespace-nowrap">上传时间</ResizableTh>
+                        <ResizableTh col={cols.byId.shenpuResume} className="px-1 py-2 font-medium whitespace-nowrap">申朴简历</ResizableTh>
+                        <ResizableTh col={cols.byId.actions} className="border-l border-slate-200 bg-slate-50/95 pl-1.5 pr-1 py-2 font-medium text-right whitespace-nowrap">操作</ResizableTh>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -9609,7 +9871,7 @@ function ResumeScreeningView({
                         return (
                           <React.Fragment key={resume.id}>
                             <tr className={`align-middle transition-colors hover:bg-indigo-50/40 ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}`}>
-                              <td className="w-9 px-1 py-2.5 align-middle text-center">
+                              <td className="w-9 px-0.5 py-2 align-middle text-center">
                                 <input
                                   type="checkbox"
                                   disabled={isUploadPlaceholder || isResumeUploading || uploadTaskRowFailed || uploadTaskRowDuplicate}
@@ -9626,9 +9888,9 @@ function ResumeScreeningView({
                                   className="h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                                 />
                               </td>
-                              <td className="max-w-0 py-2.5 pl-1.5 pr-0">
-                                <div className="flex items-start gap-1.5" title={resume.name || ''}>
-                                  <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[11px] font-semibold text-indigo-700">
+                              <td className="max-w-0 py-2 pl-1 pr-0">
+                                <div className="flex items-start gap-1" title={resume.name || ''}>
+                                  <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[10px] font-semibold text-indigo-700">
                                     {String(resume.name || '候').trim().slice(0, 1)}
                                   </span>
                                   <div className="min-w-0 flex-1">
@@ -9641,12 +9903,12 @@ function ResumeScreeningView({
                                   </div>
                                 </div>
                               </td>
-                              <td className="max-w-0 py-2.5 pl-0 pr-1 text-xs text-slate-700">
+                              <td className="max-w-0 py-2 pl-0 pr-0.5 text-xs text-slate-700">
                                 <div className="truncate" title={resume.projectName || ''}>
                                   {resume.projectName || <span className="text-slate-400">—</span>}
                                 </div>
                               </td>
-                              <td className="max-w-0 px-1 py-3 text-xs text-slate-700">
+                              <td className="max-w-0 px-0.5 py-2 text-xs text-slate-700">
                                 {resume.phone ? (
                                   <div className="inline-flex max-w-full items-center gap-1 align-middle">
                                     <span className="min-w-0 truncate font-mono" title={maskedPhone}>
@@ -9655,7 +9917,7 @@ function ResumeScreeningView({
                                     <button
                                       type="button"
                                       onClick={() => void copyResumePhone(rid, resume.phone)}
-                                      className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border transition-colors ${
+                                      className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors ${
                                         phoneCopied
                                           ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
                                           : 'border-slate-200 bg-white text-slate-500 hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700'
@@ -9663,17 +9925,17 @@ function ResumeScreeningView({
                                       title={phoneCopied ? '已复制完整手机号' : '复制完整手机号'}
                                       aria-label={phoneCopied ? '已复制完整手机号' : '复制完整手机号'}
                                     >
-                                      {phoneCopied ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                                      {phoneCopied ? <CheckCircle2 className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
                                     </button>
                                   </div>
                                 ) : (
                                   <span className="text-slate-400">—</span>
                                 )}
                               </td>
-                              <td className="max-w-0 py-3 pl-1 pr-0 text-xs leading-snug text-slate-700">
-                                <div className="line-clamp-3 break-words">{resume.job}</div>
+                              <td className="max-w-0 py-2 pl-0.5 pr-0 text-xs leading-snug text-slate-700">
+                                <div className="line-clamp-2 break-words">{resume.job}</div>
                               </td>
-                              <td className="py-3 pl-0 pr-1 text-center tabular-nums">
+                              <td className="py-2 pl-0 pr-0.5 text-center tabular-nums">
                                 {isResumeUploading || uploadTaskRowFailed || uploadTaskRowDuplicate || isUploadPlaceholder ? (
                                   <div
                                     className={`mx-auto min-w-12 rounded-md px-1.5 py-1 text-[10px] font-semibold ${
@@ -9688,7 +9950,7 @@ function ResumeScreeningView({
                                   </div>
                                 ) : (
                                   <span
-                                    className={`inline-flex min-w-10 justify-center rounded-md px-2 py-1 text-xs font-semibold ${
+                                    className={`inline-flex min-w-9 justify-center rounded px-1.5 py-0.5 text-[11px] font-semibold ${
                                       resume.matchScore >= 80
                                         ? 'bg-emerald-50 text-emerald-700'
                                         : resume.matchScore >= 60
@@ -9700,18 +9962,10 @@ function ResumeScreeningView({
                                   </span>
                                 )}
                               </td>
-                              <td className="max-w-0 min-w-0 px-1 py-2.5 text-[10px] leading-tight text-slate-600">
-                                <span
-                                  className="block w-full truncate rounded bg-slate-100 px-1 py-0.5 text-center font-medium text-slate-700"
-                                  title={resume.uploadTaskStage || resume.status}
-                                >
-                                  {resume.uploadTaskStage || (isUploadPlaceholder ? '简历处理中' : resume.status)}
-                                </span>
-                              </td>
-                              <td className="max-w-0 px-2 py-3 text-xs">
+                              <td className="max-w-0 px-1 py-2 text-xs">
                                 {resume.flowStage ? (
                                   <span
-                                    className="inline-block max-w-full truncate rounded-md bg-indigo-50 px-1.5 py-0.5 font-medium text-indigo-700"
+                                    className="inline-block max-w-full truncate rounded bg-indigo-50 px-1 py-0.5 text-[11px] font-medium text-indigo-700"
                                     title={resume.flowStage}
                                   >
                                     {resume.flowStage}
@@ -9720,23 +9974,23 @@ function ResumeScreeningView({
                                   <span className="text-slate-400">—</span>
                                 )}
                               </td>
-                              <td className="max-w-0 px-2 py-3 text-sm font-medium text-slate-900">
+                              <td className="max-w-0 px-1 py-2 text-xs font-medium text-slate-900">
                                 <div className="truncate" title={uploaderLabel}>
                                   {uploaderLabel}
                                 </div>
                               </td>
-                              <td className="w-[6.25rem] min-w-[6.25rem] max-w-[6.25rem] shrink-0 px-1 py-3 text-xs tabular-nums text-slate-500">
+                              <td className="max-w-0 px-0.5 py-2 text-xs tabular-nums text-slate-500">
                                 <span
-                                  className="block whitespace-nowrap font-mono text-[11px] tracking-tight"
+                                  className="block truncate whitespace-nowrap font-mono text-[11px] tracking-tight"
                                   title={resume.uploadTimeFull || resume.uploadTime}
                                 >
                                   {resume.uploadTime}
                                 </span>
                               </td>
-                              <td className="px-2 py-3 text-xs">
+                              <td className="max-w-0 px-1 py-2 text-xs">
                                 {resume.uploadTaskStatus ? (
                                   <span
-                                    className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 font-medium text-slate-500"
+                                    className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-medium text-slate-500"
                                     title="原始简历处理完成后可生成申朴简历"
                                   >
                                     未生成
@@ -9747,17 +10001,17 @@ function ResumeScreeningView({
                                       type="button"
                                       disabled={fileBusyId === resume.id}
                                       onClick={() => void downloadShenpuResume(resume)}
-                                      className="inline-flex items-center gap-1.5 rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 font-semibold text-blue-700 shadow-sm transition hover:border-blue-300 hover:bg-blue-100 disabled:opacity-60"
+                                      className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-700 shadow-sm transition hover:border-blue-300 hover:bg-blue-100 disabled:opacity-60"
                                       title="下载申朴简历"
                                     >
-                                      <Download className="h-3.5 w-3.5" aria-hidden />
-                                      可下载
+                                      <Download className="h-3 w-3" aria-hidden />
+                                      下载
                                     </button>
                                     <button
                                       type="button"
                                       disabled={fileBusyId === resume.id}
                                       onClick={() => void generateShenpuResume(resume)}
-                                      className="inline-flex items-center rounded-full border border-slate-200 bg-white px-1.5 py-1 text-slate-500 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-60"
+                                      className="inline-flex items-center rounded-full border border-slate-200 bg-white px-1 py-0.5 text-slate-500 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-60"
                                       title="重新生成申朴简历（覆盖现有文件）"
                                       aria-label="重新生成申朴简历"
                                     >
@@ -9799,20 +10053,20 @@ function ResumeScreeningView({
                                     type="button"
                                     disabled={fileBusyId === resume.id}
                                     onClick={() => void generateShenpuResume(resume)}
-                                    className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 font-semibold text-emerald-700 shadow-sm transition hover:border-emerald-300 hover:bg-emerald-100 disabled:opacity-60"
+                                    className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 shadow-sm transition hover:border-emerald-300 hover:bg-emerald-100 disabled:opacity-60"
                                     title="点击异步生成申朴标准简历"
                                   >
-                                    <Sparkles className="h-3.5 w-3.5" aria-hidden />
+                                    <Sparkles className="h-3 w-3" aria-hidden />
                                     生成
                                   </button>
                                 )}
                               </td>
                               <td
-                                className={`w-[12.5rem] min-w-[12.5rem] max-w-none shrink-0 border-l border-slate-200 py-2 pl-3 pr-2 text-right align-middle whitespace-nowrap ${
+                                className={`max-w-0 border-l border-slate-200 py-1.5 pl-1 pr-0.5 text-right align-middle whitespace-nowrap ${
                                   idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/90'
                                 }`}
                               >
-                                <div className="inline-flex flex-nowrap items-center justify-end gap-1">
+                                <div className="inline-flex flex-nowrap items-center justify-end gap-px">
                                   {isResumeUploading || uploadTaskRowFailed || uploadTaskRowDuplicate || isUploadPlaceholder ? (
                                     <div
                                       className={`min-w-[10rem] rounded-lg border px-2 py-1.5 text-left ${
@@ -9867,54 +10121,52 @@ function ResumeScreeningView({
                                       <button
                                         type="button"
                                         onClick={() => setReportResume(resume)}
-                                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-400/35"
+                                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-400/35"
                                         title="查看报告"
                                         aria-label="查看报告"
                                       >
-                                        <FileBarChart className="h-4 w-4" aria-hidden />
+                                        <FileBarChart className="h-3 w-3" aria-hidden />
                                       </button>
                                       <button
                                         type="button"
                                         onClick={() => setProfileEditResume(resume)}
-                                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-400/35"
+                                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-400/35"
                                         title="简历详情"
                                         aria-label="简历详情"
                                       >
-                                        <UserPen className="h-4 w-4" aria-hidden />
+                                        <UserPen className="h-3 w-3" aria-hidden />
                                       </button>
-                                      {resume.matchScore >= 60 ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => handleInviteFromResume(resume)}
-                                      disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
-                                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-40"
-                                      title="发起面试"
-                                      aria-label="发起面试"
-                                    >
-                                      <CalendarCheck className="h-4 w-4" aria-hidden />
-                                    </button>
-                                      ) : null}
+                                      <button
+                                        type="button"
+                                        onClick={() => handleInviteFromResume(resume)}
+                                        disabled={!apiBase || !hasToken || Boolean(creatingInvite)}
+                                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-600 shadow-sm hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-40"
+                                        title="发起面试"
+                                        aria-label="发起面试"
+                                      >
+                                        <CalendarCheck className="h-3 w-3" aria-hidden />
+                                      </button>
                                       {resume.hasOriginalFile ? (
                                         <>
                                       <button
                                         type="button"
                                         disabled={fileBusyId === resume.id}
                                         onClick={() => void openResumeOriginalFile(resume, 'preview')}
-                                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300/60 disabled:opacity-50"
+                                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300/60 disabled:opacity-50"
                                         title="预览原件"
                                         aria-label="预览原件"
                                       >
-                                        <Eye className="h-4 w-4" aria-hidden />
+                                        <Eye className="h-3 w-3" aria-hidden />
                                       </button>
                                       <button
                                         type="button"
                                         disabled={fileBusyId === resume.id}
                                         onClick={() => void openResumeOriginalFile(resume, 'download')}
-                                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300/60 disabled:opacity-50"
+                                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-300/60 disabled:opacity-50"
                                         title="下载原件"
                                         aria-label="下载原件"
                                       >
-                                        <Download className="h-4 w-4" aria-hidden />
+                                        <Download className="h-3 w-3" aria-hidden />
                                       </button>
                                         </>
                                       ) : null}
@@ -9973,7 +10225,7 @@ function ResumeScreeningView({
                   <h3 id="resume-upload-modal-title" className="text-lg font-bold text-slate-900">
                     上传简历
                   </h3>
-                  <p className="mt-0.5 text-xs text-slate-500">须选择具体目标岗位，解析完成后将加入下方列表</p>
+                  <p className="mt-0.5 text-xs text-slate-500">须选择具体目标岗位；可一次选择多份，解析完成后将加入下方列表</p>
                 </div>
                 <button
                   type="button"
@@ -10062,12 +10314,12 @@ function ResumeScreeningView({
                   <input
                     value={uploadCandidateName}
                     onChange={(e) => setUploadCandidateName(e.target.value)}
-                    disabled={uploading || uploadTaskActive}
+                    disabled={uploading}
                     placeholder="文件名不含姓名或扫描件时建议填写"
                     className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/20 disabled:bg-slate-50"
                   />
                   <p className="mt-1 text-[11px] leading-snug text-slate-500">
-                    填写后优先作为候选人姓名；不填则按文件名、简历正文和 AI 结果自动识别。
+                    仅在上传单份时生效；批量上传时按各文件名与正文自动识别姓名。
                   </p>
                 </div>
                 {uploadHint ? (
@@ -10079,66 +10331,48 @@ function ResumeScreeningView({
                     {uploadHint}
                   </p>
                 ) : null}
-                {uploadTask ? (
-                  <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-sm font-semibold text-slate-900">
-                          {uploadTaskFailed
-                            ? '处理失败'
-                            : uploadTaskDuplicate
-                              ? '简历已存在'
-                              : uploadTaskAllDone
-                                ? '处理完成'
-                                : '后台处理中'}
-                        </div>
-                        <div className="mt-0.5 truncate text-xs text-slate-500" title={uploadTask.candidateName || uploadTask.jobCode}>
-                          {uploadTask.candidateName || uploadTask.jobCode}
-                        </div>
-                      </div>
-                      {uploadTaskActive ? <Loader2 className="h-4 w-4 shrink-0 animate-spin text-indigo-500" /> : null}
-                    </div>
-                    <div className="space-y-2">
-                      <div>
-                        <div className="mb-1 flex items-center justify-between gap-2 text-xs">
-                          <span className="truncate text-slate-600" title={uploadTask.uploadStage || uploadTask.error || ''}>
-                            原始简历上传提取：{uploadTask.error || uploadTask.uploadStage || '处理中'}
+                {uploadModalTasks.length > 0 ? (
+                  <div className="max-h-44 space-y-2 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                    <p className="text-xs font-medium text-slate-700">
+                      处理队列（{uploadModalTasks.length}）
+                    </p>
+                    {uploadModalTasks.map((task) => (
+                      <div key={task.taskId} className="rounded-md border border-slate-200 bg-white px-2.5 py-2">
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="min-w-0 truncate font-medium text-slate-800" title={task.fileName || task.jobCode}>
+                            {task.fileName || task.jobCode}
                           </span>
                           <span className="shrink-0 tabular-nums text-slate-500">
-                            {Math.max(0, Math.min(100, Math.round(uploadTask.uploadProgress || 0)))}%
+                            {Math.max(0, Math.min(100, Math.round(task.uploadProgress || 0)))}%
                           </span>
                         </div>
-                        <div className="h-2 overflow-hidden rounded-full bg-white">
+                        <p className="mt-0.5 truncate text-[11px] text-slate-500" title={task.error || task.uploadStage || ''}>
+                          {task.error || task.uploadStage || '处理中'}
+                        </p>
+                        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-100">
                           <div
                             className={`h-full rounded-full transition-all ${
-                              uploadTaskFailed || uploadTaskDuplicate ? 'bg-amber-500' : 'bg-indigo-500'
+                              task.status === 'failed' ? 'bg-rose-500' : 'bg-indigo-500'
                             }`}
-                            style={{ width: `${Math.max(0, Math.min(100, Math.round(uploadTask.uploadProgress || 0)))}%` }}
+                            style={{
+                              width: `${Math.max(0, Math.min(100, Math.round(task.uploadProgress || 0)))}%`
+                            }}
                           />
                         </div>
                       </div>
-                      {uploadTask.status === 'done' ? (
-                        <div className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-600">
-                          申朴标准简历不会自动生成，可在列表「申朴简历」列点击生成。
-                        </div>
-                      ) : uploadTask.status === 'duplicate' ? (
-                        <div className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs text-amber-800">
-                          该岗位下已有这份简历，无需重复上传。
-                        </div>
-                      ) : null}
-                    </div>
-                    {uploadTask.message ? <div className="text-xs text-slate-500">{uploadTask.message}</div> : null}
+                    ))}
                   </div>
                 ) : null}
                 <input
                   ref={fileInputModalRef}
                   type="file"
-                  accept=".pdf,.doc,.docx,.txt,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                  multiple
+                  accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.webp,application/pdf,application/msword,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*"
                   className="hidden"
                   onChange={(e) => {
-                    const f = e.target.files?.[0];
+                    const files = snapshotResumeUploadRawFiles(e.target.files);
                     e.target.value = '';
-                    runUpload(f || null);
+                    void runUploadFiles(files);
                   }}
                 />
                 <div
@@ -10158,8 +10392,8 @@ function ResumeScreeningView({
                     e.preventDefault();
                     e.stopPropagation();
                     if (uploading) return;
-                    const f = e.dataTransfer.files?.[0];
-                    runUpload(f || null);
+                    const dropped = collectResumeUploadFilesFromDataTransfer(e.dataTransfer);
+                    void runUploadFiles(snapshotResumeUploadRawFiles(dropped.length ? dropped : e.dataTransfer.files));
                   }}
                   className={`flex min-h-[280px] flex-1 flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 px-4 py-8 text-center transition-colors group ${
                     uploading
@@ -10174,11 +10408,12 @@ function ResumeScreeningView({
                     {uploading
                       ? '正在提交任务…'
                       : uploadTaskActive
-                        ? '后台处理中，可继续上传下一份'
-                        : '点击或拖拽简历到此处'}
+                        ? '后台解析中，可继续添加更多简历'
+                        : '点击或拖拽简历到此处（可多选）'}
                   </p>
                   <p className="mt-0.5 text-[11px] leading-snug text-slate-500">
-                    支持 PDF、DOCX、TXT；旧版 .doc 请另存为 DOCX 后再上传
+                    支持 PDF、DOCX、TXT、PNG/JPG；一次最多 {RESUME_UPLOAD_MAX_BATCH} 份，同时解析约{' '}
+                    {RESUME_UPLOAD_CONCURRENCY} 份
                   </p>
                 </div>
               </div>
@@ -10443,16 +10678,20 @@ function ResumeScreeningView({
                           {resumeEvalDimensionLabelCn(k)} · <span className="tabular-nums">{Number(v) || 0}</span>
                         </p>
                         <p className="mt-1 text-xs leading-relaxed text-slate-600">
-                          {resumeDimensionEvidenceText(reportResume.evaluationJson, k)}
+                          {resumeDimensionEvidenceText(reportResume.evaluationJson, k, reportResume.job)}
                         </p>
                       </div>
                     ))}
                   </div>
                 ) : null}
                 <div className="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">
-                  {reportResume.reportSummary?.trim() || '暂无报告正文。'}
+                  {reportHasStructuredSections(reportResume)
+                    ? reportSummaryBodyText(reportResume) || '暂无评估摘要。'
+                    : reportResume.reportSummary?.trim() || '暂无报告正文。'}
                 </div>
-                {Array.isArray(reportResume.evaluationJson?.strengths) && reportResume.evaluationJson.strengths.length ? (
+                {reportHasStructuredSections(reportResume) &&
+                Array.isArray(reportResume.evaluationJson?.strengths) &&
+                reportResume.evaluationJson.strengths.length ? (
                   <div className="mt-4">
                     <h4 className="text-sm font-semibold text-slate-800 mb-1.5">结构化优势</h4>
                     <ul className="text-sm text-slate-700 space-y-1">
@@ -10462,7 +10701,9 @@ function ResumeScreeningView({
                     </ul>
                   </div>
                 ) : null}
-                {Array.isArray(reportResume.evaluationJson?.risks) && reportResume.evaluationJson.risks.length ? (
+                {reportHasStructuredSections(reportResume) &&
+                Array.isArray(reportResume.evaluationJson?.risks) &&
+                reportResume.evaluationJson.risks.length ? (
                   <div className="mt-4">
                     <h4 className="text-sm font-semibold text-slate-800 mb-1.5">结构化风险与核验问题</h4>
                     <ul className="text-sm text-slate-700 space-y-1.5">
@@ -10481,7 +10722,16 @@ function ResumeScreeningView({
                   </div>
                 ) : null}
               </div>
-              <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 rounded-b-xl flex justify-end">
+              <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/80 rounded-b-xl flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={reportReEvalBusy || !apiBase || !hasToken}
+                  onClick={() => reportResume && void reEvaluateReport(reportResume)}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-indigo-700 bg-white border border-indigo-200 rounded-lg hover:bg-indigo-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {reportReEvalBusy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}
+                  重新 AI 评估
+                </button>
                 <button
                   type="button"
                   onClick={() => setReportResume(null)}
@@ -10523,18 +10773,18 @@ function ResumeScreeningView({
 }
 
 const APPLICATION_MGMT_COLUMNS: ColumnSpec[] = [
-  { id: 'candidate', defaultWidth: 170, minWidth: 130, maxWidth: 300 },
-  { id: 'referrer', defaultWidth: 150, minWidth: 120, maxWidth: 260 },
-  { id: 'project', defaultWidth: 220, minWidth: 170, maxWidth: 400 },
-  { id: 'jobTitle', defaultWidth: 230, minWidth: 180, maxWidth: 420 },
-  { id: 'resumeScore', defaultWidth: 120, minWidth: 96, maxWidth: 180 },
-  { id: 'resumeDims', defaultWidth: 240, minWidth: 200, maxWidth: 360 },
-  { id: 'interviewScore', defaultWidth: 120, minWidth: 96, maxWidth: 180 },
-  { id: 'status', defaultWidth: 170, minWidth: 140, maxWidth: 260 },
-  { id: 'stage', defaultWidth: 180, minWidth: 140, maxWidth: 260 },
-  { id: 'aiInterviewer', defaultWidth: 200, minWidth: 160, maxWidth: 340 },
-  { id: 'recruiter', defaultWidth: 170, minWidth: 130, maxWidth: 260 },
-  { id: 'report', defaultWidth: 170, minWidth: 140, maxWidth: 300 }
+  { id: 'candidate', defaultWidth: 124, minWidth: 100, maxWidth: 280 },
+  { id: 'referrer', defaultWidth: 114, minWidth: 94, maxWidth: 240 },
+  { id: 'project', defaultWidth: 160, minWidth: 126, maxWidth: 360 },
+  { id: 'jobTitle', defaultWidth: 170, minWidth: 136, maxWidth: 380 },
+  { id: 'resumeScore', defaultWidth: 88, minWidth: 76, maxWidth: 150 },
+  { id: 'resumeDims', defaultWidth: 168, minWidth: 140, maxWidth: 320 },
+  { id: 'interviewScore', defaultWidth: 88, minWidth: 76, maxWidth: 150 },
+  { id: 'status', defaultWidth: 122, minWidth: 104, maxWidth: 240 },
+  { id: 'stage', defaultWidth: 130, minWidth: 104, maxWidth: 240 },
+  { id: 'aiInterviewer', defaultWidth: 140, minWidth: 116, maxWidth: 300 },
+  { id: 'recruiter', defaultWidth: 120, minWidth: 100, maxWidth: 240 },
+  { id: 'report', defaultWidth: 118, minWidth: 104, maxWidth: 260 }
 ];
 
 function ApplicationManagementView({
@@ -10666,7 +10916,7 @@ function ApplicationManagementView({
             resumeMatchScore: resumeMatch,
             interviewScore,
             hasInterviewReport,
-            resumeDimensionScores: pickResumeDimensionScores(parsedEval, d),
+            resumeDimensionScores: pickResumeDimensionScores(parsedEval, d, String(row.matched_job_title || '')),
             status: flowStage,
             interviewOutcome,
             referrerLabel: uploaderDisplayFromUsers(String(row.uploader_username ?? ''), hrUsers),
@@ -10930,19 +11180,19 @@ function ApplicationManagementView({
               ) : (
                 rows.map((row) => (
                   <tr key={row.id} className="transition-colors hover:bg-slate-50">
-                    <td className="whitespace-nowrap px-3 py-3 font-bold text-slate-900 sm:px-6 sm:py-4">
+                    <td className="whitespace-nowrap px-2.5 py-3 font-bold text-slate-900 sm:px-3">
                       {row.candidateName}
                     </td>
                     <td
-                      className="max-w-[8rem] truncate px-3 py-3 text-slate-600 sm:max-w-[10rem] sm:px-6 sm:py-4"
+                      className="max-w-[8rem] truncate px-2.5 py-3 text-slate-600 sm:max-w-[10rem] sm:px-3"
                       title={row.referrerLabel}
                     >
                       {row.referrerLabel}
                     </td>
-                    <td className="max-w-[10rem] px-3 py-3 text-slate-600 sm:max-w-[12.5rem] sm:px-6 sm:py-4" title={row.projectName}>
+                    <td className="max-w-[10rem] px-2.5 py-3 text-slate-600 sm:max-w-[12.5rem] sm:px-3" title={row.projectName}>
                       <span className="line-clamp-2">{row.projectName}</span>
                     </td>
-                    <td className="max-w-[12rem] px-3 py-3 text-slate-600 sm:max-w-none sm:px-6 sm:py-4">
+                    <td className="max-w-[12rem] px-2.5 py-3 text-slate-600 sm:max-w-none sm:px-3">
                       <span className="font-medium text-slate-800" title={row.jobTitle}>{row.jobTitle}</span>
                       <p
                         className="mt-0.5 font-mono text-[11px] text-slate-400"
@@ -10954,12 +11204,12 @@ function ApplicationManagementView({
                         {row.jobCode}
                       </p>
                     </td>
-                    <td className="whitespace-nowrap tabular-nums px-3 py-3 sm:px-6 sm:py-4">
+                    <td className="whitespace-nowrap tabular-nums px-2.5 py-3 sm:px-3">
                       <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2 py-1 font-semibold text-sky-900">
                         {row.resumeMatchScore}
                       </span>
                     </td>
-                    <td className="min-w-[12rem] px-3 py-3 text-xs text-slate-600 sm:min-w-[14rem] sm:px-6 sm:py-4">
+                    <td className="min-w-[10rem] px-2.5 py-3 text-xs text-slate-600 sm:min-w-[12rem] sm:px-3">
                       <div className="grid grid-cols-2 gap-1.5">
                         {resumeDimensionOrderedEntries(row.resumeDimensionScores || {})
                           .map(([k, v]) => (
@@ -10975,7 +11225,7 @@ function ApplicationManagementView({
                           ))}
                       </div>
                     </td>
-                    <td className="whitespace-nowrap tabular-nums px-3 py-3 sm:px-6 sm:py-4">
+                    <td className="whitespace-nowrap tabular-nums px-2.5 py-3 sm:px-3">
                       {row.interviewScore !== null ? (
                         <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-1 font-semibold text-violet-900">
                           {row.interviewScore}
@@ -10984,7 +11234,7 @@ function ApplicationManagementView({
                         <span className="text-slate-400">—</span>
                       )}
                     </td>
-                    <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                    <td className="whitespace-nowrap px-2.5 py-3 sm:px-3">
                       <span
                         className={`inline-block max-w-[9rem] truncate rounded px-2 py-1 text-xs font-medium ${
                           row.interviewOutcome === '面试通过'
@@ -11002,7 +11252,7 @@ function ApplicationManagementView({
                         {row.interviewOutcome}
                       </span>
                     </td>
-                    <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                    <td className="whitespace-nowrap px-2.5 py-3 sm:px-3">
                       <span
                         className={`inline-block rounded px-2 py-1 text-xs font-medium ${
                           row.status === 'AI面试完成'
@@ -11016,18 +11266,18 @@ function ApplicationManagementView({
                       </span>
                     </td>
                     <td
-                      className="max-w-[10rem] truncate px-3 py-3 text-slate-600 sm:max-w-[12rem] sm:px-6 sm:py-4"
+                      className="max-w-[10rem] truncate px-2.5 py-3 text-slate-600 sm:max-w-[12rem] sm:px-3"
                       title={row.promptTemplateName || '未发起面试或历史数据未记录模板'}
                     >
                       {row.promptTemplateName || '—'}
                     </td>
                     <td
-                      className="max-w-[10rem] truncate px-3 py-3 text-slate-600 sm:max-w-[12rem] sm:px-6 sm:py-4"
+                      className="max-w-[10rem] truncate px-2.5 py-3 text-slate-600 sm:max-w-[12rem] sm:px-3"
                       title={row.recruitersLabel}
                     >
                       {row.recruitersLabel}
                     </td>
-                    <td className="whitespace-nowrap px-3 py-3 text-right sm:px-6 sm:py-4">
+                    <td className="whitespace-nowrap px-2.5 py-3 text-right sm:px-3">
                       <button
                         type="button"
                         disabled={Boolean(reportLoadingId) || !row.hasInterviewReport}
@@ -11201,10 +11451,12 @@ type RecruiterQualityReportRow = {
   sampleInsufficient: boolean
 }
 
-function defaultReportDateRange(): { from: string; to: string } {
+type ResumeVolumeDailyPoint = { date: string; count: number }
+
+function shiftReportDateRange(days: number): { from: string; to: string } {
   const to = new Date()
   const from = new Date(to)
-  from.setDate(from.getDate() - 30)
+  from.setDate(from.getDate() - (days - 1))
   const fmt = (d: Date) => {
     const y = d.getFullYear()
     const m = String(d.getMonth() + 1).padStart(2, '0')
@@ -11212,6 +11464,486 @@ function defaultReportDateRange(): { from: string; to: string } {
     return `${y}-${m}-${day}`
   }
   return { from: fmt(from), to: fmt(to) }
+}
+
+function buildMovingAverageSeries(values: number[], window: number): number[] {
+  return values.map((_, i) => {
+    const start = Math.max(0, i - window + 1)
+    const slice = values.slice(start, i + 1)
+    const sum = slice.reduce((s, v) => s + v, 0)
+    return Math.round((sum / slice.length) * 10) / 10
+  })
+}
+
+function buildCumulativeSeries(daily: ResumeVolumeDailyPoint[]): ResumeVolumeDailyPoint[] {
+  let sum = 0
+  return daily.map((d) => {
+    sum += d.count
+    return { date: d.date, count: sum }
+  })
+}
+
+function formatShortDate(iso: string): string {
+  return iso.slice(5).replace('-', '/')
+}
+
+function ResumeVolumeStatsView() {
+  const initialRange = useMemo(() => shiftReportDateRange(30), [])
+  const [dateFrom, setDateFrom] = useState(initialRange.from)
+  const [dateTo, setDateTo] = useState(initialRange.to)
+  const [chartMode, setChartMode] = useState<'daily' | 'cumulative'>('daily')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [daily, setDaily] = useState<ResumeVolumeDailyPoint[]>([])
+  const [summary, setSummary] = useState({
+    total: 0,
+    dayCount: 0,
+    avgPerDay: 0,
+    peak: null as { date: string; count: number } | null,
+    trough: null as { date: string; count: number } | null,
+    previousPeriod: null as { total: number; avgPerDay: number; changePct: number | null } | null
+  })
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const qs = new URLSearchParams()
+      if (dateFrom) qs.set('dateFrom', dateFrom)
+      if (dateTo) qs.set('dateTo', dateTo)
+      const r = await miniappApiFetch(`/api/admin/stats/resume-volume?${qs.toString()}`)
+      const payload = await miniappApiJson<{
+        daily?: ResumeVolumeDailyPoint[]
+        summary?: typeof summary
+        message?: string
+      }>(r, '加载统计失败')
+      if (!r.ok) throw adminJsonFailError(r, payload, '加载统计失败')
+      setDaily(Array.isArray(payload.daily) ? payload.daily : [])
+      setSummary(
+        payload.summary ?? {
+          total: 0,
+          dayCount: 0,
+          avgPerDay: 0,
+          peak: null,
+          trough: null,
+          previousPeriod: null
+        }
+      )
+    } catch (e) {
+      setError(userFacingApiError(e, '加载统计失败'))
+      setDaily([])
+    } finally {
+      setLoading(false)
+    }
+  }, [dateFrom, dateTo])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const activeQuickDays = useMemo(() => {
+    for (const d of [7, 30, 90]) {
+      const r = shiftReportDateRange(d)
+      if (r.from === dateFrom && r.to === dateTo) return d
+    }
+    return null
+  }, [dateFrom, dateTo])
+
+  const chartSeries = useMemo(
+    () => (chartMode === 'cumulative' ? buildCumulativeSeries(daily) : daily),
+    [daily, chartMode]
+  )
+  const ma7Series = useMemo(
+    () => (chartMode === 'daily' && daily.length >= 2 ? buildMovingAverageSeries(daily.map((d) => d.count), 7) : null),
+    [daily, chartMode]
+  )
+  const peakIdx = useMemo(
+    () => (summary.peak ? daily.findIndex((d) => d.date === summary.peak!.date) : -1),
+    [daily, summary.peak]
+  )
+
+  const maxCount = useMemo(() => {
+    const vals = chartSeries.map((d) => d.count)
+    if (ma7Series) vals.push(...ma7Series)
+    return Math.max(1, ...vals)
+  }, [chartSeries, ma7Series])
+
+  const labelStep = daily.length <= 14 ? 1 : daily.length <= 45 ? 3 : 7
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null)
+
+  const lineChart = useMemo(() => {
+    if (!chartSeries.length) return null
+    const chartW = Math.max(640, chartSeries.length * 18)
+    const chartH = 240
+    const pad = { top: 20, right: 20, bottom: 32, left: 40 }
+    const innerW = chartW - pad.left - pad.right
+    const innerH = chartH - pad.top - pad.bottom
+    const yTicks = [0, Math.round(maxCount / 2), maxCount]
+    const toPoint = (count: number, i: number) => {
+      const x =
+        pad.left +
+        (chartSeries.length <= 1 ? innerW / 2 : (i / Math.max(chartSeries.length - 1, 1)) * innerW)
+      const y = pad.top + innerH - (count / maxCount) * innerH
+      return { x, y }
+    }
+    const points = chartSeries.map((d, i) => ({ ...toPoint(d.count, i), ...d, idx: i }))
+    const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ')
+    const areaPath = `${linePath} L ${points[points.length - 1]!.x.toFixed(1)} ${(pad.top + innerH).toFixed(1)} L ${points[0]!.x.toFixed(1)} ${(pad.top + innerH).toFixed(1)} Z`
+    let maPath: string | null = null
+    let maPoints: Array<{ x: number; y: number; value: number }> = []
+    if (ma7Series) {
+      maPoints = ma7Series.map((v, i) => ({ ...toPoint(v, i), value: v }))
+      maPath = maPoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ')
+    }
+    return { chartW, chartH, pad, innerH, yTicks, points, linePath, areaPath, maPath, maPoints }
+  }, [chartSeries, ma7Series, maxCount])
+
+  const insightText = useMemo(() => {
+    if (!daily.length || loading) return null
+    const parts: string[] = []
+    parts.push(
+      `${formatShortDate(dateFrom)} 至 ${formatShortDate(dateTo)} 共上传 ${summary.total} 份，日均 ${summary.avgPerDay} 份`
+    )
+    if (summary.peak) {
+      parts.push(`高峰 ${formatShortDate(summary.peak.date)}（${summary.peak.count} 份）`)
+    }
+    const prev = summary.previousPeriod
+    if (prev && prev.changePct !== null) {
+      const dir = prev.changePct >= 0 ? '增加' : '减少'
+      parts.push(`较上一周期${dir} ${Math.abs(prev.changePct)}%`)
+    } else if (prev && prev.total === 0 && summary.total > 0) {
+      parts.push('上一周期无上传')
+    }
+    return parts.join('。') + '。'
+  }, [daily.length, loading, dateFrom, dateTo, summary])
+
+  const exportCsv = () => {
+    const lines = daily.map((d) => `${d.date},${d.count}`)
+    const blob = new Blob(['\uFEFF日期,简历数\n', ...lines.map((l) => `${l}\n`)], {
+      type: 'text/csv;charset=utf-8'
+    })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `简历量统计_${dateFrom}_${dateTo}.csv`
+    a.click()
+    URL.revokeObjectURL(a.href)
+  }
+
+  const applyQuickRange = (days: number) => {
+    const r = shiftReportDateRange(days)
+    setDateFrom(r.from)
+    setDateTo(r.to)
+  }
+
+  return (
+    <div className="space-y-4 sm:space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">简历量统计</h1>
+          <p className="mt-1 text-sm text-slate-500">按上传日期统计简历筛查数量，查看总上传趋势（以 created_at 为准）</p>
+        </div>
+        <button type="button" onClick={exportCsv} disabled={!daily.length} className={btnSecondarySm}>
+          <Download className="inline h-4 w-4 mr-1" />
+          导出 CSV
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-slate-500">开始日期</label>
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            className="rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-slate-500">结束日期</label>
+          <input
+            type="date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            className="rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+        </div>
+        <div className="flex flex-wrap gap-2 pb-0.5">
+          {[7, 30, 90].map((d) => (
+            <button
+              key={d}
+              type="button"
+              onClick={() => applyQuickRange(d)}
+              className={
+                activeQuickDays === d
+                  ? 'rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-medium text-indigo-700'
+                  : 'rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100'
+              }
+            >
+              近{d}天
+            </button>
+          ))}
+        </div>
+        <button type="button" onClick={() => void load()} disabled={loading} className={btnPrimarySmFlex}>
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+          查询
+        </button>
+      </div>
+
+      {insightText ? (
+        <div className="rounded-lg border border-indigo-100 bg-indigo-50/60 px-4 py-3 text-sm text-indigo-900">
+          {insightText}
+        </div>
+      ) : null}
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="text-xs text-slate-500">期间简历总量</div>
+          <div className="text-xl font-bold text-slate-900">{summary.total}</div>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="text-xs text-slate-500">统计天数</div>
+          <div className="text-xl font-bold text-slate-900">{summary.dayCount}</div>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="text-xs text-slate-500">日均上传</div>
+          <div className="text-xl font-bold text-indigo-700">{summary.avgPerDay}</div>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="text-xs text-slate-500">单日最高</div>
+          <div className="text-xl font-bold text-emerald-700">
+            {summary.peak ? `${summary.peak.count}（${formatShortDate(summary.peak.date)}）` : '—'}
+          </div>
+        </div>
+        <div className="col-span-2 rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:col-span-1">
+          <div className="text-xs text-slate-500">环比上一周期</div>
+          <div
+            className={`text-xl font-bold ${
+              summary.previousPeriod?.changePct == null
+                ? 'text-slate-400'
+                : summary.previousPeriod.changePct >= 0
+                  ? 'text-emerald-700'
+                  : 'text-rose-600'
+            }`}
+          >
+            {summary.previousPeriod?.changePct != null
+              ? `${summary.previousPeriod.changePct >= 0 ? '+' : ''}${summary.previousPeriod.changePct}%`
+              : summary.previousPeriod
+                ? '—'
+                : '—'}
+          </div>
+          {summary.previousPeriod ? (
+            <div className="mt-0.5 text-[11px] text-slate-400">上期 {summary.previousPeriod.total} 份</div>
+          ) : null}
+        </div>
+      </div>
+
+      {error ? (
+        <div className="rounded-lg border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
+      ) : null}
+
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold text-slate-800">上传趋势</h2>
+          <div className="flex rounded-lg border border-slate-200 p-0.5 text-xs">
+            <button
+              type="button"
+              onClick={() => setChartMode('daily')}
+              className={
+                chartMode === 'daily'
+                  ? 'rounded-md bg-indigo-600 px-3 py-1.5 font-medium text-white'
+                  : 'rounded-md px-3 py-1.5 font-medium text-slate-600 hover:bg-slate-50'
+              }
+            >
+              每日
+            </button>
+            <button
+              type="button"
+              onClick={() => setChartMode('cumulative')}
+              className={
+                chartMode === 'cumulative'
+                  ? 'rounded-md bg-indigo-600 px-3 py-1.5 font-medium text-white'
+                  : 'rounded-md px-3 py-1.5 font-medium text-slate-600 hover:bg-slate-50'
+              }
+            >
+              累计
+            </button>
+          </div>
+        </div>
+        {chartMode === 'daily' && ma7Series ? (
+          <div className="mb-3 flex flex-wrap items-center gap-4 text-[11px] text-slate-500">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="inline-block h-0.5 w-4 rounded bg-indigo-600" />
+              每日上传
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="inline-block h-0 w-4 border-t-2 border-dashed border-amber-500" />
+              7 日均线
+            </span>
+            {peakIdx >= 0 ? (
+              <span className="inline-flex items-center gap-1.5">
+                <span className="inline-block h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-white" />
+                峰值日
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+        {loading ? (
+          <div className="flex items-center justify-center gap-2 py-20 text-slate-500">
+            <Loader2 className="h-5 w-5 animate-spin" />
+            加载中…
+          </div>
+        ) : daily.length === 0 ? (
+          <div className="py-20 text-center text-sm text-slate-500">所选条件下暂无数据</div>
+        ) : lineChart ? (
+          <div className="overflow-x-auto pb-2">
+            <svg
+              viewBox={`0 0 ${lineChart.chartW} ${lineChart.chartH}`}
+              className="min-w-full"
+              style={{ minWidth: lineChart.chartW, height: lineChart.chartH }}
+              role="img"
+              aria-label="简历上传趋势折线图"
+            >
+              <defs>
+                <linearGradient id="resumeVolumeArea" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#6366f1" stopOpacity="0.22" />
+                  <stop offset="100%" stopColor="#6366f1" stopOpacity="0.02" />
+                </linearGradient>
+              </defs>
+              {lineChart.yTicks.map((tick) => {
+                const y = lineChart.pad.top + lineChart.innerH - (tick / maxCount) * lineChart.innerH
+                return (
+                  <g key={tick}>
+                    <line
+                      x1={lineChart.pad.left}
+                      y1={y}
+                      x2={lineChart.chartW - lineChart.pad.right}
+                      y2={y}
+                      stroke="#e2e8f0"
+                      strokeDasharray="4 4"
+                    />
+                    <text x={lineChart.pad.left - 8} y={y + 4} textAnchor="end" className="fill-slate-400 text-[10px]">
+                      {tick}
+                    </text>
+                  </g>
+                )
+              })}
+              <path d={lineChart.areaPath} fill="url(#resumeVolumeArea)" />
+              {lineChart.maPath ? (
+                <path
+                  d={lineChart.maPath}
+                  fill="none"
+                  stroke="#f59e0b"
+                  strokeWidth="1.5"
+                  strokeDasharray="6 4"
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                />
+              ) : null}
+              <path
+                d={lineChart.linePath}
+                fill="none"
+                stroke="#4f46e5"
+                strokeWidth="2.5"
+                strokeLinejoin="round"
+                strokeLinecap="round"
+              />
+              {lineChart.points.map((p, i) => {
+                const isPeak = chartMode === 'daily' && i === peakIdx
+                const dailyCount = daily[i]?.count ?? p.count
+                const tooltip =
+                  chartMode === 'cumulative'
+                    ? `${formatShortDate(p.date)} · 累计 ${p.count} 份`
+                    : `${formatShortDate(p.date)} · ${dailyCount} 份`
+                return (
+                  <g key={p.date}>
+                    {isPeak ? (
+                      <circle cx={p.x} cy={p.y} r="9" fill="#10b981" fillOpacity="0.18" pointerEvents="none" />
+                    ) : null}
+                    <circle
+                      cx={p.x}
+                      cy={p.y}
+                      r={isPeak ? 6 : hoverIdx === i ? 6 : 4}
+                      fill={isPeak ? '#059669' : hoverIdx === i ? '#4338ca' : '#4f46e5'}
+                      stroke="#fff"
+                      strokeWidth="2"
+                      className="cursor-pointer"
+                      onMouseEnter={() => setHoverIdx(i)}
+                      onMouseLeave={() => setHoverIdx(null)}
+                    />
+                    {hoverIdx === i ? (
+                      <g pointerEvents="none">
+                        <rect
+                          x={Math.min(Math.max(p.x - 48, lineChart.pad.left), lineChart.chartW - 96)}
+                          y={Math.max(p.y - 36, 4)}
+                          width="96"
+                          height="28"
+                          rx="6"
+                          fill="#1e293b"
+                        />
+                        <text
+                          x={Math.min(Math.max(p.x, lineChart.pad.left + 48), lineChart.chartW - lineChart.pad.right)}
+                          y={Math.max(p.y - 24, 16)}
+                          textAnchor="middle"
+                          className="fill-white text-[10px] font-medium"
+                        >
+                          {tooltip}
+                        </text>
+                      </g>
+                    ) : null}
+                  </g>
+                )
+              })}
+              {lineChart.points.map((p, i) =>
+                i % labelStep === 0 || i === lineChart.points.length - 1 ? (
+                  <text
+                    key={`${p.date}-x`}
+                    x={p.x}
+                    y={lineChart.chartH - 8}
+                    textAnchor="middle"
+                    className="fill-slate-400 text-[10px]"
+                  >
+                    {formatShortDate(p.date)}
+                  </text>
+                ) : null
+              )}
+            </svg>
+          </div>
+        ) : (
+          <div className="py-20 text-center text-sm text-slate-500">所选条件下暂无数据</div>
+        )}
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-100 px-4 py-3 text-sm font-semibold text-slate-800">明细</div>
+        {loading ? null : daily.length === 0 ? (
+          <div className="py-12 text-center text-sm text-slate-500">暂无明细</div>
+        ) : (
+          <div className="max-h-[420px] overflow-auto">
+            <table className="min-w-full text-sm">
+              <thead className="sticky top-0 bg-slate-50 text-left text-xs text-slate-500">
+                <tr>
+                  <th className="px-4 py-2 font-medium">日期</th>
+                  <th className="px-4 py-2 font-medium text-right">简历数</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...daily].reverse().map((d) => (
+                  <tr key={d.date} className="border-t border-slate-100 hover:bg-slate-50/80">
+                    <td className="px-4 py-2 text-slate-800">{d.date}</td>
+                    <td className="px-4 py-2 text-right font-medium tabular-nums text-slate-900">{d.count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function defaultReportDateRange(): { from: string; to: string } {
+  return shiftReportDateRange(30)
 }
 
 function RecruiterQualityReportView({ currentRole }: { currentRole: Role }) {
@@ -11320,13 +12052,7 @@ function RecruiterQualityReportView({ currentRole }: { currentRole: Role }) {
 
   return (
     <div className="space-y-4 sm:space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">招聘质量报表</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            按招聘部门与人员统计上传、发邀与 AI 面试结果；综合分 = 25% 高质量简历 + 25% 合格发邀率 + 50% 面试通过率
-          </p>
-        </div>
+      <div className="flex flex-wrap items-start justify-end gap-3">
         <button type="button" onClick={exportCsv} disabled={!rows.length} className={btnSecondarySm}>
           <Download className="inline h-4 w-4 mr-1" />
           导出 CSV
@@ -11412,7 +12138,7 @@ function RecruiterQualityReportView({ currentRole }: { currentRole: Role }) {
           <div className="py-16 text-center text-sm text-slate-500">所选条件下暂无数据</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[960px] text-left text-sm">
+            <table className="w-full min-w-[820px] text-left text-sm">
               <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
                 <tr>
                   <th className="px-3 py-3 font-medium">招聘部门</th>
@@ -11638,13 +12364,7 @@ function DeliveryPerformanceReportView({ currentRole }: { currentRole: Role }) {
 
   return (
     <div className="space-y-4 sm:space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">交付业绩报表</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            按项目负责人统计需求、推荐、邀约、AI 面试、通过与风险岗位；完成率暂按面试通过人数 / 需求人数计算
-          </p>
-        </div>
+      <div className="flex flex-wrap items-start justify-end gap-3">
         <button type="button" onClick={exportCsv} disabled={!rows.length} className={btnSecondarySm}>
           <Download className="inline h-4 w-4 mr-1" />
           导出 CSV
@@ -11724,7 +12444,7 @@ function DeliveryPerformanceReportView({ currentRole }: { currentRole: Role }) {
           <div className="py-16 text-center text-sm text-slate-500">所选条件下暂无数据</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1120px] text-left text-sm">
+            <table className="w-full min-w-[920px] text-left text-sm">
               <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
                 <tr>
                   <th className="px-3 py-3 font-medium">交付经理</th>
@@ -11781,7 +12501,7 @@ function DeliveryPerformanceReportView({ currentRole }: { currentRole: Role }) {
                         <tr>
                           <td colSpan={12} className="bg-slate-50 px-3 py-3">
                             <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
-                              <table className="w-full min-w-[860px] text-left text-xs">
+                              <table className="w-full min-w-[720px] text-left text-xs">
                                 <thead className="bg-white text-slate-500">
                                   <tr>
                                     <th className="px-3 py-2 font-medium">项目</th>
@@ -12448,35 +13168,27 @@ function SystemInterviewPromptView() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">AI 面试提示词</h1>
-          <p className="mt-1 max-w-3xl text-sm text-slate-600 leading-relaxed">
-            配置小程序 AI 面试出题使用的提示词模板。保存后只影响后续新生成的题目，已生成并入库的面试题不会回改。
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={() => void load()} disabled={loading || saving} className={btnSecondarySm}>
-            重新加载
-          </button>
-          <button
-            type="button"
-            onClick={restoreDefault}
-            disabled={loading || saving || !data?.defaults}
-            className={btnSecondarySm}
-          >
-            恢复默认
-          </button>
-          <button
-            type="button"
-            onClick={() => void save()}
-            disabled={loading || saving || !dirty}
-            className={btnPrimarySmFlex}
-          >
-            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
-            {saving ? '保存中…' : '保存配置'}
-          </button>
-        </div>
+      <div className="flex flex-wrap justify-end gap-2">
+        <button type="button" onClick={() => void load()} disabled={loading || saving} className={btnSecondarySm}>
+          重新加载
+        </button>
+        <button
+          type="button"
+          onClick={restoreDefault}
+          disabled={loading || saving || !data?.defaults}
+          className={btnSecondarySm}
+        >
+          恢复默认
+        </button>
+        <button
+          type="button"
+          onClick={() => void save()}
+          disabled={loading || saving || !dirty}
+          className={btnPrimarySmFlex}
+        >
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+          {saving ? '保存中…' : '保存配置'}
+        </button>
       </div>
 
       {err ? (
@@ -12599,11 +13311,11 @@ const INTERVIEW_PROMPT_ROLE_LABEL: Record<string, string> = {
 };
 
 const SYS_INTERVIEW_PROMPT_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 320, minWidth: 220, maxWidth: 640 },
-  { id: 'status', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
-  { id: 'enabled', defaultWidth: 110, minWidth: 90, maxWidth: 180 },
-  { id: 'updated', defaultWidth: 260, minWidth: 200, maxWidth: 500 },
-  { id: 'actions', defaultWidth: 240, minWidth: 180, maxWidth: 400 }
+  { id: 'name', defaultWidth: 250, minWidth: 180, maxWidth: 580 },
+  { id: 'status', defaultWidth: 100, minWidth: 82, maxWidth: 190 },
+  { id: 'enabled', defaultWidth: 86, minWidth: 72, maxWidth: 150 },
+  { id: 'updated', defaultWidth: 210, minWidth: 160, maxWidth: 460 },
+  { id: 'actions', defaultWidth: 180, minWidth: 150, maxWidth: 360 }
 ];
 
 function SystemInterviewPromptTemplatesView() {
@@ -12802,18 +13514,10 @@ function SystemInterviewPromptTemplatesView() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">AI 面试官管理</h1>
-          <p className="mt-1 max-w-3xl text-sm text-slate-600 leading-relaxed">
-            这里只配置出题用的 <strong>System Prompt</strong>。发起面试邀请时可选择具体模板；候选人姓名、岗位、JD、简历仍由服务端固定逻辑拼入 User Prompt。
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={createNew} disabled={loading || saving} className={btnSecondarySm}>
-            新建模板
-          </button>
-        </div>
+      <div className="flex flex-wrap justify-end gap-2">
+        <button type="button" onClick={createNew} disabled={loading || saving} className={btnSecondarySm}>
+          新建模板
+        </button>
       </div>
 
       {err ? <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{err}</div> : null}
@@ -12834,11 +13538,11 @@ function SystemInterviewPromptTemplatesView() {
                 <colgroup>{cols.colNodes}</colgroup>
                 <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
                   <tr>
-                    <ResizableTh col={cols.byId.name} className="px-4 py-3 font-medium">模板名称</ResizableTh>
-                    <ResizableTh col={cols.byId.status} className="px-4 py-3 font-medium">状态</ResizableTh>
-                    <ResizableTh col={cols.byId.enabled} className="px-4 py-3 font-medium">启用</ResizableTh>
-                    <ResizableTh col={cols.byId.updated} className="px-4 py-3 font-medium">更新信息</ResizableTh>
-                    <ResizableTh col={cols.byId.actions} className="px-4 py-3 font-medium text-right">操作</ResizableTh>
+                    <ResizableTh col={cols.byId.name} className="px-3 py-3 font-medium">模板名称</ResizableTh>
+                    <ResizableTh col={cols.byId.status} className="px-3 py-3 font-medium">状态</ResizableTh>
+                    <ResizableTh col={cols.byId.enabled} className="px-3 py-3 font-medium">启用</ResizableTh>
+                    <ResizableTh col={cols.byId.updated} className="px-3 py-3 font-medium">更新信息</ResizableTh>
+                    <ResizableTh col={cols.byId.actions} className="px-3 py-3 font-medium text-right">操作</ResizableTh>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -13042,19 +13746,13 @@ function SystemAiInterviewSettingsView() {
   }> = [
     { key: 'maxPerInterview', label: '每场最多追问', min: 0, max: 10, step: 1, hint: '控制一场面试里最多插入几次追问。' },
     { key: 'maxPerQuestion', label: '每题最多追问', min: 0, max: 1, step: 1, hint: '第一版建议保持 1，避免连续追问打断节奏。' },
-    { key: 'modelWaitMs', label: '等待模型 ms', min: 0, max: 5000, step: 100, hint: '超过该时间未返回时直接进入下一题或走兜底。' },
+    { key: 'modelWaitMs', label: '等待模型 ms', min: 0, max: 10000, step: 100, hint: '演示模式建议 3000 以上；超时后走兜底追问。' },
     { key: 'shortAnswerThreshold', label: '短回答阈值', min: 2, max: 80, step: 1, hint: '低于该字数时更倾向生成补充型追问。' }
   ];
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">AI面试设置</h1>
-          <p className="mt-2 text-sm text-slate-500">
-            管理员维护小程序 AI 面试的默认追问策略，招聘人员发起面试时无需单独配置。
-          </p>
-        </div>
+      <div className="flex flex-wrap items-start justify-end gap-4">
         <button type="button" onClick={save} disabled={loading || saving} className={btnPrimarySmFlex}>
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
           保存设置
@@ -13136,6 +13834,21 @@ function SystemAiInterviewSettingsView() {
                       </span>
                     </span>
                   </label>
+                  <label className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-medium text-amber-950">
+                    <input
+                      type="checkbox"
+                      checked={config.demoMode}
+                      disabled={saving || !config.enabled}
+                      onChange={(e) => updateConfig({ demoMode: e.target.checked })}
+                      className="mt-0.5 rounded border-amber-300"
+                    />
+                    <span>
+                      演示模式 · 每道主题必出追问
+                      <span className="mt-1 block text-xs font-normal leading-relaxed text-amber-800">
+                        开启后放宽触发条件、延长 AI 等待，并保证每题至少出现 1 次追问（模型失败时用内容相关兜底）。演示结束后请关闭。
+                      </span>
+                    </span>
+                  </label>
                 </div>
 
                 <div>
@@ -13158,10 +13871,10 @@ function SystemAiInterviewSettingsView() {
 }
 
 const JOB_ROLE_BASES_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 260, minWidth: 180, maxWidth: 640 },
-  { id: 'sort', defaultWidth: 120, minWidth: 90, maxWidth: 220 },
-  { id: 'enabled', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
-  { id: 'actions', defaultWidth: 150, minWidth: 120, maxWidth: 260 }
+  { id: 'name', defaultWidth: 220, minWidth: 150, maxWidth: 600 },
+  { id: 'sort', defaultWidth: 90, minWidth: 72, maxWidth: 180 },
+  { id: 'enabled', defaultWidth: 100, minWidth: 82, maxWidth: 180 },
+  { id: 'actions', defaultWidth: 110, minWidth: 92, maxWidth: 220 }
 ];
 
 function SystemJobRoleBasesView() {
@@ -13262,12 +13975,6 @@ function SystemJobRoleBasesView() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-900">标准岗位</h1>
-        <p className="mt-1 max-w-3xl text-sm text-slate-600 leading-relaxed">
-          维护「岗位序列」名称（不含初级/中级等前缀）。与岗位分配中的岗位下拉、简历详情与简历库的「职位」选项一致；仅<strong>管理员</strong>可在此增删改。首次部署若表为空，服务启动时会用内置清单自动种子数据。
-        </p>
-      </div>
       {err ? (
         <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">{err}</div>
       ) : null}
@@ -13307,10 +14014,10 @@ function SystemJobRoleBasesView() {
               <colgroup>{cols.colNodes}</colgroup>
               <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
                 <tr>
-                  <ResizableTh col={cols.byId.name} className="px-4 py-3 font-medium">名称</ResizableTh>
-                  <ResizableTh col={cols.byId.sort} className="px-4 py-3 font-medium whitespace-nowrap">排序</ResizableTh>
-                  <ResizableTh col={cols.byId.enabled} className="px-4 py-3 font-medium whitespace-nowrap">启用</ResizableTh>
-                  <ResizableTh col={cols.byId.actions} className="px-4 py-3 font-medium text-right whitespace-nowrap">操作</ResizableTh>
+                  <ResizableTh col={cols.byId.name} className="px-3 py-3 font-medium">名称</ResizableTh>
+                  <ResizableTh col={cols.byId.sort} className="px-3 py-3 font-medium whitespace-nowrap">排序</ResizableTh>
+                  <ResizableTh col={cols.byId.enabled} className="px-3 py-3 font-medium whitespace-nowrap">启用</ResizableTh>
+                  <ResizableTh col={cols.byId.actions} className="px-3 py-3 font-medium text-right whitespace-nowrap">操作</ResizableTh>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -13378,11 +14085,11 @@ function normalizeDeptFormType(s: string | undefined): '交付' | '招聘' | '�
 }
 
 const SYS_DEPT_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 420, minWidth: 260, maxWidth: 860 },
-  { id: 'type', defaultWidth: 140, minWidth: 110, maxWidth: 220 },
-  { id: 'manager', defaultWidth: 170, minWidth: 130, maxWidth: 300 },
-  { id: 'count', defaultWidth: 130, minWidth: 100, maxWidth: 220 },
-  { id: 'actions', defaultWidth: 260, minWidth: 200, maxWidth: 420 }
+  { id: 'name', defaultWidth: 300, minWidth: 200, maxWidth: 760 },
+  { id: 'type', defaultWidth: 100, minWidth: 82, maxWidth: 190 },
+  { id: 'manager', defaultWidth: 130, minWidth: 105, maxWidth: 260 },
+  { id: 'count', defaultWidth: 100, minWidth: 82, maxWidth: 190 },
+  { id: 'actions', defaultWidth: 190, minWidth: 160, maxWidth: 360 }
 ];
 
 function SystemDeptView() {
@@ -13726,11 +14433,11 @@ function SystemDeptView() {
             <colgroup>{cols.colNodes}</colgroup>
             <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
               <tr>
-                <ResizableTh col={cols.byId.name} className="px-6 py-4 font-medium">部门名称</ResizableTh>
-                <ResizableTh col={cols.byId.type} className="px-6 py-4 font-medium">部门类型</ResizableTh>
-                <ResizableTh col={cols.byId.manager} className="px-6 py-4 font-medium">负责人</ResizableTh>
-                <ResizableTh col={cols.byId.count} className="px-6 py-4 font-medium">成员数量</ResizableTh>
-                <ResizableTh col={cols.byId.actions} className="px-6 py-4 font-medium text-right">操作</ResizableTh>
+                <ResizableTh col={cols.byId.name} className="px-3 py-3 font-medium sm:px-4">部门名称</ResizableTh>
+                <ResizableTh col={cols.byId.type} className="px-3 py-3 font-medium sm:px-4">部门类型</ResizableTh>
+                <ResizableTh col={cols.byId.manager} className="px-3 py-3 font-medium sm:px-4">负责人</ResizableTh>
+                <ResizableTh col={cols.byId.count} className="px-3 py-3 font-medium sm:px-4">成员数量</ResizableTh>
+                <ResizableTh col={cols.byId.actions} className="px-3 py-3 font-medium text-right sm:px-4">操作</ResizableTh>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -13749,7 +14456,7 @@ function SystemDeptView() {
                   className={`transition-colors hover:bg-slate-50 ${sortMode ? 'cursor-grab' : ''} ${draggingDeptId === dept.id ? 'opacity-50' : ''}`}
                 >
                   <td
-                    className="px-6 py-4 font-medium text-slate-900"
+                    className="px-3 py-3 font-medium text-slate-900 sm:px-4"
                     style={{ paddingLeft: `${depth * 1.5 + 1.5}rem` }}
                   >
                     <div className="flex items-center gap-2">
@@ -13774,7 +14481,7 @@ function SystemDeptView() {
                       <span className="text-xs font-normal text-slate-400">L{dept.level}</span>
                     </div>
                   </td>
-                  <td className="px-6 py-4 text-slate-600 text-xs">
+                  <td className="px-3 py-3 text-slate-600 text-xs sm:px-4">
                     {dept.deptType ? (
                       <span
                         className={
@@ -13791,9 +14498,9 @@ function SystemDeptView() {
                       <span className="text-slate-400">—</span>
                     )}
                   </td>
-                  <td className="px-6 py-4 text-slate-600">{dept.manager}</td>
-                  <td className="px-6 py-4 text-slate-600">{dept.count} 人</td>
-                  <td className="px-6 py-4 text-right space-x-2 whitespace-nowrap">
+                  <td className="px-3 py-3 text-slate-600 sm:px-4">{dept.manager}</td>
+                  <td className="px-3 py-3 text-slate-600 sm:px-4">{dept.count} 人</td>
+                  <td className="px-3 py-3 text-right space-x-2 whitespace-nowrap sm:px-4">
                     <button
                       type="button"
                       onClick={() => openChild(dept)}
@@ -13957,12 +14664,12 @@ function SystemDeptView() {
 }
 
 const SYS_USER_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 230, minWidth: 170, maxWidth: 400 },
-  { id: 'username', defaultWidth: 190, minWidth: 150, maxWidth: 340 },
-  { id: 'dept', defaultWidth: 250, minWidth: 180, maxWidth: 460 },
-  { id: 'roles', defaultWidth: 300, minWidth: 220, maxWidth: 520 },
-  { id: 'status', defaultWidth: 130, minWidth: 100, maxWidth: 200 },
-  { id: 'actions', defaultWidth: 200, minWidth: 160, maxWidth: 340 }
+  { id: 'name', defaultWidth: 160, minWidth: 126, maxWidth: 360 },
+  { id: 'username', defaultWidth: 142, minWidth: 116, maxWidth: 300 },
+  { id: 'dept', defaultWidth: 180, minWidth: 144, maxWidth: 420 },
+  { id: 'roles', defaultWidth: 208, minWidth: 164, maxWidth: 480 },
+  { id: 'status', defaultWidth: 100, minWidth: 82, maxWidth: 180 },
+  { id: 'actions', defaultWidth: 142, minWidth: 124, maxWidth: 300 }
 ];
 
 function SystemUserView({
@@ -14396,9 +15103,6 @@ function SystemUserView({
 
   return (
     <div className="space-y-4 sm:space-y-6">
-      <div>
-        <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">用户管理</h1>
-      </div>
       {!listAllUsers && !myDeptOk ? (
         <div className="rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">
           无法按部门列出用户：账号未设置「所属部门」。请超级管理员在「用户管理」中为您填写部门（须与「部门管理」中名称一致），保存后重新登录。
@@ -14479,12 +15183,12 @@ function SystemUserView({
                 <colgroup>{cols.colNodes}</colgroup>
                 <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
                   <tr>
-                    <ResizableTh col={cols.byId.name} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">姓名</ResizableTh>
-                    <ResizableTh col={cols.byId.username} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">手机号（登录）</ResizableTh>
-                    <ResizableTh col={cols.byId.dept} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">所属部门</ResizableTh>
-                    <ResizableTh col={cols.byId.roles} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">角色</ResizableTh>
-                    <ResizableTh col={cols.byId.status} className="px-3 py-3 text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">状态</ResizableTh>
-                    <ResizableTh col={cols.byId.actions} className="px-3 py-3 text-right text-xs font-medium sm:px-6 sm:py-4 sm:text-sm">操作</ResizableTh>
+                    <ResizableTh col={cols.byId.name} className="px-2.5 py-3 text-xs font-medium sm:px-3 sm:text-sm">姓名</ResizableTh>
+                    <ResizableTh col={cols.byId.username} className="px-2.5 py-3 text-xs font-medium sm:px-3 sm:text-sm">手机号（登录）</ResizableTh>
+                    <ResizableTh col={cols.byId.dept} className="px-2.5 py-3 text-xs font-medium sm:px-3 sm:text-sm">所属部门</ResizableTh>
+                    <ResizableTh col={cols.byId.roles} className="px-2.5 py-3 text-xs font-medium sm:px-3 sm:text-sm">角色</ResizableTh>
+                    <ResizableTh col={cols.byId.status} className="px-2.5 py-3 text-xs font-medium sm:px-3 sm:text-sm">状态</ResizableTh>
+                    <ResizableTh col={cols.byId.actions} className="px-2.5 py-3 text-right text-xs font-medium sm:px-3 sm:text-sm">操作</ResizableTh>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -14493,7 +15197,7 @@ function SystemUserView({
                     const active = user.status === '正常';
                     return (
                       <tr key={user.id} className="transition-colors hover:bg-slate-50">
-                        <td className="px-3 py-3 font-bold text-slate-900 sm:px-6 sm:py-4">
+                        <td className="px-2.5 py-3 font-bold text-slate-900 sm:px-3">
                           <div className="flex min-w-0 items-center gap-2 sm:gap-3">
                             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-xs font-bold text-indigo-700">
                               {initial(user.name)}
@@ -14501,11 +15205,11 @@ function SystemUserView({
                             <span className="min-w-0 truncate">{user.name}</span>
                           </div>
                         </td>
-                        <td className="max-w-[9rem] truncate px-3 py-3 font-mono text-xs text-slate-600 sm:max-w-none sm:px-6 sm:py-4">
+                        <td className="max-w-[9rem] truncate px-2.5 py-3 font-mono text-xs text-slate-600 sm:max-w-none sm:px-3">
                           {user.username}
                         </td>
-                        <td className="max-w-[8rem] truncate px-3 py-3 text-slate-600 sm:max-w-none sm:px-6 sm:py-4">{user.dept}</td>
-                        <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                        <td className="max-w-[8rem] truncate px-2.5 py-3 text-slate-600 sm:max-w-none sm:px-3">{user.dept}</td>
+                        <td className="whitespace-nowrap px-2.5 py-3 sm:px-3">
                           <div className="flex max-w-[14rem] flex-wrap gap-1">
                             {(user.roles?.length ? user.roles.map((r) => r.name) : [user.role]).filter(Boolean).map((r) => (
                               <span key={`${user.id}-${r}`} className="rounded-md border border-indigo-100 bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700">
@@ -14514,7 +15218,7 @@ function SystemUserView({
                             ))}
                           </div>
                         </td>
-                        <td className="whitespace-nowrap px-3 py-3 sm:px-6 sm:py-4">
+                        <td className="whitespace-nowrap px-2.5 py-3 sm:px-3">
                           {active ? (
                             <span className="flex items-center gap-1.5 font-medium text-emerald-600">
                               <span className="h-2 w-2 rounded-full bg-emerald-500" /> 正常
@@ -14525,7 +15229,7 @@ function SystemUserView({
                             </span>
                           )}
                         </td>
-                        <td className="space-x-2 whitespace-nowrap px-3 py-3 text-right sm:px-6 sm:py-4">
+                        <td className="space-x-2 whitespace-nowrap px-2.5 py-3 text-right sm:px-3">
                           <button
                             type="button"
                             onClick={() => openUserEdit(user)}
@@ -14766,11 +15470,11 @@ function mapRoleMenuKeysFromRow(raw: unknown): string[] | null | undefined {
 }
 
 const SYS_ROLE_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 240, minWidth: 170, maxWidth: 520 },
-  { id: 'desc', defaultWidth: 380, minWidth: 240, maxWidth: 840 },
-  { id: 'menuKeys', defaultWidth: 190, minWidth: 150, maxWidth: 360 },
-  { id: 'users', defaultWidth: 140, minWidth: 110, maxWidth: 220 },
-  { id: 'actions', defaultWidth: 170, minWidth: 130, maxWidth: 260 }
+  { id: 'name', defaultWidth: 180, minWidth: 135, maxWidth: 480 },
+  { id: 'desc', defaultWidth: 280, minWidth: 200, maxWidth: 760 },
+  { id: 'menuKeys', defaultWidth: 150, minWidth: 120, maxWidth: 320 },
+  { id: 'users', defaultWidth: 100, minWidth: 82, maxWidth: 190 },
+  { id: 'actions', defaultWidth: 130, minWidth: 110, maxWidth: 240 }
 ];
 
 function SystemRoleView() {
@@ -15013,24 +15717,24 @@ function SystemRoleView() {
             <colgroup>{cols.colNodes}</colgroup>
             <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
               <tr>
-                <ResizableTh col={cols.byId.name} className="px-6 py-4 font-medium">角色名称</ResizableTh>
-                <ResizableTh col={cols.byId.desc} className="px-6 py-4 font-medium">角色描述</ResizableTh>
-                <ResizableTh col={cols.byId.menuKeys} className="px-6 py-4 font-medium">菜单权限</ResizableTh>
-                <ResizableTh col={cols.byId.users} className="px-6 py-4 font-medium">关联用户数</ResizableTh>
-                <ResizableTh col={cols.byId.actions} className="px-6 py-4 font-medium text-right">操作</ResizableTh>
+                <ResizableTh col={cols.byId.name} className="px-3 py-3 font-medium sm:px-4">角色名称</ResizableTh>
+                <ResizableTh col={cols.byId.desc} className="px-3 py-3 font-medium sm:px-4">角色描述</ResizableTh>
+                <ResizableTh col={cols.byId.menuKeys} className="px-3 py-3 font-medium sm:px-4">菜单权限</ResizableTh>
+                <ResizableTh col={cols.byId.users} className="px-3 py-3 font-medium sm:px-4">关联用户数</ResizableTh>
+                <ResizableTh col={cols.byId.actions} className="px-3 py-3 font-medium text-right sm:px-4">操作</ResizableTh>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filtered.map((role) => (
                 <tr key={role.id} className="hover:bg-slate-50 transition-colors">
-                  <td className="px-6 py-4 font-bold text-slate-900">
+                  <td className="px-3 py-3 font-bold text-slate-900 sm:px-4">
                     <div className="flex items-center gap-2">
                       <Shield className="w-4 h-4 text-indigo-500 shrink-0" />
                       {role.name}
                     </div>
                   </td>
-                  <td className="px-6 py-4 text-slate-600">{role.desc || '—'}</td>
-                  <td className="px-6 py-4 text-slate-600">
+                  <td className="px-3 py-3 text-slate-600 sm:px-4">{role.desc || '—'}</td>
+                  <td className="px-3 py-3 text-slate-600 sm:px-4">
                     {role.menuKeys === undefined || role.menuKeys === null ? (
                       <span className="text-xs text-slate-500">职级默认</span>
                     ) : role.menuKeys.length === 0 ? (
@@ -15039,8 +15743,8 @@ function SystemRoleView() {
                       <span className="text-xs text-indigo-700">自定义 {role.menuKeys.length} 项</span>
                     )}
                   </td>
-                  <td className="px-6 py-4 text-slate-600">{role.users} 人</td>
-                  <td className="px-6 py-4 text-right space-x-2 whitespace-nowrap">
+                  <td className="px-3 py-3 text-slate-600 sm:px-4">{role.users} 人</td>
+                  <td className="px-3 py-3 text-right space-x-2 whitespace-nowrap sm:px-4">
                     <button
                       type="button"
                       onClick={() => openEdit(role)}
@@ -15193,11 +15897,11 @@ const SYSTEM_MENU_ICON_OPTIONS = [
 ] as const;
 
 const SYS_MENU_COLUMNS: ColumnSpec[] = [
-  { id: 'name', defaultWidth: 360, minWidth: 220, maxWidth: 840 },
-  { id: 'icon', defaultWidth: 110, minWidth: 90, maxWidth: 180 },
-  { id: 'type', defaultWidth: 160, minWidth: 120, maxWidth: 260 },
-  { id: 'path', defaultWidth: 300, minWidth: 220, maxWidth: 640 },
-  { id: 'actions', defaultWidth: 210, minWidth: 160, maxWidth: 340 }
+  { id: 'name', defaultWidth: 260, minWidth: 180, maxWidth: 760 },
+  { id: 'icon', defaultWidth: 86, minWidth: 72, maxWidth: 150 },
+  { id: 'type', defaultWidth: 120, minWidth: 96, maxWidth: 230 },
+  { id: 'path', defaultWidth: 230, minWidth: 170, maxWidth: 580 },
+  { id: 'actions', defaultWidth: 160, minWidth: 130, maxWidth: 300 }
 ];
 
 function SystemMenuView() {
@@ -15468,18 +16172,18 @@ function SystemMenuView() {
               <colgroup>{cols.colNodes}</colgroup>
               <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
                 <tr>
-                  <ResizableTh col={cols.byId.name} className="px-6 py-4 font-medium">菜单名称</ResizableTh>
-                  <ResizableTh col={cols.byId.icon} className="px-6 py-4 font-medium">图标</ResizableTh>
-                  <ResizableTh col={cols.byId.type} className="px-6 py-4 font-medium">类型</ResizableTh>
-                  <ResizableTh col={cols.byId.path} className="px-6 py-4 font-medium">路由路径</ResizableTh>
-                  <ResizableTh col={cols.byId.actions} className="px-6 py-4 font-medium text-right">操作</ResizableTh>
+                  <ResizableTh col={cols.byId.name} className="px-3 py-3 font-medium sm:px-4">菜单名称</ResizableTh>
+                  <ResizableTh col={cols.byId.icon} className="px-3 py-3 font-medium sm:px-4">图标</ResizableTh>
+                  <ResizableTh col={cols.byId.type} className="px-3 py-3 font-medium sm:px-4">类型</ResizableTh>
+                  <ResizableTh col={cols.byId.path} className="px-3 py-3 font-medium sm:px-4">路由路径</ResizableTh>
+                  <ResizableTh col={cols.byId.actions} className="px-3 py-3 font-medium text-right sm:px-4">操作</ResizableTh>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {pagedMenuRows.map(({ menu, depth }) => (
                   <tr key={menu.id} className="hover:bg-slate-50 transition-colors">
                     <td
-                      className="px-6 py-4 font-medium text-slate-900"
+                      className="px-3 py-3 font-medium text-slate-900 sm:px-4"
                       style={{ paddingLeft: `${depth * 2 + 1.5}rem` }}
                     >
                       <div className="flex items-center gap-2">
@@ -15487,8 +16191,8 @@ function SystemMenuView() {
                         {menu.name}
                       </div>
                     </td>
-                    <td className="px-6 py-4 text-slate-500">{getIcon(menu.icon)}</td>
-                    <td className="px-6 py-4">
+                    <td className="px-3 py-3 text-slate-500 sm:px-4">{getIcon(menu.icon)}</td>
+                    <td className="px-3 py-3 sm:px-4">
                       <span
                         className={`px-2 py-1 rounded text-xs font-medium ${
                           menu.type === '目录'
@@ -15501,8 +16205,8 @@ function SystemMenuView() {
                         {menu.type}
                       </span>
                     </td>
-                    <td className="px-6 py-4 font-mono text-slate-500 text-xs">{menu.path}</td>
-                    <td className="px-6 py-4 text-right space-x-2 whitespace-nowrap">
+                    <td className="px-3 py-3 font-mono text-slate-500 text-xs sm:px-4">{menu.path}</td>
+                    <td className="px-3 py-3 text-right space-x-2 whitespace-nowrap sm:px-4">
                       <button
                         type="button"
                         onClick={() => openChild(menu)}

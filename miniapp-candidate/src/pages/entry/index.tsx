@@ -4,6 +4,7 @@ import { Button, Text, View } from '@tarojs/components'
 
 import { loginAndGetOpenId } from '../../services/authApi'
 import { flowLog, flowLogInfo } from '../../utils/flowLog'
+import { preloadInterviewAssets } from '../../utils/digitalHumanPreload'
 
 import './index.scss'
 
@@ -53,14 +54,15 @@ export default function EntryPage() {
   }, [goLogin])
 
   useDidShow(() => {
+    preloadInterviewAssets()
     void bootstrap()
   })
 
   return (
     <View className='safe-container entry-page'>
-      <View className='card'>
-        <Text className='title'>AI 面试</Text>
-        <Text className='tip'>{tip}</Text>
+      <View className='entry-splash'>
+        <View className='entry-spinner' aria-hidden />
+        <Text className='entry-tip'>{tip}</Text>
         {showRetry ? (
           <Button className='retry-btn' onClick={() => void bootstrap()}>
             重试

@@ -1,15 +1,23 @@
 /// <reference path="../../types/trtc-wx-sdk.d.ts" />
-import Taro, { getCurrentInstance, useDidHide, useDidShow } from '@tarojs/taro'
+import Taro, { getCurrentInstance, useDidHide, useDidShow, useUnload } from '@tarojs/taro'
 import { useCallback, useMemo, useRef, useState } from 'react'
-import { Button, Camera, LivePusher, Text, View } from '@tarojs/components'
+import { Button, Camera, LivePusher, Text, Video, View } from '@tarojs/components'
 import type { LivePusherProps } from '@tarojs/components/types/LivePusher'
 import TrtcWx from 'trtc-wx-sdk'
 
 import { getApiBase } from '../../config/apiBase'
 import { AI_INTERVIEWER_IMG_URL } from '../../config/aiInterviewerImgUrl'
 import {
+  getOpeningVideoUrl,
+  getUmmVideoUrl,
+  OPENING_VIDEO_CACHE_KEY,
+  UMM_VIDEO_CACHE_KEY
+} from '../../config/digitalHumanVideo'
+import {
   bindSessionMember,
+  buildInterviewQuestionsCacheKey,
   DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG,
+  ensureInterviewQuestionsRest,
   fetchInterviewFollowUpConfig,
   fetchInterviewQuestionsOrPrefetched,
   fetchPreparedFollowUp,
@@ -25,6 +33,7 @@ import {
 import { trySendTrtcPusherCustomMessage } from '../../utils/trtcPusherMsg'
 import { flowLog, flowLogInfo } from '../../utils/flowLog'
 import { playInterviewQuestionTts, prefetchInterviewQuestionTtsPath } from '../../utils/interviewQuestionTts'
+import { consumePrefetchedFirstQuestionTts } from '../../utils/interviewWarmup'
 import { CandidateProfile, InterviewAnswer, InterviewQuestion, JobInfo } from '../../types/interview'
 
 import './index.scss'
@@ -64,6 +73,187 @@ export default function InterviewPage() {
   /** 已用 TRTC live-pusher 进房（未配置或服务端 503 时为 false，使用原生 Camera） */
   const [trtcActive, setTrtcActive] = useState(false)
   const [pusher, setPusher] = useState<PusherState>(null)
+
+  /**
+   * 数字人面试官状态：
+   * - idle：读题前 / 读题结束后等待作答，静态 PNG 呼吸，不播视频。
+   * - speaking：系统播报（AI 读题）时循环播放「开场」视频。
+   * - listening：候选人已开口作答时播放「嗯」视频。
+   */
+  const [dhMode, setDhMode] = useState<'idle' | 'speaking' | 'listening'>('idle')
+  const dhModeRef = useRef<'idle' | 'speaking' | 'listening'>('idle')
+  dhModeRef.current = dhMode
+  const ummLoopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** 作答视频「嗯」播完后延迟多少毫秒再循环 */
+  const UMM_LOOP_DELAY_MS = 3000
+  const OPENING_VIDEO_ID = 'dhOpeningVideo'
+  const UMM_VIDEO_ID = 'dhUmmVideo'
+  /** 优先用邀请码/候场页预下载的本地缓存路径，没有再回退到 API URL */
+  const [openingVideoSrc, setOpeningVideoSrc] = useState<string>(() => {
+    try {
+      const cached = Taro.getStorageSync(OPENING_VIDEO_CACHE_KEY) as string
+      if (cached) return cached
+    } catch {
+      /* ignore */
+    }
+    return getOpeningVideoUrl()
+  })
+  const [ummVideoSrc, setUmmVideoSrc] = useState<string>(() => {
+    try {
+      const cached = Taro.getStorageSync(UMM_VIDEO_CACHE_KEY) as string
+      if (cached) return cached
+    } catch {
+      /* ignore */
+    }
+    return getUmmVideoUrl()
+  })
+  /**
+   * 数字人视频加载/缓冲状态：PC 端微信小程序对本地缓存路径或大 mp4 首帧加载较慢，
+   * 未就绪/缓冲时显示 loading 遮罩，避免黑屏或卡住没反应。
+   */
+  const [openingVideoReady, setOpeningVideoReady] = useState(false)
+  const [ummVideoReady, setUmmVideoReady] = useState(false)
+  const [openingVideoBuffering, setOpeningVideoBuffering] = useState(false)
+  const [ummVideoBuffering, setUmmVideoBuffering] = useState(false)
+  /** 本地缓存路径在 PC 端可能无法播放，onError 时回退到 OSS 网络地址，仅回退一次 */
+  const openingFellBackRef = useRef(false)
+  const ummFellBackRef = useRef(false)
+
+  const handleOpeningVideoError = useCallback(() => {
+    if (openingFellBackRef.current) return
+    const net = getOpeningVideoUrl()
+    openingFellBackRef.current = true
+    setOpeningVideoReady(false)
+    setOpeningVideoSrc((prev) => (prev === net ? prev : net))
+  }, [])
+
+  const handleUmmVideoError = useCallback(() => {
+    if (ummFellBackRef.current) return
+    const net = getUmmVideoUrl()
+    ummFellBackRef.current = true
+    setUmmVideoReady(false)
+    setUmmVideoSrc((prev) => (prev === net ? prev : net))
+  }, [])
+
+  const clearUmmLoopTimer = useCallback(() => {
+    if (ummLoopTimerRef.current) {
+      clearTimeout(ummLoopTimerRef.current)
+      ummLoopTimerRef.current = null
+    }
+  }, [])
+
+  /** 「嗯」视频播放结束：延迟几秒后再从头循环，模拟数字人偶尔点头/轻“嗯”的自然停顿 */
+  const handleUmmVideoEnded = useCallback(() => {
+    clearUmmLoopTimer()
+    ummLoopTimerRef.current = setTimeout(() => {
+      ummLoopTimerRef.current = null
+      if (dhModeRef.current !== 'listening' || !visibleRef.current) return
+      try {
+        const ctx = Taro.createVideoContext(UMM_VIDEO_ID)
+        ctx?.seek?.(0)
+        ctx?.play?.()
+      } catch {
+        /* ignore */
+      }
+    }, UMM_LOOP_DELAY_MS)
+  }, [clearUmmLoopTimer])
+
+  /**
+   * 按当前 dhMode 让对应视频播放、另一个暂停。
+   * 小程序原生 video 在 autoplay 失败、或页面切后台再回前台时会停住，
+   * 所以统一用 createVideoContext 主动驱动，并在 useDidShow / 模式切换时各调一次。
+   */
+  const applyDigitalHumanPlayback = useCallback(
+    (mode: 'idle' | 'speaking' | 'listening') => {
+      let opening: ReturnType<typeof Taro.createVideoContext> | null = null
+      let umm: ReturnType<typeof Taro.createVideoContext> | null = null
+      try {
+        opening = Taro.createVideoContext(OPENING_VIDEO_ID)
+      } catch {
+        opening = null
+      }
+      try {
+        umm = Taro.createVideoContext(UMM_VIDEO_ID)
+      } catch {
+        umm = null
+      }
+      if (mode === 'idle') {
+        clearUmmLoopTimer()
+        try {
+          opening?.pause?.()
+          opening?.seek?.(0)
+        } catch {
+          /* ignore */
+        }
+        try {
+          umm?.pause?.()
+          umm?.seek?.(0)
+        } catch {
+          /* ignore */
+        }
+        return
+      }
+      if (mode === 'speaking') {
+        clearUmmLoopTimer()
+        try {
+          umm?.pause?.()
+          umm?.seek?.(0)
+        } catch {
+          /* ignore */
+        }
+        try {
+          opening?.seek?.(0)
+          opening?.play?.()
+        } catch {
+          /* ignore */
+        }
+      } else {
+        try {
+          opening?.pause?.()
+          opening?.seek?.(0)
+        } catch {
+          /* ignore */
+        }
+        try {
+          umm?.seek?.(0)
+          umm?.play?.()
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+    [clearUmmLoopTimer]
+  )
+
+  /** 切换数字人视频模式并立刻驱动原生 video（不等 useEffect），播报结束须马上停「开场」 */
+  const setDigitalHumanMode = useCallback(
+    (mode: 'idle' | 'speaking' | 'listening') => {
+      dhModeRef.current = mode
+      setDhMode(mode)
+      applyDigitalHumanPlayback(mode)
+    },
+    [applyDigitalHumanPlayback]
+  )
+
+  /** 作答阶段：未开口前保持 PNG，首次检测到转写再切「嗯」MP4 */
+  const ummAvatarActivatedRef = useRef(false)
+
+  /** 读题结束 / 等待作答：立刻停开场与嗯视频，回到 PNG */
+  const resetAnswerPhaseAvatar = useCallback(() => {
+    ummAvatarActivatedRef.current = false
+    setDigitalHumanMode('idle')
+  }, [setDigitalHumanMode])
+
+  const activateUmmAvatarOnUserSpeech = useCallback(
+    (text: string) => {
+      const t = String(text || '').trim()
+      if (!t || ummAvatarActivatedRef.current) return
+      if (questionTtsPlayingRef.current || dhModeRef.current === 'speaking') return
+      ummAvatarActivatedRef.current = true
+      setDigitalHumanMode('listening')
+    },
+    [setDigitalHumanMode]
+  )
 
   const transcribingRef = useRef(false)
   transcribingRef.current = transcribing
@@ -150,6 +340,9 @@ export default function InterviewPage() {
   const stopSegmentedAsr = useCallback(() => {
     cancelTranscriptRemoteDebounce()
     pendingRestartSidRef.current = null
+    pendingTtsAfterStopRef.current = null
+    suppressAutoRestartRef.current = false
+    dropNextOnStopResultRef.current = false
     answerTranscriptOpenRef.current = false
     if (answerPhaseGateTimerRef.current) {
       clearTimeout(answerPhaseGateTimerRef.current)
@@ -159,11 +352,18 @@ export default function InterviewPage() {
       clearTimeout(forceRestartFallbackTimerRef.current)
       forceRestartFallbackTimerRef.current = null
     }
+    const mgr = recordManagerRef.current
+    // 先断开引用，旧实例后续的 onStop 会因实例不匹配被忽略，避免污染下一次转写
+    recordManagerRef.current = null
     try {
-      recordManagerRef.current?.stop?.()
+      mgr?.stop?.()
     } catch {
       /* ignore */
     }
+    // 同步复位转写态：离开页面时若不复位，返回页面后 transcribingRef 仍为 true 会导致不再重启转写
+    transcribingRef.current = false
+    setTranscribing(false)
+    setTranscriptStreaming('')
   }, [cancelTranscriptRemoteDebounce])
 
   const syncPusherFromTrtc = useCallback(() => {
@@ -318,6 +518,9 @@ export default function InterviewPage() {
       firstQuestionPrefetchUiTimerRef.current = null
     }
     closeAnswerTranscriptDisplay()
+    clearUmmLoopTimer()
+    ummAvatarActivatedRef.current = false
+    setDigitalHumanMode('idle')
     pendingRestartSidRef.current = null
     pendingTtsAfterStopRef.current = null
     if (forceRestartFallbackTimerRef.current) {
@@ -342,6 +545,38 @@ export default function InterviewPage() {
       trtcEnteredSidRef.current = ''
       setTrtcActive(false)
       setPusher(null)
+    }
+  })
+
+  /**
+   * 页面卸载（reLaunch/刷新本页、跳转销毁页面）时彻底停止录音与退房。
+   * 否则 WechatSI 录音识别会被上个页面实例占用，新页面 start 时报
+   * “please wait recognition finished”，导致刷新后转写失效。
+   */
+  useUnload(() => {
+    visibleRef.current = false
+    clearUmmLoopTimer()
+    if (firstQuestionPrefetchUiTimerRef.current) {
+      clearTimeout(firstQuestionPrefetchUiTimerRef.current)
+      firstQuestionPrefetchUiTimerRef.current = null
+    }
+    try {
+      questionInnerAudioRef.current?.stop()
+      questionInnerAudioRef.current?.destroy()
+    } catch {
+      /* ignore */
+    }
+    questionInnerAudioRef.current = null
+    questionTtsPlayingRef.current = false
+    stopSegmentedAsr()
+    const trtc = trtcRef.current
+    if (trtc && trtcEnteredSidRef.current) {
+      try {
+        trtc.exitRoom()
+      } catch {
+        /* ignore */
+      }
+      trtcEnteredSidRef.current = ''
     }
   })
 
@@ -408,6 +643,7 @@ export default function InterviewPage() {
           setTranscriptStreaming('')
           return
         }
+        activateUmmAvatarOnUserSpeech(t)
         cancelTranscriptRemoteDebounce()
         setTranscriptFinalized((prev) => {
           const next = [...prev, t]
@@ -452,6 +688,7 @@ export default function InterviewPage() {
             return
           }
           flowLog('WechatSI onRecognize', true, `len=${text.length}`)
+          activateUmmAvatarOnUserSpeech(text)
           setTranscriptStreaming(text)
           const fullLive = transcriptFinalizedRef.current.join('') + text
           latestLiveTranscriptSyncRef.current = fullLive
@@ -608,8 +845,11 @@ export default function InterviewPage() {
     }
 
     const playTtsThenResume = (sidInner: string, ttsRaw: string) => {
+      ummAvatarActivatedRef.current = false
+      setDigitalHumanMode('idle')
       if (!requirePluginFn) {
         questionTtsPlayingRef.current = false
+        resetAnswerPhaseAvatar()
         setCallStatusLine('请口述您的回答')
         if (!transcribingRef.current) openRecognition(sidInner)
         else resumeAnswerAfterQuestionTts(sidInner)
@@ -651,6 +891,7 @@ export default function InterviewPage() {
           onStatus: setCallStatusLine,
           onPlayStart: () => {
             firstQuestionNeedsTapRetryRef.current = false
+            setDigitalHumanMode('speaking')
           },
           prebuiltFilename: prebuilt
         },
@@ -659,6 +900,8 @@ export default function InterviewPage() {
             firstQuestionNeedsTapRetryRef.current = true
             setCallStatusLine('自动读题失败，请点击页面任意位置后重试')
           }
+          // 播报一结束立刻停开场 MP4，回到 PNG（不等 holdMs）
+          resetAnswerPhaseAvatar()
           const elapsed = Date.now() - ttsStartAt
           const holdMs = Math.max(0, minTtsCoverMs - elapsed)
           const releaseTtsAndResume = () => {
@@ -685,6 +928,7 @@ export default function InterviewPage() {
         playTtsThenResume(sidInner, String(t))
       } else {
         closeAnswerTranscriptDisplay()
+        resetAnswerPhaseAvatar()
         setCallStatusLine('请口述您的回答')
         openRecognition(sidInner)
       }
@@ -719,7 +963,15 @@ export default function InterviewPage() {
     }
 
     resumeAfterStop(sid)
-  }, [cancelTranscriptRemoteDebounce, scheduleTranscriptRemote, pushTranscriptRemoteNow])
+  }, [
+    cancelTranscriptRemoteDebounce,
+    scheduleTranscriptRemote,
+    pushTranscriptRemoteNow,
+    setDigitalHumanMode,
+    resetAnswerPhaseAvatar,
+    activateUmmAvatarOnUserSpeech,
+    closeAnswerTranscriptDisplay
+  ])
 
   const handleAnyTapRetryFirstQuestion = useCallback(() => {
     if (!firstQuestionNeedsTapRetryRef.current) return
@@ -738,6 +990,10 @@ export default function InterviewPage() {
 
   useDidShow(() => {
     visibleRef.current = true
+    // 回到面试页时小程序可能已暂停原生视频，按当前状态重新驱动一次。
+    setTimeout(() => {
+      if (visibleRef.current) applyDigitalHumanPlayback(dhModeRef.current)
+    }, 200)
     void (async () => {
       const p = Taro.getStorageSync('candidate_profile') as CandidateProfile | undefined
       const j = Taro.getStorageSync('candidate_job') as JobInfo | undefined
@@ -756,47 +1012,84 @@ export default function InterviewPage() {
       if (dataInitMarkerRef.current !== dataMarker) {
         dataInitMarkerRef.current = dataMarker
         setInitError('')
+        ummAvatarActivatedRef.current = false
+        setDigitalHumanMode('idle')
         closeAnswerTranscriptDisplay()
         try {
           setCallStatusLine('正在准备题目…')
           followUpConfigRef.current = DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG
-          void fetchInterviewFollowUpConfig(j.id, sid)
-            .then((cfg) => {
-              followUpConfigRef.current = { ...DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG, ...cfg }
-              flowLogInfo(
-                '追问配置',
-                `enabled=${cfg.enabled ? '1' : '0'} max=${cfg.maxPerInterview} waitMs=${cfg.modelWaitMs}`
-              )
-            })
-            .catch(() => {
-              followUpConfigRef.current = DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG
-            })
-          const list = await fetchInterviewQuestionsOrPrefetched(
+          const resumeScreeningId =
+            typeof p.resumeScreeningId === 'number' ? p.resumeScreeningId : undefined
+          const questionFetchOpts = {
+            inviteCode: p.inviteCode,
+            sessionId: sid
+          }
+          const questionsCacheKey = buildInterviewQuestionsCacheKey(
             j.id,
             p.name,
-            typeof p.resumeScreeningId === 'number' ? p.resumeScreeningId : undefined
+            resumeScreeningId,
+            p.inviteCode
           )
+
+          const [list] = await Promise.all([
+            fetchInterviewQuestionsOrPrefetched(j.id, p.name, resumeScreeningId, questionFetchOpts),
+            fetchInterviewFollowUpConfig(j.id, sid)
+              .then((cfg) => {
+                followUpConfigRef.current = { ...DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG, ...cfg }
+                flowLogInfo(
+                  '追问配置',
+                  `enabled=${cfg.enabled ? '1' : '0'} max=${cfg.maxPerInterview} waitMs=${cfg.modelWaitMs}`
+                )
+                return cfg
+              })
+              .catch(() => {
+                followUpConfigRef.current = DEFAULT_INTERVIEW_FOLLOW_UP_CONFIG
+                return null
+              })
+          ])
+
           const cleaned = list.filter((q) => q && String(q.text || '').trim())
           if (!cleaned.length) throw new Error('empty questions')
           flowLog('AI 题目生成', true, `${cleaned.length} 题`)
           flowLogInfo('AI 首题', cleaned[0]?.text?.slice(0, 40) || '')
           setQuestions(cleaned)
+          if (cleaned.length < 6 && cleaned[0]?.text) {
+            ensureInterviewQuestionsRest(
+              j.id,
+              p.name,
+              cleaned[0].text,
+              resumeScreeningId,
+              questionFetchOpts,
+              (merged) => {
+                if (!visibleRef.current) return
+                const next = merged.filter((q) => q && String(q.text || '').trim())
+                if (next.length > questionCountRef.current) {
+                  setQuestions(next)
+                  flowLogInfo('面试页', `后续题目已就绪，共 ${next.length} 题`)
+                }
+              }
+            )
+          }
           followUpCountRef.current = 0
           followUpParentIdsRef.current = new Set()
           transcriptFinalizedRef.current = []
           setTranscriptFinalized([])
           setTranscriptStreaming('')
           setSessionId(sid)
-          await startLiveSession({
-            sessionId: sid,
-            jobId: j.id,
-            candidateName: p.name,
-            candidateOpenId: p.openid,
-            questions: cleaned
-          })
-          if (p.openid) {
-            await bindSessionMember({ sessionId: sid, role: 'candidate', openid: p.openid })
-          }
+
+          await Promise.all([
+            startLiveSession({
+              sessionId: sid,
+              jobId: j.id,
+              candidateName: p.name,
+              candidateOpenId: p.openid,
+              questions: cleaned
+            }),
+            p.openid
+              ? bindSessionMember({ sessionId: sid, role: 'candidate', openid: p.openid })
+              : Promise.resolve()
+          ])
+
           flowLog('面试页 拉题+startLiveSession', true, `${cleaned.length} 题`)
           if (!transcribingRef.current) {
             flowLogInfo('面试页', '首题：需在本页点击后播放读题（微信音频策略）')
@@ -805,9 +1098,10 @@ export default function InterviewPage() {
             firstListenGateRef.current = { sid, text: q0 }
             firstQuestionNeedsTapRetryRef.current = false
             setCallStatusLine('题目已就绪，准备自动语音读题…')
-            firstQuestionPrefetchedFileRef.current = ''
-            pendingUsePrefetchedFirstTtsRef.current = true
-            if (requirePluginFn && String(q0).trim()) {
+            const warmedTts = consumePrefetchedFirstQuestionTts(questionsCacheKey)
+            firstQuestionPrefetchedFileRef.current = warmedTts
+            pendingUsePrefetchedFirstTtsRef.current = Boolean(warmedTts)
+            if (requirePluginFn && String(q0).trim() && !warmedTts) {
               if (firstQuestionPrefetchUiTimerRef.current) {
                 clearTimeout(firstQuestionPrefetchUiTimerRef.current)
                 firstQuestionPrefetchUiTimerRef.current = null
@@ -826,11 +1120,13 @@ export default function InterviewPage() {
                 if (!visibleRef.current) return
                 if (path) {
                   firstQuestionPrefetchedFileRef.current = path
+                  pendingUsePrefetchedFirstTtsRef.current = true
                   flowLogInfo('面试页', '首题读题音频已预拉取')
                 }
               })
+            } else if (warmedTts) {
+              flowLogInfo('面试页', '使用候场预拉的首题读题音频')
             }
-            // 去掉首题按钮后，题目准备完成即自动进入读题链路。
             void startWechatSiTranscribe(sid, false)
           }
         } catch (e) {
@@ -842,19 +1138,33 @@ export default function InterviewPage() {
         }
       } else {
         setSessionId(sid)
-        if (!transcribingRef.current) {
-          closeAnswerTranscriptDisplay()
-          const currentText = String((questions[questionIndexRef.current]?.text ?? '') || '').trim()
-          flowLogInfo('面试页', '回到面试页：先停转写再读题')
-          pendingTtsAfterStopRef.current = currentText
-          setCallStatusLine(currentText ? '准备语音读题…' : '请口述您的回答')
-          void startWechatSiTranscribe(sid, true)
-        }
+        // 用 ref 取当前题目，闭包里的 questions 在 useDidShow 回调中可能是初始空数组。
+        const currentText = String(
+          (questionListRef.current[questionIndexRef.current]?.text ?? '') || ''
+        ).trim()
+        flowLogInfo('面试页', '回到面试页：先停转写再读题')
+        pendingTtsAfterStopRef.current = currentText
+        setCallStatusLine(currentText ? '准备语音读题…' : '请口述您的回答')
+        // 强制重启：返回/切后台再回前台后，录音识别需要重新 start，否则会出现“有声无字”。
+        void startWechatSiTranscribe(sid, true)
       }
     })()
   })
 
   const current = questions[index]
+  const isFollowUp = current?.type === 'follow_up'
+  const mainQuestionCount = useMemo(
+    () => questions.filter((q) => q.type !== 'follow_up').length,
+    [questions]
+  )
+  const currentMainOrdinal = useMemo(
+    () => questions.slice(0, index + 1).filter((q) => q.type !== 'follow_up').length,
+    [questions, index]
+  )
+  const parentQuestion = useMemo(() => {
+    if (!current?.parentQuestionId) return null
+    return questions.find((q) => q.id === current.parentQuestionId) ?? null
+  }, [current, questions])
   const isLast = questions.length > 0 && index === questions.length - 1
   const composedAnswer = useMemo(
     () => (transcriptFinalized.join('') + transcriptStreaming).trim(),
@@ -865,7 +1175,7 @@ export default function InterviewPage() {
 
   const buildShortAnswerFollowUp = useCallback((parent: InterviewQuestion, answer: string): InterviewQuestion | null => {
     const cfg = followUpConfigRef.current
-    if (!cfg.enabled || !cfg.fallbackEnabled) return null
+    if (!cfg.enabled || !cfg.fallbackEnabled || cfg.demoMode) return null
     const compact = String(answer || '').replace(/\s+/g, '')
     if (compact.length >= cfg.shortAnswerThreshold) return null
     return {
@@ -883,7 +1193,7 @@ export default function InterviewPage() {
       if (!sessionId) return null
       if (parent.type === 'follow_up') return null
       if (cfg.maxPerInterview <= 0 || cfg.maxPerQuestion <= 0) return null
-      if (followUpCountRef.current >= cfg.maxPerInterview) return null
+      if (!cfg.demoMode && followUpCountRef.current >= cfg.maxPerInterview) return null
       if (followUpParentIdsRef.current.has(parent.id)) return null
 
       const mainOrdinal =
@@ -898,7 +1208,7 @@ export default function InterviewPage() {
       const got = await fetchPreparedFollowUp({
         sessionId,
         questionId: parent.id,
-        waitMs: cfg.modelWaitMs
+        waitMs: cfg.demoMode ? Math.max(cfg.modelWaitMs, 3500) : cfg.modelWaitMs
       }).catch(() => null)
       flowLogInfo('追问检查', `追问状态=${got?.status || 'request_failed'}`)
       if (got?.status === 'ready' && got.question?.text) {
@@ -936,7 +1246,10 @@ export default function InterviewPage() {
       nextQuestions.splice(nextIdx, 0, followUp)
       setQuestions(nextQuestions)
       closeAnswerTranscriptDisplay()
+      ummAvatarActivatedRef.current = false
+      setDigitalHumanMode('idle')
       pendingTtsAfterStopRef.current = followUp.text
+      setCallStatusLine('面试官有一则追问，请听题后补充作答')
       setIndex(nextIdx)
       void startWechatSiTranscribe(sessionId, true)
       return
@@ -945,6 +1258,8 @@ export default function InterviewPage() {
     if (!isLast) {
       const nextIdx = index + 1
       closeAnswerTranscriptDisplay()
+      ummAvatarActivatedRef.current = false
+      setDigitalHumanMode('idle')
       pendingTtsAfterStopRef.current = questions[nextIdx]?.text ?? ''
       setIndex(nextIdx)
       void startWechatSiTranscribe(sessionId, true)
@@ -968,6 +1283,10 @@ export default function InterviewPage() {
   }
 
   const showTrtcPusher = trtcActive && pusher && String(pusher.url || '').length > 0
+  /** 当前应播放的数字人视频尚未就绪或正在缓冲时，显示 loading 遮罩 */
+  const showVideoLoading =
+    (dhMode === 'speaking' && (!openingVideoReady || openingVideoBuffering)) ||
+    (dhMode === 'listening' && (!ummVideoReady || ummVideoBuffering))
 
   return (
     <View className='safe-container interview-page' onClick={handleAnyTapRetryFirstQuestion}>
@@ -979,13 +1298,83 @@ export default function InterviewPage() {
               <View className='interviewer-circle-cluster'>
                 <View className='interviewer-circle-frame'>
                   <View
-                    className='interviewer-circle-fill'
-                    style={{
-                      backgroundImage: AI_INTERVIEWER_IMG_URL
-                        ? `url(${JSON.stringify(AI_INTERVIEWER_IMG_URL)})`
-                        : 'none'
-                    }}
+                    className={`interviewer-circle-fill${dhMode === 'idle' ? ' interviewer-circle-fill--active' : ''}`}
+                    style={
+                      AI_INTERVIEWER_IMG_URL
+                        ? { backgroundImage: `url(${JSON.stringify(AI_INTERVIEWER_IMG_URL)})` }
+                        : undefined
+                    }
                   />
+                  <View
+                    className={`interviewer-circle-video-layer${dhMode !== 'idle' ? ' interviewer-circle-video-layer--active' : ''}`}
+                  >
+                    <Video
+                      id={OPENING_VIDEO_ID}
+                      className={`interviewer-circle-video${dhMode === 'speaking' ? ' interviewer-circle-video--active' : ''}`}
+                      src={openingVideoSrc}
+                      poster={AI_INTERVIEWER_IMG_URL || ''}
+                      loop
+                      muted
+                      autoplay={false}
+                      controls={false}
+                      showCenterPlayBtn={false}
+                      showPlayBtn={false}
+                      showProgress={false}
+                      showFullscreenBtn={false}
+                      enableProgressGesture={false}
+                      objectFit='cover'
+                      onLoadedMetaData={() => {
+                        setOpeningVideoReady(true)
+                        if (dhModeRef.current === 'speaking' && visibleRef.current) {
+                          try {
+                            Taro.createVideoContext(OPENING_VIDEO_ID)?.play?.()
+                          } catch {
+                            /* ignore */
+                          }
+                        }
+                      }}
+                      onPlay={() => setOpeningVideoBuffering(false)}
+                      onTimeUpdate={() => setOpeningVideoBuffering(false)}
+                      onWaiting={() => setOpeningVideoBuffering(true)}
+                      onError={handleOpeningVideoError}
+                    />
+                    <Video
+                      id={UMM_VIDEO_ID}
+                      className={`interviewer-circle-video${dhMode === 'listening' ? ' interviewer-circle-video--active' : ''}`}
+                      src={ummVideoSrc}
+                      poster={AI_INTERVIEWER_IMG_URL || ''}
+                      loop={false}
+                      muted
+                      autoplay={false}
+                      controls={false}
+                      showCenterPlayBtn={false}
+                      showPlayBtn={false}
+                      showProgress={false}
+                      showFullscreenBtn={false}
+                      enableProgressGesture={false}
+                      objectFit='cover'
+                      onEnded={handleUmmVideoEnded}
+                      onLoadedMetaData={() => {
+                        setUmmVideoReady(true)
+                        if (dhModeRef.current === 'listening' && visibleRef.current) {
+                          try {
+                            Taro.createVideoContext(UMM_VIDEO_ID)?.play?.()
+                          } catch {
+                            /* ignore */
+                          }
+                        }
+                      }}
+                      onPlay={() => setUmmVideoBuffering(false)}
+                      onTimeUpdate={() => setUmmVideoBuffering(false)}
+                      onWaiting={() => setUmmVideoBuffering(true)}
+                      onError={handleUmmVideoError}
+                    />
+                    {showVideoLoading ? (
+                      <View className='interviewer-circle-loading'>
+                        <View className='interviewer-circle-spinner' />
+                      </View>
+                    ) : null}
+                  </View>
                   <View className='interviewer-circle-badge'>
                     <Text className='interviewer-circle-badge-text'>AI 面试官</Text>
                   </View>
@@ -1058,9 +1447,15 @@ export default function InterviewPage() {
         <View className='interview-job-block'>
           <Text className='call-status-line'>{callStatusLine}</Text>
           <Text className='job-title'>{job?.title || '岗位面试'}</Text>
-          <Text className='progress'>
-            第 {questions.length ? Math.min(index + 1, questions.length) : 0} 题 / 共 {questions.length || '--'} 题
-          </Text>
+          {isFollowUp ? (
+            <Text className='progress progress--follow-up'>
+              追问 · 第 {currentMainOrdinal || 1} 题的补充说明
+            </Text>
+          ) : (
+            <Text className='progress'>
+              第 {currentMainOrdinal || 0} 题 / 共 {mainQuestionCount || '--'} 题
+            </Text>
+          )}
           {initError ? (
             <View className='init-error-box'>
               <Text className='init-error-text'>{initError}</Text>
@@ -1072,7 +1467,23 @@ export default function InterviewPage() {
         </View>
         {cameraError ? <Text className='camera-error-text'>{cameraError}</Text> : null}
         <View className='question-box'>
-          <Text className='question-text'>{current?.text || (questions.length ? '题目索引异常' : '正在加载题目…')}</Text>
+          {isFollowUp ? (
+            <View className='follow-up-notice'>
+              <View className='follow-up-notice-head'>
+                <Text className='follow-up-badge'>追问</Text>
+                <Text className='follow-up-hint'>面试官希望进一步了解您刚才的回答</Text>
+              </View>
+              {parentQuestion?.text ? (
+                <View className='follow-up-parent'>
+                  <Text className='follow-up-parent-label'>刚才的问题</Text>
+                  <Text className='follow-up-parent-text'>{parentQuestion.text}</Text>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
+          <Text className={`question-text${isFollowUp ? ' question-text--follow-up' : ''}`}>
+            {current?.text || (questions.length ? '题目索引异常' : '正在加载题目…')}
+          </Text>
           <View className='answer-box'>
             <Text className='answer-label'>实时转写回答</Text>
             <View className='transcript-composer'>
@@ -1101,7 +1512,7 @@ export default function InterviewPage() {
           disabled={!canNext || loading || !current}
           onClick={() => void handleNext()}
         >
-          {isLast ? '提交面试' : '下一题'}
+          {isLast ? '提交面试' : isFollowUp ? '完成追问，继续' : '下一题'}
         </Button>
         <Text className='transcript-tip'>本服务为AI生成内容，结果仅供参考</Text>
       </View>

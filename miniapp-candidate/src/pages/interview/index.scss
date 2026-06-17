@@ -72,6 +72,74 @@
   color: #334155;
 }
 
+.progress--follow-up {
+  color: #b45309;
+  font-weight: 600;
+}
+
+.follow-up-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #fffbeb 0%, #fef3c7 100%);
+  border: 1px solid #fcd34d;
+}
+
+.follow-up-notice-head {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.follow-up-badge {
+  flex-shrink: 0;
+  padding: 4px 14px;
+  border-radius: 999px;
+  background: #f59e0b;
+  color: #ffffff;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.follow-up-hint {
+  flex: 1;
+  min-width: 0;
+  font-size: 24px;
+  color: #92400e;
+  line-height: 1.45;
+}
+
+.follow-up-parent {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(251, 191, 36, 0.45);
+}
+
+.follow-up-parent-label {
+  display: block;
+  font-size: 20px;
+  color: #a16207;
+  margin-bottom: 6px;
+}
+
+.follow-up-parent-text {
+  display: block;
+  font-size: 24px;
+  color: #78350f;
+  line-height: 1.5;
+}
+
+.question-text--follow-up {
+  border-color: #fcd34d;
+  background: #fffdf5;
+}
+
 .question-box {
   padding: 0 4px;
   display: flex;
@@ -223,17 +291,93 @@
   }
 }
 
-/* cover + 顶部对齐；轻微呼吸仅作用在头像层，外圈装饰环保持对齐 */
+/* 读题前：静态 PNG 呼吸，不播 MP4 */
 .interviewer-circle-fill {
   position: absolute;
   inset: 0;
+  z-index: 1;
   border-radius: 50%;
   background-color: #94b8e8;
   background-repeat: no-repeat;
   background-size: cover;
   background-position: center top;
   transform-origin: center center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms ease;
+}
+
+.interviewer-circle-fill--active {
+  opacity: 1;
   animation: interviewer-avatar-breathe 3.2s ease-in-out infinite;
+}
+
+/* 播报结束切回 PNG：开场层立刻隐藏 */
+.interviewer-circle-video-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 60ms ease;
+}
+
+.interviewer-circle-video-layer--active {
+  z-index: 2;
+  opacity: 1;
+  pointer-events: none;
+}
+
+/* 数字人面试官视频：开场/嗯 两个视频叠放，通过透明度切换避免重新挂载导致卡顿 */
+.interviewer-circle-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  overflow: hidden;
+  background-color: #94b8e8;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+
+.interviewer-circle-video--active {
+  opacity: 1;
+}
+
+.interviewer-circle-video:not(.interviewer-circle-video--active) {
+  transition: opacity 40ms ease;
+}
+
+/* 视频未加载完成时的 loading 遮罩 */
+.interviewer-circle-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(148, 184, 232, 0.55);
+  pointer-events: none;
+}
+
+@keyframes interviewer-circle-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.interviewer-circle-spinner {
+  width: 64rpx;
+  height: 64rpx;
+  border-radius: 50%;
+  border: 6rpx solid rgba(255, 255, 255, 0.45);
+  border-top-color: #ffffff;
+  animation: interviewer-circle-spin 0.8s linear infinite;
 }
 
 /* 圆内底部胶囊标签 */

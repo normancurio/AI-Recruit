@@ -16,9 +16,9 @@ node -v 应显示 v26.1.0 左右。不要用 Node 24 启动 API；当前 pdf-par
 
 3. 确认当前本地配置使用的是本地环境数据库，不是线上库：
 
-.env 中应保持：
-MYSQL_HOST="100.79.134.17"
-REDIS_HOST="100.79.134.17"
+.env 中应保持（本机 MySQL / Redis，不要连线上库）：
+MYSQL_HOST="127.0.0.1"
+REDIS_HOST="127.0.0.1"
 PORT="3011"
 ADMIN_UI_PORT="3010"
 ADMIN_API_UPSTREAM="http://127.0.0.1:3011"
@@ -59,6 +59,10 @@ npm run dev:api
 7. 停止：
 
 在运行 npm run dev:full 的终端按 Ctrl+C。
+
+申朴标准 PDF（.env 里 SHENPU_PDF_ENGINE）：
+- chromium：样式/蓝色雷达最好，WPS 文字编辑可能报 Type3
+- editable：WPS 可改字（LibreOffice + 雷达截图），改 .env 后重启 dev:full 并重新生成简历
 
 备注：
 - 本地测试不要连接线上数据库。

@@ -1,5 +1,6 @@
 import { PropsWithChildren } from 'react'
 import Taro from '@tarojs/taro'
+import { preloadInterviewAssets } from './utils/digitalHumanPreload'
 import './app.scss'
 
 try {
@@ -10,6 +11,9 @@ try {
 }
 
 function App({ children }: PropsWithChildren) {
+  Taro.useLaunch(() => {
+    preloadInterviewAssets()
+  })
   return children
 }
 

@@ -67,7 +67,7 @@ export type ColumnWidthsApi = {
   resetAll: () => void
 }
 
-const COLUMN_WIDTH_STORAGE_VERSION = 'v2'
+const COLUMN_WIDTH_STORAGE_VERSION = 'v3'
 
 function storageKey(tableId: string) {
   return `ai-recruit:col-widths:${COLUMN_WIDTH_STORAGE_VERSION}:${tableId}`

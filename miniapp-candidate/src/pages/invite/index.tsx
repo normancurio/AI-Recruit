@@ -4,6 +4,7 @@ import { Button, Text, View } from '@tarojs/components'
 
 import type { CandidateProfile } from '../../types/interview'
 import { acceptInvitation, getMyInvitations, getMyProfile } from '../../services/userApi'
+import { prefetchInterviewWarmup } from '../../utils/interviewWarmup'
 
 import './index.scss'
 
@@ -69,6 +70,14 @@ export default function InvitePage() {
         department: data.job.department
       })
       Taro.setStorageSync('session_id', data.sessionId)
+      void prefetchInterviewWarmup({
+        jobId: data.job.id,
+        candidateName: profile.name,
+        inviteCode: profile.inviteCode,
+        sessionId: data.sessionId,
+        resumeScreeningId:
+          typeof profile.resumeScreeningId === 'number' ? profile.resumeScreeningId : undefined
+      })
       Taro.reLaunch({ url: '/pages/interview/index' })
     } catch (e) {
       Taro.showToast({ title: '同意失败，请重试', icon: 'none' })

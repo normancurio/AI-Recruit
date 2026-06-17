@@ -5,16 +5,16 @@ Use this file as the project-level source of truth for Codex work in this reposi
 ## Module Names
 
 - When the user says `后台`, work in `src/`.
-- When the user says `客户端` or `用户端`, work in `miniapp-candidate/`.
+- When the user says `客户端` or `用户端`, work in `miniapp-candidate/`（微信小程序）或 `web-candidate/`（PC/H5 浏览器版）。
 - When the user says `服务端`, `api`, or `接口`, work in `server/`.
 
 Keep answers and edits scoped to the named module unless the user explicitly asks to cross module boundaries.
 
 ## Environment Definitions
 
-For this project, "local environment" means the developer/admin app running from the local checkout while using the development database on host `100.79.134.17`. That database host is reachable through the `company-mac-ssh` MCP target when remote inspection or repair is needed. Do not reinterpret "local environment" as `127.0.0.1` MySQL unless the user explicitly says to use a truly localhost database.
+For this project, "local environment" means the developer/admin app running from the local checkout while using MySQL and Redis on the local machine (`127.0.0.1`). Do not point local `.env` at the production database.
 
-"Production" or "online environment" means the target service reachable through the `server-doctor-ssh` MCP target. The production project path is `/opt/AI-Recruit`.
+"Production" or "online environment" means the target service and its database reachable through the `server-doctor-ssh` MCP target. The production project path is `/opt/AI-Recruit`.
 
 ## Local Restart Discipline
 
