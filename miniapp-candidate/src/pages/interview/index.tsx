@@ -596,8 +596,12 @@ export default function InterviewPage() {
      * WechatSI 单次 start 最长 duration（默认 60s）到点会 onStop。
      * 同题续录时必须 preserveAccumulated，否则门控里清空 finalized 会导致「答到一分钟字全没了」。
      */
-    const openRecognition = (sidInner: string, opts?: { preserveAccumulated?: boolean }) => {
+    const openRecognition = (
+      sidInner: string,
+      opts?: { preserveAccumulated?: boolean; resumeAfterTts?: boolean }
+    ) => {
       const preserveAccumulated = Boolean(opts?.preserveAccumulated)
+      const resumeAfterTts = Boolean(opts?.resumeAfterTts)
       const normalizeText = (v: string) => String(v || '').replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').toLowerCase()
       const longestCommonSubstringLen = (a: string, b: string) => {
         if (!a || !b) return 0
@@ -667,6 +671,12 @@ export default function InterviewPage() {
             answerPhaseGateTimerRef.current = null
           }
           answerTranscriptOpenRef.current = false
+        } else if (resumeAfterTts) {
+          if (answerPhaseGateTimerRef.current) {
+            clearTimeout(answerPhaseGateTimerRef.current)
+            answerPhaseGateTimerRef.current = null
+          }
+          setShowAnswerTranscript(true)
         } else {
           closeAnswerTranscriptDisplay()
         }
@@ -794,8 +804,7 @@ export default function InterviewPage() {
         }
         const startOpts = { lang: 'zh_CN', duration: 60000 }
         manager.start(startOpts)
-        // 极短冷却：读题结束后主要靠 questionTtsPlayingRef + 短 ignore 窗防回声，避免“慢半拍”。
-        const gateDelayMs = 220
+        const gateDelayMs = resumeAfterTts ? 80 : 220
         answerTranscriptOpenRef.current = false
         answerPhaseGateTimerRef.current = setTimeout(() => {
           answerPhaseGateTimerRef.current = null
@@ -841,7 +850,7 @@ export default function InterviewPage() {
       }
       answerTranscriptOpenRef.current = true
       setShowAnswerTranscript(true)
-      setTimeout(() => openRecognition(sidInner), 120)
+      openRecognition(sidInner, { resumeAfterTts: true })
     }
 
     const playTtsThenResume = (sidInner: string, ttsRaw: string) => {
@@ -873,10 +882,6 @@ export default function InterviewPage() {
       setTranscriptStreaming('')
       latestLiveTranscriptSyncRef.current = ''
       const ttsText = String(ttsRaw || '').trim()
-      const ttsStartAt = Date.now()
-      // 兜底屏蔽时长只防异常早结束；主要防护靠读题前硬停识别和开头回声相似度过滤。
-      const minTtsCoverMs = Math.max(1800, Math.min(8000, ttsText.length * 70 + 1000))
-      ignoreRecognizeBeforeTsRef.current = ttsStartAt + minTtsCoverMs
       let prebuilt: string | undefined
       if (pendingUsePrefetchedFirstTtsRef.current && questionIndexRef.current === 0) {
         pendingUsePrefetchedFirstTtsRef.current = false
@@ -895,26 +900,16 @@ export default function InterviewPage() {
           },
           prebuiltFilename: prebuilt
         },
-        () => {
-          if (questionIndexRef.current === 0 && questionTtsPlayingRef.current) {
+        (result) => {
+          // 音频已播完：立刻开麦，不再按题目长度额外 hold（否则候选人开口时转写未启动）
+          resetAnswerPhaseAvatar()
+          questionTtsPlayingRef.current = false
+          ignoreRecognizeBeforeTsRef.current = Date.now() + 250
+          setTranscriptStreaming('')
+          resumeAnswerAfterQuestionTts(sidInner)
+          if (questionIndexRef.current === 0 && !result.heardAudio) {
             firstQuestionNeedsTapRetryRef.current = true
             setCallStatusLine('自动读题失败，请点击页面任意位置后重试')
-          }
-          // 播报一结束立刻停开场 MP4，回到 PNG（不等 holdMs）
-          resetAnswerPhaseAvatar()
-          const elapsed = Date.now() - ttsStartAt
-          const holdMs = Math.max(0, minTtsCoverMs - elapsed)
-          const releaseTtsAndResume = () => {
-            questionTtsPlayingRef.current = false
-            // 短冷却避免读题尾音进框，同时尽量不吞候选人开头作答。
-            ignoreRecognizeBeforeTsRef.current = Date.now() + 360
-            setTranscriptStreaming('')
-            setTimeout(() => resumeAnswerAfterQuestionTts(sidInner), 60)
-          }
-          if (holdMs <= 0) {
-            releaseTtsAndResume()
-          } else {
-            setTimeout(releaseTtsAndResume, holdMs)
           }
         }
       )
@@ -1251,6 +1246,9 @@ export default function InterviewPage() {
       pendingTtsAfterStopRef.current = followUp.text
       setCallStatusLine('面试官有一则追问，请听题后补充作答')
       setIndex(nextIdx)
+      // 同步 ref：否则 force 重启转写/读题时 questionIndex 仍指上一题，回声过滤会拿错题干
+      questionListRef.current = nextQuestions
+      questionIndexRef.current = nextIdx
       void startWechatSiTranscribe(sessionId, true)
       return
     }
@@ -1262,6 +1260,8 @@ export default function InterviewPage() {
       setDigitalHumanMode('idle')
       pendingTtsAfterStopRef.current = questions[nextIdx]?.text ?? ''
       setIndex(nextIdx)
+      questionListRef.current = questions
+      questionIndexRef.current = nextIdx
       void startWechatSiTranscribe(sessionId, true)
       return
     }

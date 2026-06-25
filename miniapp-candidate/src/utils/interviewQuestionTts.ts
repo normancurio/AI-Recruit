@@ -17,6 +17,8 @@ function setInnerAudioObeyMuteSwitch(ctx: Taro.InnerAudioContext) {
   }
 }
 
+export type TtsPlayResult = { heardAudio: boolean }
+
 type TtsPlayOpts = {
   requirePlugin: RequirePluginFn
   audioRef: { current: Taro.InnerAudioContext | null }
@@ -81,7 +83,7 @@ export function prefetchInterviewQuestionTtsPath(
 function playInnerAudioFromTtsFile(
   filename: string,
   opts: TtsPlayOpts,
-  onDone: () => void,
+  onDone: (result: TtsPlayResult) => void,
   isRetry: boolean,
   /** 预生成文件 play 失败时改走完整 textToSpeech（仍可能受异步限制） */
   fallbackTextToSpeech: () => void
@@ -106,7 +108,7 @@ function playInnerAudioFromTtsFile(
   let settled = false
   let hasPlayed = false
   let playErrorRetryTimer: ReturnType<typeof setTimeout> | null = null
-  const finish = (statusLine: string) => {
+  const finish = (statusLine: string, heardAudio: boolean) => {
     if (settled) return
     settled = true
     if (playErrorRetryTimer) {
@@ -117,7 +119,7 @@ function playInnerAudioFromTtsFile(
     ctx?.offError(onErr)
     ctx?.offPlay(onPlay)
     opts.onStatus?.(statusLine)
-    onDone()
+    onDone({ heardAudio })
   }
   const onPlay = () => {
     hasPlayed = true
@@ -132,7 +134,7 @@ function playInnerAudioFromTtsFile(
     }
   }
   const onEnd = () => {
-    finish('请口述您的回答')
+    finish('请口述您的回答', true)
   }
   const onErr = () => {
     if (playErrorRetryTimer) {
@@ -148,7 +150,7 @@ function playInnerAudioFromTtsFile(
       fallbackTextToSpeech()
       return
     }
-    finish('请口述您的回答')
+    finish('请口述您的回答', hasPlayed)
   }
   ctx.offEnded()
   ctx.offError()
@@ -168,7 +170,7 @@ function playInnerAudioFromTtsFile(
         setTimeout(() => playInnerAudioFromTtsFile(filename, opts, onDone, true, fallbackTextToSpeech), 120)
       } else {
         opts.onStatus?.('请口述您的回答')
-        onDone()
+        onDone({ heardAudio: false })
       }
     }
   }, 2200)
@@ -199,11 +201,11 @@ export function playInterviewQuestionTts(
      */
     prebuiltFilename?: string
   },
-  onDone: () => void
+  onDone: (result: TtsPlayResult) => void
 ): void {
   const text = String(rawText || '').trim()
   if (!text) {
-    onDone()
+    onDone({ heardAudio: false })
     return
   }
   opts.onStatus?.('AI 面试官读题中…')
@@ -214,7 +216,7 @@ export function playInterviewQuestionTts(
       if (typeof plugin?.textToSpeech !== 'function') {
         opts.onStatus?.('当前环境不支持语音读题，请阅读文字')
         flowLog('面试读题 TTS', false, 'textToSpeech 不可用')
-        onDone()
+        onDone({ heardAudio: false })
         return
       }
       const safe = text.slice(0, 450)
@@ -230,7 +232,7 @@ export function playInterviewQuestionTts(
               return
             }
             opts.onStatus?.('读题音频生成失败，请阅读文字')
-            onDone()
+            onDone({ heardAudio: false })
             return
           }
           playInnerAudioFromTtsFile(
@@ -248,7 +250,7 @@ export function playInterviewQuestionTts(
             return
           }
           opts.onStatus?.('请口述您的回答')
-          onDone()
+          onDone({ heardAudio: false })
         }
       })
     } catch (e) {
@@ -258,7 +260,7 @@ export function playInterviewQuestionTts(
         return
       }
       opts.onStatus?.('请口述您的回答')
-      onDone()
+      onDone({ heardAudio: false })
     }
   }
 

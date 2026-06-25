@@ -1696,29 +1696,57 @@ function ensureInterviewReportSessionId(jobId: string, sessionId: string): strin
   return `SUBMIT-${jc}-${rand}`.slice(0, 128)
 }
 
+async function getResumeScreeningIdFromSession(externalSessionId: string): Promise<number | null> {
+  const sid = String(externalSessionId || '').trim()
+  if (!sid) return null
+  try {
+    const [rows] = await mysqlPool.query<any[]>(
+      `SELECT i.resume_screening_id
+       FROM interview_sessions s
+       INNER JOIN interview_invitations i ON i.id = s.invitation_id
+       WHERE s.session_id = ? AND i.resume_screening_id IS NOT NULL
+       LIMIT 1`,
+      [sid]
+    )
+    const raw = rows[0]?.resume_screening_id
+    const n = Number(raw)
+    return Number.isFinite(n) && n > 0 ? n : null
+  } catch {
+    return null
+  }
+}
+
 async function markResumeScreeningPipelineReportDone(
   jobCode: string,
   candidateName: string,
-  candidatePhone?: string
+  candidatePhone?: string,
+  sessionId?: string
 ) {
   const jc = String(jobCode || '').trim()
   const cn = String(candidateName || '').trim()
   const cp = normalizeCnMobile(String(candidatePhone || '').trim())
-  if (!jc || (!cn && !cp)) return
+  if (!jc && !cn && !cp && !sessionId) return
   try {
-    if (cp) {
-      await mysqlPool.query(
+    const screeningId = await getResumeScreeningIdFromSession(String(sessionId || ''))
+    if (screeningId) {
+      await mysqlPool.query(`UPDATE resume_screenings SET pipeline_stage = 'report_done' WHERE id = ?`, [screeningId])
+      return
+    }
+    if (jc && cp) {
+      const [result] = await mysqlPool.query<any>(
         `UPDATE resume_screenings SET pipeline_stage = 'report_done'
          WHERE UPPER(TRIM(job_code)) = UPPER(?) AND TRIM(candidate_phone) = TRIM(?)`,
         [jc, cp]
       )
-      return
+      if ((result as { affectedRows?: number }).affectedRows) return
     }
-    await mysqlPool.query(
-      `UPDATE resume_screenings SET pipeline_stage = 'report_done'
-       WHERE UPPER(TRIM(job_code)) = UPPER(?) AND TRIM(candidate_name) = TRIM(?)`,
-      [jc, cn]
-    )
+    if (jc && cn) {
+      await mysqlPool.query(
+        `UPDATE resume_screenings SET pipeline_stage = 'report_done'
+         WHERE UPPER(TRIM(job_code)) = UPPER(?) AND TRIM(candidate_name) = TRIM(?)`,
+        [jc, cn]
+      )
+    }
   } catch (e: unknown) {
     const err = e as { errno?: number; code?: string; sqlMessage?: string }
     if (
@@ -1816,7 +1844,12 @@ async function upsertInterviewReport(payload: InterviewReportPayload) {
       ]
     )
   }
-  await markResumeScreeningPipelineReportDone(payload.jobCode, payload.candidateName, normalizedPhone || undefined)
+  await markResumeScreeningPipelineReportDone(
+    payload.jobCode,
+    payload.candidateName,
+    normalizedPhone || undefined,
+    payload.sessionId
+  )
 }
 
 type ResumeScreeningAiResult = {
@@ -6508,7 +6541,7 @@ function assertDashScopeForInterview(): { apiKey: string; model: string } {
     if (flowLogEnabled) flowLog('interview-questions AI', false, '未配置 DASHSCOPE_API_KEY')
     throwInterviewQuestionsHttp(503, '未配置大模型密钥（DASHSCOPE_API_KEY），面试题仅由模型生成')
   }
-  const model = process.env.QWEN_QUESTION_MODEL || 'qwen3.6-flash-2026-04-16'
+  const model = resolveQwenQuestionModel()
   return { apiKey, model }
 }
 
@@ -6958,6 +6991,27 @@ async function bindUserPhoneAndRole(params: { appid: string; openid: string; pho
   const nextRole: UserRole = (await isInterviewerPhone(phone)) ? 'interviewer' : 'candidate'
   await mysqlPool.query('UPDATE users SET phone=?, role=?, updated_at=NOW() WHERE id=?', [phone, nextRole, me.userId])
   return { role: nextRole, phone }
+}
+
+function resolveQwenQuestionModel(): string {
+  return process.env.QWEN_QUESTION_MODEL?.trim() || 'qwen-turbo'
+}
+
+/** 面试提交评分专用；与出题模型分离，默认较快模型避免提交超时 */
+function resolveQwenSubmitInterviewModel(): string {
+  return process.env.QWEN_SUBMIT_INTERVIEW_MODEL?.trim() || 'qwen-turbo'
+}
+
+function interviewSubmitAiTimeoutMs(): number {
+  return Math.max(30_000, Number(process.env.QWEN_SUBMIT_INTERVIEW_TIMEOUT_MS) || 90_000)
+}
+
+function trimInterviewSubmitTranscriptTimeline<T extends { ts: number; text: string }>(
+  rows: T[],
+  maxItems = 80
+): T[] {
+  if (rows.length <= maxItems) return rows
+  return rows.slice(-maxItems)
 }
 
 async function getSessionInternalId(sessionId: string): Promise<number | null> {
@@ -12819,11 +12873,11 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
           `SELECT message_type, content, created_at
            FROM interview_messages
            WHERE session_id=?
-           ORDER BY created_at ASC
+           ORDER BY created_at DESC
            LIMIT 400`,
           [sid]
         )
-        for (const m of msgRows) {
+        for (const m of [...msgRows].reverse()) {
           if (m.message_type === 'transcript') {
             transcriptTimeline.push({
               ts: new Date(m.created_at).getTime(),
@@ -12869,6 +12923,8 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
         mergedQa.length > 0 ? Number((mergedQa.filter((x) => x.answer.trim().length < 12).length / mergedQa.length).toFixed(3)) : 1
     }
 
+    const transcriptForAi = trimInterviewSubmitTranscriptTimeline(transcriptTimeline)
+
 	    const promptPayload = {
 	      aiInterviewer: {
 	        name: promptTemplate?.name || BUILTIN_INTERVIEW_PROMPT_TEMPLATE_NAME,
@@ -12883,11 +12939,11 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
       jobId,
       sessionId,
       questionsAndAnswers: mergedQa,
-      transcriptTimeline,
+      transcriptTimeline: transcriptForAi,
       behaviorSignals
     }
 
-    const model = process.env.QWEN_QUESTION_MODEL || 'qwen3.6-flash-2026-04-16'
+    const model = resolveQwenSubmitInterviewModel()
 	    const data = await dashScopeChatCompletions({
 	      model,
 	      messages: [
@@ -12920,7 +12976,7 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
         }
       ],
       temperature: 0.2
-    })
+    }, { timeoutMs: interviewSubmitAiTimeoutMs() })
     const raw = data?.choices?.[0]?.message?.content
     const text = typeof raw === 'string' ? raw : ''
     const parsed = parseAiInterviewScoreJson(text)
