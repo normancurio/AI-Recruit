@@ -503,7 +503,7 @@ export async function submitInterview(
   const res = await Taro.request<{ data: InterviewResult }>({
     url: `${getApiBase()}/api/candidate/submit-interview`,
     method: 'POST',
-    timeout: 180_000,
+    timeout: 60_000,
     data: { profile, jobId, answers, sessionId: sessionId || '' }
   })
 

@@ -10983,9 +10983,12 @@ function ApplicationManagementView({
   const handleOpenInterviewReport = async (row: { id: string; candidateName: string; jobCode: string }) => {
     setReportLoadingId(row.id)
     try {
-      const r = await miniappApiFetch(`/api/admin/interview-report?screeningId=${encodeURIComponent(row.id)}`)
+      const r = await miniappApiFetch(
+        `/api/admin/interview-report/score?screeningId=${encodeURIComponent(row.id)}`,
+        { method: 'POST' }
+      )
       const j = (await r.json()) as { data?: Record<string, unknown>; message?: string }
-      if (!r.ok) throw adminJsonFailError(r, j, '加载失败')
+      if (!r.ok) throw adminJsonFailError(r, j, '评分失败')
       if (!j.data) throw adminJsonFailError(r, j, '未返回报告数据')
       const d = j.data
       setReportModal({
@@ -11001,10 +11004,11 @@ function ApplicationManagementView({
         qa: Array.isArray(d.qa) ? (d.qa as Array<{ questionId?: string; question?: string; answer?: string }>) : [],
         updatedAt: String(d.updatedAt || '')
       })
+      loadRows()
     } catch (e) {
       setAppAdminMsg({
-        title: '加载失败',
-        message: userFacingApiError(e, '加载面试报告失败')
+        title: '评分失败',
+        message: userFacingApiError(e, '面试报告评分失败，请稍后重试')
       })
     } finally {
       setReportLoadingId(null)
@@ -11293,7 +11297,7 @@ function ApplicationManagementView({
                         }`}
                       >
                         {reportLoadingId === row.id && row.hasInterviewReport
-                          ? '加载中…'
+                          ? '评分中…'
                           : row.hasInterviewReport
                             ? '查看'
                             : '暂无'}

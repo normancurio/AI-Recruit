@@ -249,7 +249,7 @@ export async function submitInterview(
   sessionId?: string
 ): Promise<InterviewResult> {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 120_000)
+  const timer = setTimeout(() => controller.abort(), 60_000)
   try {
     return await apiPostData<InterviewResult>('/api/candidate/submit-interview', {
       profile,

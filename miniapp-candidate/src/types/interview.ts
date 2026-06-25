@@ -1,3 +1,6 @@
+/** 与 server PERSONALIZED_INTERVIEW_TOTAL 一致 */
+export const INTERVIEW_MAIN_QUESTION_TOTAL = 6
+
 export interface CandidateProfile {
   name: string
   /** 可选；未绑定时可为空字符串 */
