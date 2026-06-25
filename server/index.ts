@@ -3627,6 +3627,31 @@ function resumeAiTimeoutMs(): number {
   return 90000
 }
 
+function submitInterviewAiTimeoutMs(): number {
+  const n = Number(process.env.QWEN_SUBMIT_INTERVIEW_TIMEOUT_MS)
+  if (Number.isFinite(n) && n >= 10000) return Math.min(120000, Math.floor(n))
+  return 48000
+}
+
+/** 提交评分时截断转写时间线，避免 prompt 过大导致模型超时 */
+function trimInterviewTranscriptForScore<T extends { text?: string }>(
+  items: T[],
+  maxItems = 80,
+  maxChars = 12000
+): T[] {
+  if (!items.length) return items
+  const tail = items.slice(-Math.max(1, maxItems))
+  let total = 0
+  const out: T[] = []
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const len = String(tail[i].text || '').length
+    if (out.length > 0 && total + len > maxChars) break
+    total += len
+    out.unshift(tail[i])
+  }
+  return out.length ? out : tail.slice(-1)
+}
+
 function resumeAiMaxTokens(): number {
   const n = Number(process.env.RESUME_AI_MAX_TOKENS)
   if (Number.isFinite(n) && n >= 800) return Math.min(4096, Math.floor(n))
@@ -12771,6 +12796,45 @@ app.get('/api/live/session/state', async (req, res) => {
   }
 })
 
+app.get('/api/candidate/interview-submit-status', async (req, res) => {
+  const sessionId = String(req.query.sessionId || '').trim().slice(0, 128)
+  if (!sessionId) return res.status(400).json({ message: '请提供 sessionId' })
+  try {
+    const [rows] = await mysqlPool.query<any[]>(
+      `SELECT overall_score, passed, overall_feedback, dimension_scores, suggestions, risk_points
+       FROM interview_reports
+       WHERE session_id=?
+       LIMIT 1`,
+      [sessionId]
+    )
+    if (!rows.length) return res.json({ data: { submitted: false } })
+    const r = rows[0]
+    const parseJsonField = (v: unknown) => {
+      try {
+        return v && String(v).trim() ? JSON.parse(String(v)) : undefined
+      } catch {
+        return undefined
+      }
+    }
+    return res.json({
+      data: {
+        submitted: true,
+        result: {
+          score: Number(r.overall_score) || 0,
+          passed: Boolean(r.passed),
+          overallFeedback: String(r.overall_feedback || ''),
+          dimensionScores: (parseJsonField(r.dimension_scores) as Record<string, number>) || {},
+          suggestions: (parseJsonField(r.suggestions) as string[]) || [],
+          riskPoints: (parseJsonField(r.risk_points) as string[]) || []
+        }
+      }
+    })
+  } catch (e) {
+    flowLog('interview-submit-status', false, e instanceof Error ? e.message : 'unknown')
+    return res.status(500).json({ message: '查询提交状态失败' })
+  }
+})
+
 app.post('/api/candidate/submit-interview', async (req, res) => {
   const profile = (req.body?.profile || {}) as { name?: string; phone?: string; openid?: string }
   const jobId = String(req.body?.jobId || '').trim().toUpperCase()
@@ -12869,6 +12933,8 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
         mergedQa.length > 0 ? Number((mergedQa.filter((x) => x.answer.trim().length < 12).length / mergedQa.length).toFixed(3)) : 1
     }
 
+    const transcriptForAi = trimInterviewTranscriptForScore(transcriptTimeline)
+
 	    const promptPayload = {
 	      aiInterviewer: {
 	        name: promptTemplate?.name || BUILTIN_INTERVIEW_PROMPT_TEMPLATE_NAME,
@@ -12883,13 +12949,18 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
       jobId,
       sessionId,
       questionsAndAnswers: mergedQa,
-      transcriptTimeline,
-      behaviorSignals
+      transcriptTimeline: transcriptForAi,
+      behaviorSignals: {
+        ...behaviorSignals,
+        transcriptTimelineTotal: transcriptTimeline.length,
+        transcriptTimelineForAi: transcriptForAi.length
+      }
     }
 
     const model = process.env.QWEN_QUESTION_MODEL || 'qwen3.6-flash-2026-04-16'
 	    const data = await dashScopeChatCompletions({
 	      model,
+	      max_tokens: 1400,
 	      messages: [
 		        {
 		          role: 'system',
@@ -12920,7 +12991,7 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
         }
       ],
       temperature: 0.2
-    })
+    }, { timeoutMs: submitInterviewAiTimeoutMs() })
     const raw = data?.choices?.[0]?.message?.content
     const text = typeof raw === 'string' ? raw : ''
     const parsed = parseAiInterviewScoreJson(text)

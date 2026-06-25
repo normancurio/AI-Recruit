@@ -22,9 +22,11 @@ import {
   fetchInterviewQuestionsOrPrefetched,
   fetchPreparedFollowUp,
   fetchTrtcCredential,
+  fetchInterviewSubmitStatus,
   startLiveSession,
   submitInterview,
   syncLiveQa,
+  waitForInterviewQuestionsPrefetch,
   syncLiveTranscript,
   syncTrtcRoomSignal,
   type InterviewFollowUpConfig,
@@ -1226,13 +1228,18 @@ export default function InterviewPage() {
   const handleNext = async () => {
     if (!current || !canNext || !profile || !job) return
 
+    setLoading(true)
     cancelTranscriptRemoteDebounce()
     pushTranscriptRemoteNow(sessionId, composedAnswer)
 
     const currentQa = { questionId: current.id, question: current.text, answer: composedAnswer }
     const nextAnswers = [...answers, currentQa]
     setAnswers(nextAnswers)
-    await syncLiveQa({ sessionId, ...currentQa })
+    try {
+      await syncLiveQa({ sessionId, ...currentQa })
+    } catch {
+      /* 同步失败不阻断提交 */
+    }
     transcriptFinalizedRef.current = []
     setTranscriptFinalized([])
     setTranscriptStreaming('')
@@ -1251,27 +1258,75 @@ export default function InterviewPage() {
       pendingTtsAfterStopRef.current = followUp.text
       setCallStatusLine('面试官有一则追问，请听题后补充作答')
       setIndex(nextIdx)
+      setLoading(false)
       void startWechatSiTranscribe(sessionId, true)
       return
     }
 
-    if (!isLast) {
+    let atLast =
+      questionListRef.current.length > 0 &&
+      questionIndexRef.current >= questionListRef.current.length - 1
+
+    if (atLast && questionListRef.current.length < 6) {
+      setCallStatusLine('正在确认是否还有题目…')
+      try {
+        const merged = await waitForInterviewQuestionsPrefetch(job.id, profile.name, profile.resumeScreeningId, {
+          timeoutMs: 6000,
+          inviteCode: profile.inviteCode,
+          sessionId
+        })
+        const cleaned = merged.filter((q) => q && String(q.text || '').trim())
+        if (cleaned.length > questionListRef.current.length) {
+          setQuestions(cleaned)
+          const nextIdx = questionIndexRef.current + 1
+          closeAnswerTranscriptDisplay()
+          ummAvatarActivatedRef.current = false
+          setDigitalHumanMode('idle')
+          pendingTtsAfterStopRef.current = cleaned[nextIdx]?.text ?? ''
+          setCallStatusLine('请听下一题')
+          setIndex(nextIdx)
+          setLoading(false)
+          void startWechatSiTranscribe(sessionId, true)
+          return
+        }
+      } catch {
+        /* 确认失败则按当前题序继续 */
+      }
+      atLast =
+        questionListRef.current.length > 0 &&
+        questionIndexRef.current >= questionListRef.current.length - 1
+    }
+
+    if (!atLast) {
       const nextIdx = index + 1
       closeAnswerTranscriptDisplay()
       ummAvatarActivatedRef.current = false
       setDigitalHumanMode('idle')
       pendingTtsAfterStopRef.current = questions[nextIdx]?.text ?? ''
       setIndex(nextIdx)
+      setLoading(false)
       void startWechatSiTranscribe(sessionId, true)
       return
     }
 
     try {
-      setLoading(true)
+      setCallStatusLine('正在提交面试，请稍候…')
       const result = await submitInterview(profile, job.id, nextAnswers, sessionId)
       Taro.setStorageSync('interview_result', result)
       Taro.redirectTo({ url: '/pages/result/index' })
-    } catch (e) {
+    } catch {
+      if (sessionId) {
+        try {
+          const status = await fetchInterviewSubmitStatus(sessionId)
+          if (status.submitted && status.result) {
+            Taro.setStorageSync('interview_result', status.result)
+            Taro.redirectTo({ url: '/pages/result/index' })
+            return
+          }
+        } catch {
+          /* ignore */
+        }
+      }
       Taro.showToast({ title: '提交失败，请重试', icon: 'none' })
     } finally {
       setLoading(false)

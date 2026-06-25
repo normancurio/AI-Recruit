@@ -248,10 +248,33 @@ export async function submitInterview(
   answers: InterviewAnswer[],
   sessionId?: string
 ): Promise<InterviewResult> {
-  return apiPostData<InterviewResult>('/api/candidate/submit-interview', {
-    profile,
-    jobId,
-    answers,
-    sessionId: sessionId || ''
-  })
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 120_000)
+  try {
+    return await apiPostData<InterviewResult>('/api/candidate/submit-interview', {
+      profile,
+      jobId,
+      answers,
+      sessionId: sessionId || ''
+    }, { signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export async function fetchInterviewSubmitStatus(sessionId: string): Promise<{
+  submitted: boolean
+  result?: InterviewResult
+}> {
+  if (!sessionId) return { submitted: false }
+  try {
+    const data = await apiGetData<{ submitted?: boolean; result?: InterviewResult }>(
+      '/api/candidate/interview-submit-status',
+      { sessionId }
+    )
+    if (!data?.submitted || !data.result) return { submitted: false }
+    return { submitted: true, result: data.result }
+  } catch {
+    return { submitted: false }
+  }
 }

@@ -503,6 +503,7 @@ export async function submitInterview(
   const res = await Taro.request<{ data: InterviewResult }>({
     url: `${getApiBase()}/api/candidate/submit-interview`,
     method: 'POST',
+    timeout: 120_000,
     data: { profile, jobId, answers, sessionId: sessionId || '' }
   })
 
@@ -510,6 +511,27 @@ export async function submitInterview(
     throw new Error('提交面试失败')
   }
   return res.data.data
+}
+
+/** 提交超时或网络失败时，查询服务端是否已落库报告 */
+export async function fetchInterviewSubmitStatus(sessionId: string): Promise<{
+  submitted: boolean
+  result?: InterviewResult
+}> {
+  if (useMock() || !sessionId) return { submitted: false }
+  const res = await Taro.request<{
+    data?: { submitted?: boolean; result?: InterviewResult }
+    message?: string
+  }>({
+    url: `${getApiBase()}/api/candidate/interview-submit-status`,
+    method: 'GET',
+    timeout: 15_000,
+    data: { sessionId }
+  })
+  if (res.statusCode >= 400) return { submitted: false }
+  const payload = res.data?.data
+  if (!payload?.submitted || !payload.result) return { submitted: false }
+  return { submitted: true, result: payload.result }
 }
 
 export async function startLiveSession(params: {
