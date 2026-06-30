@@ -6040,6 +6040,112 @@ function interviewReportDimensionLabelCn(key: string): string {
   return map[k] || k
 }
 
+type InterviewReportQaItem = { questionId?: string; question?: string; answer?: string }
+
+type GroupedInterviewReportQa = {
+  mainId: string
+  mainOrdinal: number
+  mainQuestion: string
+  mainAnswer: string
+  followUps: Array<{ id: string; question: string; answer: string }>
+}
+
+function isInterviewFollowUpQuestionId(id: string): boolean {
+  return /^FU-/i.test(String(id || '').trim())
+}
+
+function parentMainQuestionIdFromFollowUp(id: string): string {
+  const m = String(id || '').trim().match(/^FU-(Q\d+)/i)
+  return m ? m[1].toUpperCase() : ''
+}
+
+function mainQuestionOrdinalFromId(id: string, fallback: number): number {
+  const m = String(id || '').trim().match(/^Q(\d+)/i)
+  const n = m ? Number(m[1]) : NaN
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
+/** 将 flat qa 按主题 + 追问分组，便于报告展示 */
+function groupInterviewReportQa(qa: InterviewReportQaItem[]): GroupedInterviewReportQa[] {
+  const groups: GroupedInterviewReportQa[] = []
+  const mainById = new Map<string, GroupedInterviewReportQa>()
+  const pendingFollowUps: Array<{ id: string; question: string; answer: string; parentId: string }> = []
+
+  for (const item of qa) {
+    const id = String(item.questionId || '').trim()
+    const question = String(item.question || '').trim()
+    const answer = String(item.answer || '').trim()
+    if (!id && !question && !answer) continue
+
+    if (isInterviewFollowUpQuestionId(id)) {
+      pendingFollowUps.push({
+        id: id || 'FU',
+        question,
+        answer,
+        parentId: parentMainQuestionIdFromFollowUp(id)
+      })
+      continue
+    }
+
+    const mainId = id || `Q${groups.length + 1}`
+    const entry: GroupedInterviewReportQa = {
+      mainId,
+      mainOrdinal: mainQuestionOrdinalFromId(mainId, groups.length + 1),
+      mainQuestion: question,
+      mainAnswer: answer,
+      followUps: []
+    }
+    groups.push(entry)
+    if (/^Q\d+/i.test(mainId)) mainById.set(mainId.toUpperCase(), entry)
+  }
+
+  for (const fu of pendingFollowUps) {
+    const parent = fu.parentId ? mainById.get(fu.parentId.toUpperCase()) : undefined
+    if (parent) {
+      parent.followUps.push({ id: fu.id, question: fu.question, answer: fu.answer })
+    } else {
+      groups.push({
+        mainId: fu.parentId || fu.id,
+        mainOrdinal: groups.length + 1,
+        mainQuestion: '（主题干未同步，仅记录追问）',
+        mainAnswer: '',
+        followUps: [{ id: fu.id, question: fu.question, answer: fu.answer }]
+      })
+    }
+  }
+
+  groups.sort((a, b) => a.mainOrdinal - b.mainOrdinal || a.mainId.localeCompare(b.mainId))
+  return groups
+}
+
+function renderGroupedInterviewReportQaHtml(
+  qa: InterviewReportQaItem[],
+  esc: (s: string) => string
+): string {
+  const groups = groupInterviewReportQa(qa)
+  if (!groups.length) return '<p>暂无答题明细</p>'
+  return groups
+    .map((g) => {
+      const followHtml = g.followUps
+        .map(
+          (fu, fuIdx) =>
+            `<div style="margin: 10px 0 0 12px; padding: 8px 10px; border-left: 3px solid #f59e0b; background: #fffbeb;">
+              <p style="margin: 0 0 4px 0; font-size: 13px; color: #b45309;"><strong>追加追问 ${fuIdx + 1}</strong>${fu.id ? ` · ${esc(fu.id)}` : ''}</p>
+              <p style="margin: 0 0 4px 0;"><strong>Q：</strong>${esc(fu.question || '—')}</p>
+              <p style="margin: 0;"><strong>A：</strong>${esc(fu.answer || '（无作答）').replace(/\n/g, '<br/>')}</p>
+            </div>`
+        )
+        .join('')
+      return `<div style="margin: 0 0 12px 0; padding: 10px; border: 1px solid #e5e7eb; border-radius: 6px;">
+        <p style="margin: 0 0 6px 0;"><strong>第 ${g.mainOrdinal} 题 · ${esc(g.mainId)}</strong></p>
+        <p style="margin: 0 0 6px 0;"><strong>题目：</strong>${esc(g.mainQuestion || '—')}</p>
+        <p style="margin: 0;"><strong>作答：</strong>${esc(g.mainAnswer || '（无作答）').replace(/\n/g, '<br/>')}</p>
+        ${followHtml}
+      </div>`
+    })
+    .join('')
+}
+
 function resumeEvalDimensionLabelCn(key: string): string {
   const k = String(key || '').trim()
   const map: Record<string, string> = {
@@ -10838,6 +10944,10 @@ function ApplicationManagementView({
     updatedAt: string
   }>(null)
   const [appAdminMsg, setAppAdminMsg] = useState<null | { title: string; message: string }>(null)
+  const groupedReportQa = useMemo(
+    () => groupInterviewReportQa(reportModal?.qa ?? []),
+    [reportModal]
+  )
   useAdminOverlayLockAndEscape(Boolean(reportModal), () => setReportModal(null))
   const [appListPage, setAppListPage] = useState(1)
   const [appPageSize, setAppPageSize] = useState(10)
@@ -10983,9 +11093,12 @@ function ApplicationManagementView({
   const handleOpenInterviewReport = async (row: { id: string; candidateName: string; jobCode: string }) => {
     setReportLoadingId(row.id)
     try {
-      const r = await miniappApiFetch(`/api/admin/interview-report?screeningId=${encodeURIComponent(row.id)}`)
+      const r = await miniappApiFetch(
+        `/api/admin/interview-report/score?screeningId=${encodeURIComponent(row.id)}`,
+        { method: 'POST' }
+      )
       const j = (await r.json()) as { data?: Record<string, unknown>; message?: string }
-      if (!r.ok) throw adminJsonFailError(r, j, '加载失败')
+      if (!r.ok) throw adminJsonFailError(r, j, '评分失败')
       if (!j.data) throw adminJsonFailError(r, j, '未返回报告数据')
       const d = j.data
       setReportModal({
@@ -11001,10 +11114,11 @@ function ApplicationManagementView({
         qa: Array.isArray(d.qa) ? (d.qa as Array<{ questionId?: string; question?: string; answer?: string }>) : [],
         updatedAt: String(d.updatedAt || '')
       })
+      loadRows()
     } catch (e) {
       setAppAdminMsg({
-        title: '加载失败',
-        message: userFacingApiError(e, '加载面试报告失败')
+        title: '评分失败',
+        message: userFacingApiError(e, '面试报告评分失败，请稍后重试')
       })
     } finally {
       setReportLoadingId(null)
@@ -11030,18 +11144,7 @@ function ApplicationManagementView({
       (reportModal.riskPoints || []).length > 0
         ? reportModal.riskPoints.map((x) => `<li>${esc(x)}</li>`).join('')
         : '<li>无</li>';
-    const qa =
-      (reportModal.qa || []).length > 0
-        ? reportModal.qa
-            .map(
-              (item, idx) =>
-                `<div style="margin: 0 0 12px 0; padding: 8px; border: 1px solid #e5e7eb; border-radius: 6px;">
-                  <p style="margin: 0 0 6px 0;"><strong>Q${idx + 1}：</strong>${esc(String(item.question || '—'))}</p>
-                  <p style="margin: 0;"><strong>A：</strong>${esc(String(item.answer || '（无作答）')).replace(/\n/g, '<br/>')}</p>
-                </div>`
-            )
-            .join('')
-        : '<p>暂无答题明细</p>';
+    const qa = renderGroupedInterviewReportQaHtml(reportModal.qa || [], esc)
     const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -11293,7 +11396,7 @@ function ApplicationManagementView({
                         }`}
                       >
                         {reportLoadingId === row.id && row.hasInterviewReport
-                          ? '加载中…'
+                          ? '评分中…'
                           : row.hasInterviewReport
                             ? '查看'
                             : '暂无'}
@@ -11387,12 +11490,41 @@ function ApplicationManagementView({
                 </div>
                 <div>
                   <h4 className="text-sm font-semibold text-slate-800 mb-2">答题明细</h4>
-                  <div className="space-y-2">
-                    {(reportModal.qa || []).length ? (
-                      reportModal.qa.map((item, idx) => (
-                        <div key={`${item.questionId || idx}`} className="border border-slate-200 rounded-lg p-3">
-                          <p className="text-sm font-medium text-slate-900">Q{idx + 1}：{String(item.question || '—')}</p>
-                          <p className="text-xs text-slate-600 mt-1 whitespace-pre-wrap">{String(item.answer || '（无作答）')}</p>
+                  <div className="space-y-3">
+                    {groupedReportQa.length ? (
+                      groupedReportQa.map((group) => (
+                        <div key={group.mainId} className="border border-slate-200 rounded-lg p-3 bg-white">
+                          <p className="text-sm font-semibold text-slate-900">
+                            第 {group.mainOrdinal} 题
+                            <span className="ml-2 text-xs font-normal text-slate-500">{group.mainId}</span>
+                          </p>
+                          <p className="text-sm text-slate-800 mt-2">
+                            <span className="text-slate-500">题目：</span>
+                            {String(group.mainQuestion || '—')}
+                          </p>
+                          <p className="text-xs text-slate-600 mt-2 whitespace-pre-wrap">
+                            <span className="text-slate-500">作答：</span>
+                            {String(group.mainAnswer || '（无作答）')}
+                          </p>
+                          {group.followUps.map((fu, fuIdx) => (
+                            <div
+                              key={`${group.mainId}-${fu.id}-${fuIdx}`}
+                              className="mt-3 pl-3 border-l-2 border-amber-400 bg-amber-50/80 rounded-r-lg py-2 pr-2"
+                            >
+                              <p className="text-xs font-semibold text-amber-900">
+                                追加追问 {fuIdx + 1}
+                                {fu.id ? <span className="ml-1 font-normal text-amber-800/80">{fu.id}</span> : null}
+                              </p>
+                              <p className="text-sm text-slate-800 mt-1">
+                                <span className="text-slate-500">题目：</span>
+                                {String(fu.question || '—')}
+                              </p>
+                              <p className="text-xs text-slate-600 mt-1 whitespace-pre-wrap">
+                                <span className="text-slate-500">作答：</span>
+                                {String(fu.answer || '（无作答）')}
+                              </p>
+                            </div>
+                          ))}
                         </div>
                       ))
                     ) : (

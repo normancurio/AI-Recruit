@@ -10,6 +10,7 @@ import {
   fetchInterviewFollowUpConfig,
   fetchInterviewQuestionsOrPrefetched,
   fetchPreparedFollowUp,
+  fetchInterviewSubmitStatus,
   startLiveSession,
   submitInterview,
   syncLiveQa,
@@ -253,6 +254,16 @@ export default function InterviewPage() {
       await stopAll()
       navigate('/result', { replace: true })
     } catch {
+      try {
+        const status = await fetchInterviewSubmitStatus(sessionId)
+        if (status.submitted) {
+          await stopAll()
+          navigate('/result', { replace: true })
+          return
+        }
+      } catch {
+        /* ignore */
+      }
       setStatusLine('提交失败，请重试')
     } finally {
       setLoading(false)

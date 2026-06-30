@@ -1196,6 +1196,38 @@ type AiInterviewScore = {
   riskPoints: string[]
 }
 
+type InterviewSubmitQaItem = { questionId: string; question: string; answer: string }
+
+function mergeInterviewSubmitAnswers(
+  clientAnswers: Array<{ questionId?: string; question?: string; answer?: string }>,
+  serverQa: InterviewSubmitQaItem[]
+): InterviewSubmitQaItem[] {
+  const map = new Map<string, InterviewSubmitQaItem>()
+  const ingest = (item: { questionId?: string; question?: string; answer?: string }) => {
+    const questionId = String(item.questionId || '').trim()
+    if (!questionId) return
+    const answer = String(item.answer || '').trim()
+    const question = String(item.question || '').trim()
+    const prev = map.get(questionId)
+    if (!prev || answer.length >= prev.answer.length) {
+      map.set(questionId, {
+        questionId,
+        question: question || prev?.question || '',
+        answer: answer || prev?.answer || ''
+      })
+    }
+  }
+  for (const item of serverQa) ingest(item)
+  for (const item of clientAnswers) ingest(item)
+  return Array.from(map.values()).sort((a, b) => {
+    const rank = (id: string) => {
+      if (id.startsWith('FU-')) return 1000 + (Number(id.match(/Q(\d+)/)?.[1]) || 0)
+      return Number(id.match(/Q(\d+)/)?.[1]) || 999
+    }
+    return rank(a.questionId) - rank(b.questionId) || a.questionId.localeCompare(b.questionId)
+  })
+}
+
 function parseAiInterviewScoreJson(raw: string): AiInterviewScore | null {
   try {
     const cleaned = raw
@@ -6437,6 +6469,216 @@ function fallbackInterviewScoreForTemplate(
   }
 }
 
+function parseInterviewReportJsonField<T>(v: unknown, fallback: T): T {
+  if (v == null) return fallback
+  if (typeof v === 'object') return v as T
+  try {
+    return JSON.parse(String(v)) as T
+  } catch {
+    return fallback
+  }
+}
+
+async function loadInterviewReportRowByScreeningId(screeningId: number): Promise<{
+  screen: { job_code: string; candidate_name: string; candidate_phone?: string | null }
+  row: Record<string, unknown>
+} | null> {
+  const [screenRows] = await mysqlPool.query<any[]>(
+    'SELECT job_code, candidate_name, candidate_phone FROM resume_screenings WHERE id=? LIMIT 1',
+    [screeningId]
+  )
+  if (!screenRows.length) return null
+  const screen = screenRows[0] as { job_code: string; candidate_name: string; candidate_phone?: string | null }
+  const normalizedPhone = normalizeCnMobile(String(screen.candidate_phone || '').trim())
+  const [repRows] = await mysqlPool.query<any[]>(
+    `SELECT session_id, job_code, candidate_name, candidate_phone, candidate_openid,
+            overall_score, passed, overall_feedback,
+            dimension_scores, suggestions, risk_points, behavior_signals, qa_json, updated_at
+     FROM interview_reports
+     WHERE UPPER(TRIM(job_code)) = UPPER(?)
+       AND (
+         (TRIM(COALESCE(candidate_phone, '')) <> '' AND TRIM(candidate_phone) = TRIM(?))
+         OR (
+           CONVERT(TRIM(candidate_name) USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+           CONVERT(TRIM(?) USING utf8mb4) COLLATE utf8mb4_unicode_ci
+         )
+       )
+     ORDER BY
+       CASE
+         WHEN TRIM(COALESCE(candidate_phone, '')) <> '' AND TRIM(candidate_phone) = TRIM(?) THEN 0
+         ELSE 1
+       END,
+       updated_at DESC
+     LIMIT 1`,
+    [String(screen.job_code || '').trim().toUpperCase(), normalizedPhone, String(screen.candidate_name || '').trim(), normalizedPhone]
+  )
+  if (!repRows.length) return null
+  return { screen, row: repRows[0] as Record<string, unknown> }
+}
+
+async function loadSessionQaAnswers(externalSessionId: string): Promise<InterviewSubmitQaItem[]> {
+  const sid = await getSessionInternalId(externalSessionId)
+  if (!sid) return []
+  const [qaRows] = await mysqlPool.query<any[]>(
+    `SELECT content FROM interview_messages
+     WHERE session_id=? AND message_type='qa_answer'
+     ORDER BY created_at ASC`,
+    [sid]
+  )
+  const out: InterviewSubmitQaItem[] = []
+  for (const m of qaRows) {
+    try {
+      const o = JSON.parse(String(m.content || '{}')) as { questionId?: string; question?: string; answer?: string }
+      out.push({
+        questionId: String(o.questionId || ''),
+        question: String(o.question || ''),
+        answer: String(o.answer || '')
+      })
+    } catch {
+      /* ignore */
+    }
+  }
+  return out
+}
+
+async function buildInterviewBehaviorSignalsForSession(externalSessionId: string): Promise<Record<string, unknown>> {
+  const sid = await getSessionInternalId(externalSessionId)
+  if (!sid) return {}
+  const [trStatsRows] = await mysqlPool.query<any[]>(
+    `SELECT COUNT(*) AS transcriptCount,
+            COALESCE(SUM(CHAR_LENGTH(content)), 0) AS transcriptChars,
+            MIN(created_at) AS transcriptStart,
+            MAX(created_at) AS transcriptEnd
+     FROM interview_messages
+     WHERE session_id=? AND message_type='transcript'`,
+    [sid]
+  )
+  const trStats = trStatsRows[0] || {}
+  const startTs = trStats.transcriptStart ? new Date(trStats.transcriptStart).getTime() : 0
+  const endTs = trStats.transcriptEnd ? new Date(trStats.transcriptEnd).getTime() : 0
+  return {
+    transcriptCount: Number(trStats.transcriptCount) || 0,
+    transcriptChars: Number(trStats.transcriptChars) || 0,
+    durationSec: startTs && endTs ? Math.max(1, Math.round((endTs - startTs) / 1000)) : 0
+  }
+}
+
+function interviewReportRowToApiData(row: Record<string, unknown>) {
+  return {
+    sessionId: String(row.session_id || ''),
+    jobCode: String(row.job_code || ''),
+    candidateName: String(row.candidate_name || ''),
+    score: Number(row.overall_score) || 0,
+    passed: Number(row.passed) === 1,
+    overallFeedback: String(row.overall_feedback || ''),
+    dimensionScores: parseInterviewReportJsonField<Record<string, number>>(row.dimension_scores, {}),
+    suggestions: parseInterviewReportJsonField<string[]>(row.suggestions, []),
+    riskPoints: parseInterviewReportJsonField<string[]>(row.risk_points, []),
+    behaviorSignals: parseInterviewReportJsonField<Record<string, unknown>>(row.behavior_signals, {}),
+    qa: parseInterviewReportJsonField<Array<{ questionId?: string; question?: string; answer?: string }>>(row.qa_json, []),
+    updatedAt: String(row.updated_at || '')
+  }
+}
+
+async function scoreInterviewReportWithAi(params: {
+  sessionId: string
+  jobCode: string
+  candidateName: string
+  mergedQa: InterviewSubmitQaItem[]
+  behaviorSignals: Record<string, unknown>
+}): Promise<AiInterviewScore & { meta: Record<string, unknown> }> {
+  const { sessionId, jobCode, candidateName, mergedQa, behaviorSignals } = params
+  const promptTemplate = await loadInterviewPromptTemplateForSession(sessionId)
+  const builtinTemplate = isBuiltinInterviewPromptTemplate(promptTemplate)
+  const fallback = fallbackInterviewScoreForTemplate({ name: candidateName }, mergedQa, promptTemplate)
+  const nonEmptyAnswers = mergedQa.filter((x) => x.answer.trim())
+  const qaChars = nonEmptyAnswers.reduce((sum, x) => sum + x.answer.length, 0)
+  const signals = {
+    ...behaviorSignals,
+    answeredQuestionCount: nonEmptyAnswers.length,
+    totalQuestionCount: mergedQa.length,
+    avgAnswerChars: nonEmptyAnswers.length ? Math.round(qaChars / nonEmptyAnswers.length) : 0,
+    qaChars,
+    shortAnswerRatio:
+      mergedQa.length > 0
+        ? Number((mergedQa.filter((x) => x.answer.trim().length < 12).length / mergedQa.length).toFixed(3))
+        : 1,
+    scoringDeferred: false,
+    aiScoredAt: new Date().toISOString()
+  }
+
+  const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
+  if (!apiKey) {
+    flowLog('admin-interview-report-score', true, '未配置 DASHSCOPE，使用回退评分')
+    return { ...fallback, meta: { behaviorSignals: signals, aiParsed: false, scoringDeferred: false } }
+  }
+
+  const promptPayload = {
+    aiInterviewer: {
+      name: promptTemplate?.name || BUILTIN_INTERVIEW_PROMPT_TEMPLATE_NAME,
+      systemPrompt: promptTemplate?.systemPrompt || DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE,
+      builtin: builtinTemplate
+    },
+    candidateProfile: { name: candidateName },
+    jobId: jobCode,
+    sessionId,
+    questionsAndAnswers: mergedQa,
+    behaviorSignals: signals
+  }
+
+  try {
+    const data = await dashScopeChatCompletions(
+      {
+        model: resolveQwenSubmitInterviewModel(),
+        max_tokens: 1400,
+        messages: [
+          {
+            role: 'system',
+            content: builtinTemplate
+              ? [
+                  '你是结构化面试评估助手。评分必须基于本场 AI 面试官实际提出的 questionsAndAnswers：逐题判断 answer 是否正面回答了对应 question，再综合评分。',
+                  '本场使用内置“申朴面试官AI”，可结合岗位 JD 和简历背景评价技术深度与岗位匹配，但不能脱离实际题目与回答凭空给分。',
+                  '请从多个方面给出可执行评价：沟通表达(communication)、技术深度(technicalDepth)、逻辑结构(logic)、岗位匹配(jobFit)、稳定性与抗压(stability)，每项 0-100。',
+                  '你必须只输出一个 JSON 对象，不得输出 markdown 或解释。JSON Schema: {"score":0-100数字,"passed":布尔,"overallFeedback":"字符串","dimensionScores":{"communication":0-100,"technicalDepth":0-100,"logic":0-100,"jobFit":0-100,"stability":0-100},"suggestions":["字符串"],"riskPoints":["字符串"]}。'
+                ].join('\n')
+              : [
+                  '你是结构化面试评估助手。评分必须基于本场 AI 面试官实际提出的 questionsAndAnswers：逐题判断 answer 是否正面回答了对应 question，再综合评分。',
+                  '请严格按照本场 AI 面试官模板理解这些题目的考察意图，不要按岗位 JD 或候选人主动转移的话题评价。',
+                  '【AI 面试官模板，最高优先级】',
+                  promptTemplate?.systemPrompt || '',
+                  '【评分要求】',
+                  '1) 先看每一道 question 的要求，再看对应 answer 是否回答了这道题。',
+                  '2) AI 面试官模板定义的身份、领域、能力要求用于解释题目意图，是评分主标准。',
+                  '3) 如果候选人的回答主动偏离题目与模板领域，转而展示其它岗位能力，即使表达清晰，也不能因此给高分或通过。',
+                  '4) passed 只有在候选人对本场题目和模板领域表现达到可录用/可进入下一轮时才为 true。',
+                  '5) 维度评分使用：communication(沟通表达)、domainFit(模板领域匹配)、answerCompleteness(回答完整度)、logic(逻辑结构)、riskControl(风险与稳定性)，每项 0-100。',
+                  '你必须只输出一个 JSON 对象，不得输出 markdown 或解释。JSON Schema: {"score":0-100数字,"passed":布尔,"overallFeedback":"字符串","dimensionScores":{"communication":0-100,"domainFit":0-100,"answerCompleteness":0-100,"logic":0-100,"riskControl":0-100},"suggestions":["字符串"],"riskPoints":["字符串"]}。'
+                ].join('\n')
+          },
+          {
+            role: 'user',
+            content: `请基于以下面试数据评分并返回严格 JSON：\n${JSON.stringify(promptPayload)}`
+          }
+        ],
+        temperature: 0.2
+      },
+      { timeoutMs: interviewReportAiTimeoutMs() }
+    )
+    const raw = data?.choices?.[0]?.message?.content
+    const text = typeof raw === 'string' ? raw : ''
+    const parsed = parseAiInterviewScoreJson(text)
+    if (!parsed) {
+      flowLog('admin-interview-report-score AI解析', false, '模型返回非预期 JSON，使用回退评分')
+      return { ...fallback, meta: { behaviorSignals: signals, aiParsed: false, scoringDeferred: false } }
+    }
+    flowLog('admin-interview-report-score', true, `score=${parsed.score} passed=${parsed.passed} qa=${mergedQa.length}`)
+    return { ...parsed, meta: { behaviorSignals: signals, aiParsed: true, scoringDeferred: false } }
+  } catch (e) {
+    flowLog('admin-interview-report-score 异常', false, e instanceof Error ? e.message : 'unknown')
+    return { ...fallback, meta: { behaviorSignals: signals, aiParsed: false, scoringDeferred: false } }
+  }
+}
+
 async function loadInterviewPromptTemplateForSession(sessionId: string): Promise<InterviewPromptTemplate | null> {
   const sid = String(sessionId || '').trim()
   if (!sid) return loadInterviewPromptTemplateById(null)
@@ -6747,7 +6989,7 @@ async function generatePersonalizedInterviewRest(
         { role: 'user', content: userWithFirst }
       ],
       temperature: 0.45,
-      max_tokens: interviewQuestionsRestMaxTokens()
+      max_tokens: interviewQuestionsRestMaxTokens(restSlice)
     }, { timeoutMs: Math.max(30_000, Number(process.env.QWEN_INTERVIEW_QUESTIONS_TIMEOUT_MS) || 120_000) })
     const raw = data?.choices?.[0]?.message?.content
     const text = typeof raw === 'string' ? raw : ''
@@ -7033,37 +7275,35 @@ async function bindUserPhoneAndRole(params: { appid: string; openid: string; pho
   return { role: nextRole, phone }
 }
 
-const DEFAULT_QWEN_PLUS_MODEL = 'qwen3.5-plus-2026-04-20'
+const DEFAULT_QWEN_PLUS_MODEL = 'qwen3.7-plus-2026-05-26'
+const DEFAULT_QWEN_INTERVIEW_MODEL = 'qwen3.7-plus-2026-05-26'
 
 function resolveQwenQuestionModel(): string {
-  return process.env.QWEN_QUESTION_MODEL?.trim() || DEFAULT_QWEN_PLUS_MODEL
+  return process.env.QWEN_QUESTION_MODEL?.trim() || DEFAULT_QWEN_INTERVIEW_MODEL
 }
 
-/** Q2～Q6 分段生成专用；默认同 plus */
+/** Q2～Q6 分段生成专用；默认同出题模型 */
 function resolveQwenInterviewQuestionsRestModel(): string {
-  return process.env.QWEN_INTERVIEW_QUESTIONS_REST_MODEL?.trim() || DEFAULT_QWEN_PLUS_MODEL
+  return process.env.QWEN_INTERVIEW_QUESTIONS_REST_MODEL?.trim() || DEFAULT_QWEN_INTERVIEW_MODEL
 }
 
-/** 面试提交评分专用；与出题模型分离 */
+/** 后台面试报告 AI 评分专用模型 */
 function resolveQwenSubmitInterviewModel(): string {
   return process.env.QWEN_SUBMIT_INTERVIEW_MODEL?.trim() || DEFAULT_QWEN_PLUS_MODEL
 }
 
-function interviewQuestionsRestMaxTokens(): number {
+function interviewQuestionsRestMaxTokens(restSlice: InterviewRestSlice = 'all'): number {
   const n = Number(process.env.QWEN_INTERVIEW_QUESTIONS_REST_MAX_TOKENS)
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 2200
+  const base = Number.isFinite(n) && n > 0 ? Math.floor(n) : 2200
+  if (restSlice === 'q23') return Math.min(base, 1000)
+  if (restSlice === 'q456') return Math.min(base, 1400)
+  return base
 }
 
-function interviewSubmitAiTimeoutMs(): number {
-  return Math.max(30_000, Number(process.env.QWEN_SUBMIT_INTERVIEW_TIMEOUT_MS) || 90_000)
-}
-
-function trimInterviewSubmitTranscriptTimeline<T extends { ts: number; text: string }>(
-  rows: T[],
-  maxItems = 80
-): T[] {
-  if (rows.length <= maxItems) return rows
-  return rows.slice(-maxItems)
+function interviewReportAiTimeoutMs(): number {
+  const n = Number(process.env.QWEN_SUBMIT_INTERVIEW_TIMEOUT_MS)
+  if (Number.isFinite(n) && n >= 10000) return Math.min(120000, Math.floor(n))
+  return 90000
 }
 
 async function getSessionInternalId(sessionId: string): Promise<number | null> {
@@ -10644,6 +10884,83 @@ app.get('/api/admin/reports/delivery-performance', async (req, res) => {
   }
 })
 
+app.post('/api/admin/interview-report/score', async (req, res) => {
+  if (!(await assertAdminToken(req, res))) return
+  const screeningId = Number(req.query?.screeningId)
+  if (!Number.isFinite(screeningId) || screeningId <= 0) {
+    return res.status(400).json({ message: '请提供 screeningId' })
+  }
+  try {
+    const loaded = await loadInterviewReportRowByScreeningId(screeningId)
+    if (!loaded) return res.status(404).json({ message: '暂无面试报告（候选人可能尚未完成答题）' })
+    const { row } = loaded
+    const sessionId = String(row.session_id || '').trim()
+    const qaFromReport = parseInterviewReportJsonField<InterviewSubmitQaItem[]>(row.qa_json, [])
+    const qaFromSession = sessionId ? await loadSessionQaAnswers(sessionId) : []
+    const mergedQa = mergeInterviewSubmitAnswers(qaFromReport, qaFromSession)
+    if (!mergedQa.length) {
+      return res.status(400).json({ message: '暂无答题记录，无法评分' })
+    }
+
+    const baseSignals = parseInterviewReportJsonField<Record<string, unknown>>(row.behavior_signals, {})
+    const sessionSignals = sessionId ? await buildInterviewBehaviorSignalsForSession(sessionId) : {}
+    const behaviorSignals = { ...sessionSignals, ...baseSignals }
+
+    const scored = await scoreInterviewReportWithAi({
+      sessionId,
+      jobCode: String(row.job_code || ''),
+      candidateName: String(row.candidate_name || '候选人'),
+      mergedQa,
+      behaviorSignals
+    })
+
+    const reportSessionId = ensureInterviewReportSessionId(String(row.job_code || ''), sessionId)
+    await upsertInterviewReport({
+      sessionId: reportSessionId,
+      jobCode: String(row.job_code || ''),
+      candidateName: String(row.candidate_name || '候选人'),
+      candidatePhone: String(row.candidate_phone || ''),
+      candidateOpenId: String(row.candidate_openid || ''),
+      score: scored.score,
+      passed: scored.passed,
+      overallFeedback: scored.overallFeedback,
+      dimensionScores: scored.dimensionScores || {},
+      suggestions: scored.suggestions || [],
+      riskPoints: scored.riskPoints || [],
+      behaviorSignals: (scored.meta?.behaviorSignals as Record<string, unknown>) || {},
+      qa: mergedQa
+    })
+
+    const [freshRows] = await mysqlPool.query<any[]>(
+      `SELECT session_id, job_code, candidate_name, overall_score, passed, overall_feedback,
+              dimension_scores, suggestions, risk_points, behavior_signals, qa_json, updated_at
+       FROM interview_reports
+       WHERE session_id=?
+       LIMIT 1`,
+      [reportSessionId]
+    )
+    const freshRow = (freshRows[0] as Record<string, unknown> | undefined) || {
+      ...row,
+      overall_score: scored.score,
+      passed: scored.passed ? 1 : 0,
+      overall_feedback: scored.overallFeedback,
+      dimension_scores: JSON.stringify(scored.dimensionScores || {}),
+      suggestions: JSON.stringify(scored.suggestions || []),
+      risk_points: JSON.stringify(scored.riskPoints || []),
+      behavior_signals: JSON.stringify(scored.meta?.behaviorSignals || {}),
+      qa_json: JSON.stringify(mergedQa)
+    }
+    return res.json({ data: interviewReportRowToApiData(freshRow) })
+  } catch (e: unknown) {
+    const code = (e as { code?: string })?.code
+    if (code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({ message: '缺少 interview_reports 表，请执行 server/migration_interview_reports.sql' })
+    }
+    flowLog('admin-interview-report-score', false, e instanceof Error ? e.message : 'unknown')
+    return res.status(500).json({ message: '面试报告评分失败，请稍后重试' })
+  }
+})
+
 app.get('/api/admin/interview-report', async (req, res) => {
   if (!(await assertAdminToken(req, res))) return
   const screeningId = Number(req.query?.screeningId)
@@ -10651,61 +10968,9 @@ app.get('/api/admin/interview-report', async (req, res) => {
     return res.status(400).json({ message: '请提供 screeningId' })
   }
   try {
-    const [screenRows] = await mysqlPool.query<any[]>(
-      'SELECT job_code, candidate_name, candidate_phone FROM resume_screenings WHERE id=? LIMIT 1',
-      [screeningId]
-    )
-    if (!screenRows.length) return res.status(404).json({ message: '筛查记录不存在' })
-    const screen = screenRows[0] as { job_code: string; candidate_name: string; candidate_phone?: string | null }
-    const normalizedPhone = normalizeCnMobile(String(screen.candidate_phone || '').trim())
-    const [repRows] = await mysqlPool.query<any[]>(
-      `SELECT session_id, job_code, candidate_name, candidate_phone, overall_score, passed, overall_feedback,
-              dimension_scores, suggestions, risk_points, behavior_signals, qa_json, updated_at
-       FROM interview_reports
-       WHERE UPPER(TRIM(job_code)) = UPPER(?)
-         AND (
-           (TRIM(COALESCE(candidate_phone, '')) <> '' AND TRIM(candidate_phone) = TRIM(?))
-           OR (
-             CONVERT(TRIM(candidate_name) USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-             CONVERT(TRIM(?) USING utf8mb4) COLLATE utf8mb4_unicode_ci
-           )
-         )
-       ORDER BY
-         CASE
-           WHEN TRIM(COALESCE(candidate_phone, '')) <> '' AND TRIM(candidate_phone) = TRIM(?) THEN 0
-           ELSE 1
-         END,
-         updated_at DESC
-       LIMIT 1`,
-      [String(screen.job_code || '').trim().toUpperCase(), normalizedPhone, String(screen.candidate_name || '').trim(), normalizedPhone]
-    )
-    if (!repRows.length) return res.status(404).json({ message: '暂无面试报告（候选人可能尚未完成答题）' })
-    const row = repRows[0] as Record<string, unknown>
-    const parseJson = (v: unknown, fallback: unknown) => {
-      if (v == null) return fallback
-      if (typeof v === 'object') return v
-      try {
-        return JSON.parse(String(v))
-      } catch {
-        return fallback
-      }
-    }
-    res.json({
-      data: {
-        sessionId: String(row.session_id || ''),
-        jobCode: String(row.job_code || ''),
-        candidateName: String(row.candidate_name || ''),
-        score: Number(row.overall_score) || 0,
-        passed: Number(row.passed) === 1,
-        overallFeedback: String(row.overall_feedback || ''),
-        dimensionScores: parseJson(row.dimension_scores, {}),
-        suggestions: parseJson(row.suggestions, []),
-        riskPoints: parseJson(row.risk_points, []),
-        behaviorSignals: parseJson(row.behavior_signals, {}),
-        qa: parseJson(row.qa_json, []),
-        updatedAt: String(row.updated_at || '')
-      }
-    })
+    const loaded = await loadInterviewReportRowByScreeningId(screeningId)
+    if (!loaded) return res.status(404).json({ message: '暂无面试报告（候选人可能尚未完成答题）' })
+    res.json({ data: interviewReportRowToApiData(loaded.row) })
   } catch (e: unknown) {
     const code = (e as { code?: string })?.code
     if (code === 'ER_NO_SUCH_TABLE') {
@@ -12883,236 +13148,158 @@ app.get('/api/live/session/state', async (req, res) => {
   }
 })
 
+app.get('/api/candidate/interview-submit-status', async (req, res) => {
+  const sessionId = String(req.query.sessionId || '').trim().slice(0, 128)
+  if (!sessionId) return res.status(400).json({ message: '请提供 sessionId' })
+  try {
+    const [rows] = await mysqlPool.query<any[]>(
+      `SELECT overall_score, passed, overall_feedback, dimension_scores, suggestions, risk_points
+       FROM interview_reports
+       WHERE session_id=?
+       LIMIT 1`,
+      [sessionId]
+    )
+    if (!rows.length) return res.json({ data: { submitted: false } })
+    const r = rows[0]
+    const parseJsonField = (v: unknown) => {
+      try {
+        return v && String(v).trim() ? JSON.parse(String(v)) : undefined
+      } catch {
+        return undefined
+      }
+    }
+    return res.json({
+      data: {
+        submitted: true,
+        result: {
+          score: Number(r.overall_score) || 0,
+          passed: Boolean(r.passed),
+          overallFeedback: String(r.overall_feedback || ''),
+          dimensionScores: (parseJsonField(r.dimension_scores) as Record<string, number>) || {},
+          suggestions: (parseJsonField(r.suggestions) as string[]) || [],
+          riskPoints: (parseJsonField(r.risk_points) as string[]) || []
+        }
+      }
+    })
+  } catch (e) {
+    flowLog('interview-submit-status', false, e instanceof Error ? e.message : 'unknown')
+    return res.status(500).json({ message: '查询提交状态失败' })
+  }
+})
+
+/** 候选人提交时不跑 AI 评分，仅落库作答；HR 在后台查看面试报告时再评分 */
+function buildDeferredInterviewSubmitResult(
+  mergedQa: InterviewSubmitQaItem[],
+  behaviorSignals: Record<string, unknown>
+) {
+  const answered = mergedQa.filter((x) => x.answer.trim()).length
+  return {
+    score: 0,
+    passed: false,
+    overallFeedback: '作答已提交，HR 将在后台查看面试报告并完成评估。',
+    dimensionScores: {} as Record<string, number>,
+    suggestions: [] as string[],
+    riskPoints: [] as string[],
+    meta: {
+      scoringDeferred: true,
+      behaviorSignals,
+      answeredQuestionCount: answered,
+      totalQuestionCount: mergedQa.length
+    }
+  }
+}
+
 app.post('/api/candidate/submit-interview', async (req, res) => {
   const profile = (req.body?.profile || {}) as { name?: string; phone?: string; openid?: string }
   const jobId = String(req.body?.jobId || '').trim().toUpperCase()
   const sessionId = String(req.body?.sessionId || '').trim()
-  const answers = Array.isArray(req.body?.answers) ? (req.body.answers as Array<{ questionId?: string; question?: string; answer?: string }>) : []
+  const answers = Array.isArray(req.body?.answers) ? (req.body?.answers as Array<{ questionId?: string; question?: string; answer?: string }>) : []
 
-  const promptTemplate = await loadInterviewPromptTemplateForSession(sessionId)
-  const builtinTemplate = isBuiltinInterviewPromptTemplate(promptTemplate)
-  const fallback = fallbackInterviewScoreForTemplate(profile, answers, promptTemplate)
-  const reportSessionId = ensureInterviewReportSessionId(jobId, sessionId)
-  const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
-  if (!apiKey) {
-    flowLog('submit-interview', true, '未配置 DASHSCOPE，使用回退评分')
-    await upsertInterviewReport({
-      sessionId: reportSessionId,
-      jobCode: jobId,
-      candidateName: String(profile.name || '候选人'),
-      candidatePhone: String(profile.phone || ''),
-      candidateOpenId: String(profile.openid || ''),
-      score: fallback.score,
-      passed: fallback.passed,
-      overallFeedback: fallback.overallFeedback,
-      dimensionScores: fallback.dimensionScores || {},
-      suggestions: fallback.suggestions || [],
-      riskPoints: fallback.riskPoints || [],
-      behaviorSignals: {},
-      qa: answers.map((x) => ({
-        questionId: String(x.questionId || ''),
-        question: String(x.question || ''),
-        answer: String(x.answer || '')
-      }))
-    })
-    await markInvitationConsumedAfterInterviewSubmit(sessionId)
-    return res.json({ data: fallback })
+  let qaTimeline: InterviewSubmitQaItem[] = []
+  let behaviorSignals: Record<string, unknown> = {}
+  if (sessionId) {
+    const sid = await getSessionInternalId(sessionId)
+    if (sid) {
+      const [qaRows] = await mysqlPool.query<any[]>(
+        `SELECT content, created_at
+         FROM interview_messages
+         WHERE session_id=? AND message_type='qa_answer'
+         ORDER BY created_at ASC`,
+        [sid]
+      )
+      for (const m of qaRows) {
+        try {
+          const o = JSON.parse(String(m.content || '{}')) as { questionId?: string; question?: string; answer?: string }
+          qaTimeline.push({
+            questionId: String(o.questionId || ''),
+            question: String(o.question || ''),
+            answer: String(o.answer || '')
+          })
+        } catch {
+          /* ignore malformed payload */
+        }
+      }
+      const [trStatsRows] = await mysqlPool.query<any[]>(
+        `SELECT COUNT(*) AS transcriptCount,
+                COALESCE(SUM(CHAR_LENGTH(content)), 0) AS transcriptChars,
+                MIN(created_at) AS transcriptStart,
+                MAX(created_at) AS transcriptEnd
+         FROM interview_messages
+         WHERE session_id=? AND message_type='transcript'`,
+        [sid]
+      )
+      const trStats = trStatsRows[0] || {}
+      const transcriptCount = Number(trStats.transcriptCount) || 0
+      const transcriptChars = Number(trStats.transcriptChars) || 0
+      const startTs = trStats.transcriptStart ? new Date(trStats.transcriptStart).getTime() : 0
+      const endTs = trStats.transcriptEnd ? new Date(trStats.transcriptEnd).getTime() : 0
+      behaviorSignals = {
+        transcriptCount,
+        transcriptChars,
+        durationSec: startTs && endTs ? Math.max(1, Math.round((endTs - startTs) / 1000)) : 0
+      }
+    }
   }
 
+  const mergedQa = mergeInterviewSubmitAnswers(answers, qaTimeline)
+  const nonEmptyAnswers = mergedQa.filter((x) => x.answer.trim())
+  const qaChars = nonEmptyAnswers.reduce((sum, x) => sum + x.answer.length, 0)
+  behaviorSignals = {
+    ...behaviorSignals,
+    answeredQuestionCount: nonEmptyAnswers.length,
+    totalQuestionCount: mergedQa.length,
+    avgAnswerChars: nonEmptyAnswers.length ? Math.round(qaChars / nonEmptyAnswers.length) : 0,
+    qaChars,
+    shortAnswerRatio:
+      mergedQa.length > 0 ? Number((mergedQa.filter((x) => x.answer.trim().length < 12).length / mergedQa.length).toFixed(3)) : 1,
+    scoringDeferred: true
+  }
+
+  const reportSessionId = ensureInterviewReportSessionId(jobId, sessionId)
+  const result = buildDeferredInterviewSubmitResult(mergedQa, behaviorSignals)
+
   try {
-    let transcriptTimeline: Array<{ ts: number; text: string }> = []
-    let qaTimeline: Array<{ ts: number; questionId: string; question: string; answer: string }> = []
-    let behaviorSignals: Record<string, unknown> = {}
-
-    if (sessionId) {
-      const sid = await getSessionInternalId(sessionId)
-      if (sid) {
-        const [msgRows] = await mysqlPool.query<any[]>(
-          `SELECT message_type, content, created_at
-           FROM interview_messages
-           WHERE session_id=?
-           ORDER BY created_at DESC
-           LIMIT 400`,
-          [sid]
-        )
-        for (const m of [...msgRows].reverse()) {
-          if (m.message_type === 'transcript') {
-            transcriptTimeline.push({
-              ts: new Date(m.created_at).getTime(),
-              text: String(m.content || '')
-            })
-          } else if (m.message_type === 'qa_answer') {
-            try {
-              const o = JSON.parse(String(m.content || '{}')) as { questionId?: string; question?: string; answer?: string }
-              qaTimeline.push({
-                ts: new Date(m.created_at).getTime(),
-                questionId: String(o.questionId || ''),
-                question: String(o.question || ''),
-                answer: String(o.answer || '')
-              })
-            } catch {
-              /* ignore malformed payload */
-            }
-          }
-        }
-      }
-    }
-
-    const mergedQa = (answers.length ? answers : qaTimeline).map((item) => ({
-      questionId: String(item.questionId || ''),
-      question: String(item.question || ''),
-      answer: String(item.answer || '')
-    }))
-    const nonEmptyAnswers = mergedQa.filter((x) => x.answer.trim())
-    const transcriptChars = transcriptTimeline.reduce((sum, x) => sum + String(x.text || '').length, 0)
-    const qaChars = nonEmptyAnswers.reduce((sum, x) => sum + x.answer.length, 0)
-    const durationSec =
-      transcriptTimeline.length >= 2
-        ? Math.max(1, Math.round((transcriptTimeline[transcriptTimeline.length - 1].ts - transcriptTimeline[0].ts) / 1000))
-        : 0
-    behaviorSignals = {
-      answeredQuestionCount: nonEmptyAnswers.length,
-      totalQuestionCount: mergedQa.length,
-      avgAnswerChars: nonEmptyAnswers.length ? Math.round(qaChars / nonEmptyAnswers.length) : 0,
-      transcriptChars,
-      qaChars,
-      durationSec,
-      shortAnswerRatio:
-        mergedQa.length > 0 ? Number((mergedQa.filter((x) => x.answer.trim().length < 12).length / mergedQa.length).toFixed(3)) : 1
-    }
-
-    const transcriptForAi = trimInterviewSubmitTranscriptTimeline(transcriptTimeline)
-
-	    const promptPayload = {
-	      aiInterviewer: {
-	        name: promptTemplate?.name || BUILTIN_INTERVIEW_PROMPT_TEMPLATE_NAME,
-	        systemPrompt: promptTemplate?.systemPrompt || DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE,
-	        builtin: builtinTemplate
-	      },
-	      candidateProfile: {
-	        name: String(profile.name || ''),
-	        openid: String(profile.openid || ''),
-        phone: String(profile.phone || '')
-      },
-      jobId,
-      sessionId,
-      questionsAndAnswers: mergedQa,
-      transcriptTimeline: transcriptForAi,
-      behaviorSignals
-    }
-
-    const model = resolveQwenSubmitInterviewModel()
-	    const data = await dashScopeChatCompletions({
-	      model,
-	      messages: [
-		        {
-		          role: 'system',
-		          content: builtinTemplate
-		            ? [
-		                '你是结构化面试评估助手。评分必须基于本场 AI 面试官实际提出的 questionsAndAnswers：逐题判断 answer 是否正面回答了对应 question，再综合评分。',
-		                '本场使用内置“申朴面试官AI”，可结合岗位 JD 和简历背景评价技术深度与岗位匹配，但不能脱离实际题目与回答凭空给分。',
-		                '请从多个方面给出可执行评价：沟通表达(communication)、技术深度(technicalDepth)、逻辑结构(logic)、岗位匹配(jobFit)、稳定性与抗压(stability)，每项 0-100。',
-		                '你必须只输出一个 JSON 对象，不得输出 markdown 或解释。JSON Schema: {"score":0-100数字,"passed":布尔,"overallFeedback":"字符串","dimensionScores":{"communication":0-100,"technicalDepth":0-100,"logic":0-100,"jobFit":0-100,"stability":0-100},"suggestions":["字符串"],"riskPoints":["字符串"]}。'
-		              ].join('\n')
-		            : [
-		                '你是结构化面试评估助手。评分必须基于本场 AI 面试官实际提出的 questionsAndAnswers：逐题判断 answer 是否正面回答了对应 question，再综合评分。',
-		                '请严格按照本场 AI 面试官模板理解这些题目的考察意图，不要按岗位 JD 或候选人主动转移的话题评价。',
-		                '【AI 面试官模板，最高优先级】',
-		                promptTemplate?.systemPrompt || '',
-		                '【评分要求】',
-		                '1) 先看每一道 question 的要求，再看对应 answer 是否回答了这道题。',
-		                '2) AI 面试官模板定义的身份、领域、能力要求用于解释题目意图，是评分主标准。',
-		                '3) 如果候选人的回答主动偏离题目与模板领域，转而展示其它岗位能力，即使表达清晰，也不能因此给高分或通过。',
-		                '4) passed 只有在候选人对本场题目和模板领域表现达到可录用/可进入下一轮时才为 true。',
-		                '5) 维度评分使用：communication(沟通表达)、domainFit(模板领域匹配)、answerCompleteness(回答完整度)、logic(逻辑结构)、riskControl(风险与稳定性)，每项 0-100。',
-		                '你必须只输出一个 JSON 对象，不得输出 markdown 或解释。JSON Schema: {"score":0-100数字,"passed":布尔,"overallFeedback":"字符串","dimensionScores":{"communication":0-100,"domainFit":0-100,"answerCompleteness":0-100,"logic":0-100,"riskControl":0-100},"suggestions":["字符串"],"riskPoints":["字符串"]}。'
-		              ].join('\n')
-	        },
-        {
-          role: 'user',
-          content: `请基于以下面试数据评分并返回严格 JSON：\n${JSON.stringify(promptPayload)}`
-        }
-      ],
-      temperature: 0.2
-    }, { timeoutMs: interviewSubmitAiTimeoutMs() })
-    const raw = data?.choices?.[0]?.message?.content
-    const text = typeof raw === 'string' ? raw : ''
-    const parsed = parseAiInterviewScoreJson(text)
-    if (!parsed) {
-      flowLog('submit-interview AI解析', false, '模型返回非预期 JSON，使用回退评分')
-      const out = { ...fallback, meta: { behaviorSignals, aiParsed: false } }
-      await upsertInterviewReport({
-        sessionId: reportSessionId,
-        jobCode: jobId,
-        candidateName: String(profile.name || '候选人'),
-        candidatePhone: String(profile.phone || ''),
-        candidateOpenId: String(profile.openid || ''),
-        score: out.score,
-        passed: out.passed,
-        overallFeedback: out.overallFeedback,
-        dimensionScores: out.dimensionScores || {},
-        suggestions: out.suggestions || [],
-        riskPoints: out.riskPoints || [],
-        behaviorSignals,
-        qa: mergedQa
-      })
-      await markInvitationConsumedAfterInterviewSubmit(sessionId)
-      return res.json({ data: out })
-    }
-    flowLog('submit-interview AI评分', true, `score=${parsed.score} passed=${parsed.passed}`)
-    const out = {
-      data: {
-        ...parsed,
-        meta: {
-          behaviorSignals,
-          aiParsed: true
-        }
-      }
-    }
     await upsertInterviewReport({
       sessionId: reportSessionId,
       jobCode: jobId,
       candidateName: String(profile.name || '候选人'),
       candidatePhone: String(profile.phone || ''),
       candidateOpenId: String(profile.openid || ''),
-      score: parsed.score,
-      passed: parsed.passed,
-      overallFeedback: parsed.overallFeedback,
-      dimensionScores: parsed.dimensionScores || {},
-      suggestions: parsed.suggestions || [],
-      riskPoints: parsed.riskPoints || [],
+      score: result.score,
+      passed: result.passed,
+      overallFeedback: result.overallFeedback,
+      dimensionScores: result.dimensionScores,
+      suggestions: result.suggestions,
+      riskPoints: result.riskPoints,
       behaviorSignals,
       qa: mergedQa
     })
     await markInvitationConsumedAfterInterviewSubmit(sessionId)
-    return res.json(out)
+    flowLog('submit-interview', true, `已落库 qa=${mergedQa.length}（跳过 AI 评分）`)
+    return res.json({ data: result })
   } catch (e) {
-    flowLog('submit-interview 异常', false, e instanceof Error ? e.message : 'unknown')
-    try {
-      await upsertInterviewReport({
-        sessionId: reportSessionId,
-        jobCode: jobId,
-        candidateName: String(profile.name || '候选人'),
-        candidatePhone: String(profile.phone || ''),
-        candidateOpenId: String(profile.openid || ''),
-        score: fallback.score,
-        passed: fallback.passed,
-        overallFeedback: fallback.overallFeedback,
-        dimensionScores: fallback.dimensionScores || {},
-        suggestions: fallback.suggestions || [],
-        riskPoints: fallback.riskPoints || [],
-        behaviorSignals: {},
-        qa: answers.map((x) => ({
-          questionId: String(x.questionId || ''),
-          question: String(x.question || ''),
-          answer: String(x.answer || '')
-        }))
-      })
-      await markInvitationConsumedAfterInterviewSubmit(sessionId)
-    } catch (persistErr) {
-      flowLog('submit-interview 异常后落库失败', false, persistErr instanceof Error ? persistErr.message : 'unknown')
-    }
-    return res.json({ data: fallback })
+    flowLog('submit-interview 落库失败', false, e instanceof Error ? e.message : 'unknown')
+    return res.status(500).json({ message: '提交失败，请稍后重试' })
   }
 })
 

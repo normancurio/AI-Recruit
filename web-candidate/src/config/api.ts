@@ -56,11 +56,12 @@ export async function apiGetData<T>(path: string, query?: Record<string, string 
   return body.data
 }
 
-export async function apiPostData<T>(path: string, payload: unknown): Promise<T> {
+export async function apiPostData<T>(path: string, payload: unknown, init?: RequestInit): Promise<T> {
   const res = await fetch(apiUrl(path), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    ...(init || {})
   })
   const body = await parseJson<{ data?: T; message?: string }>(res)
   if (!res.ok) {
