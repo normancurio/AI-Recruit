@@ -4776,7 +4776,7 @@ function JobEditorModal({
                         )
                       }
                       className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
-                      placeholder="默认 qwen-turbo"
+                      placeholder="默认 qwen3.7-plus-2026-05-26"
                     />
                   </div>
                   <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 self-end pb-2">
@@ -9105,9 +9105,13 @@ function ResumeScreeningView({
         setResumes((prev) => prev.map((x) => (x.id === resume.id ? updated : x)));
         setReportResume((prev) => (prev && prev.id === resume.id ? updated : prev));
       } catch (e) {
+        const raw = e instanceof Error ? e.message : typeof e === 'string' ? e : '';
+        const timedOutOrDropped = /failed to fetch|load failed|networkerror|network request failed/i.test(raw);
         setScreeningAdminMsg({
           title: '重新评估失败',
-          message: userFacingApiError(e, '重新评估失败，请稍后重试')
+          message: timedOutOrDropped
+            ? '评估耗时较长，连接已断开。请刷新页面查看报告是否已更新；若未更新请稍后重试。'
+            : userFacingApiError(e, '重新评估失败，请稍后重试')
         });
       } finally {
         setReportReEvalBusy(false);
@@ -13948,7 +13952,7 @@ function SystemAiInterviewSettingsView() {
                       disabled={saving}
                       onChange={(e) => updateConfig({ model: e.target.value })}
                       className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
-                      placeholder="默认 qwen-turbo"
+                      placeholder="默认 qwen3.7-plus-2026-05-26"
                     />
                   </div>
                   <label className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm font-medium text-slate-700">

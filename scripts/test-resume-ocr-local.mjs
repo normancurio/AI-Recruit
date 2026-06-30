@@ -17,7 +17,7 @@ dotenv.config({ path: path.join(root, '.env.local') })
 dotenv.config({ path: path.join(root, '.env') })
 
 const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
-const model = process.env.QWEN_RESUME_OCR_MODEL?.trim() || 'qwen-vl-ocr-latest'
+const model = process.env.QWEN_RESUME_OCR_MODEL?.trim() || 'qwen3.5-ocr'
 const baseUrl = (process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1').replace(/\/$/, '')
 
 async function ensureTestPng(outPath) {

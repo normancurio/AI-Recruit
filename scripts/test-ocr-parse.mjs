@@ -3,7 +3,7 @@ import { execFileSync } from 'child_process'
 
 const pdf = process.argv[2] || '/app/storage/resumes/1780481729683-4372b89a-d6c2-4d2e-96ba-a40eda21fafe.pdf'
 const key = process.env.DASHSCOPE_API_KEY
-const model = process.env.QWEN_RESUME_OCR_MODEL || 'qwen-vl-ocr-latest'
+const model = process.env.QWEN_RESUME_OCR_MODEL || 'qwen3.5-ocr'
 const base = (process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1').replace(/\/$/, '')
 
 execFileSync('pdftoppm', ['-f', '1', '-l', '1', '-png', '-r', '160', pdf, '/tmp/ocr-test/page'])

@@ -2,6 +2,7 @@ import Taro from '@tarojs/taro'
 import { getApiBase } from '../config/apiBase'
 import {
   CandidateProfile,
+  INTERVIEW_MAIN_QUESTION_TOTAL,
   InterviewAnswer,
   InterviewQuestion,
   InterviewResult,
@@ -171,25 +172,52 @@ async function fetchInterviewQuestionsFirst(
   return parsed
 }
 
+type InterviewRestSlice = 'all' | 'q23' | 'q456'
+
 async function fetchInterviewQuestionsRest(
   jobId: string,
   candidateName: string | undefined,
   firstQuestionText: string,
   resumeScreeningId?: number,
-  opts?: InterviewQuestionFetchOpts
+  opts?: InterviewQuestionFetchOpts,
+  restSlice: InterviewRestSlice = 'all'
 ): Promise<InterviewQuestion[]> {
   const res = await Taro.request<{ data: QuestionsApiBody; message?: string }>({
     url: `${getApiBase()}/api/candidate/interview-questions-rest`,
     method: 'POST',
     data: {
       ...questionFetchQuery(jobId, candidateName, resumeScreeningId, opts),
-      firstQuestionText
+      firstQuestionText,
+      restSlice
     }
   })
   if (res.statusCode >= 400) {
     throw new Error(res.data?.message || `拉取后续题目失败（HTTP ${res.statusCode}）`)
   }
   return normalizeQuestionsResponse(res.data?.data).questions
+}
+
+function mergeMainQuestionSlices(
+  firstText: string,
+  base: InterviewQuestion[],
+  ...slices: InterviewQuestion[][]
+): InterviewQuestion[] {
+  const byId = new Map<string, InterviewQuestion>()
+  const q1 = base[0] || { id: 'Q1', text: firstText }
+  if (String(q1.text || '').trim()) byId.set('Q1', { id: 'Q1', text: String(q1.text).trim() })
+  for (const slice of slices) {
+    for (const q of slice) {
+      const id = String(q?.id || '').trim()
+      const text = String(q?.text || '').trim()
+      if (id && text) byId.set(id, { id, text })
+    }
+  }
+  const ordered: InterviewQuestion[] = []
+  for (let i = 1; i <= INTERVIEW_MAIN_QUESTION_TOTAL; i++) {
+    const hit = byId.get(`Q${i}`)
+    if (hit) ordered.push(hit)
+  }
+  return ordered
 }
 
 const QUESTIONS_PREFETCH_STORAGE_KEY = 'interview_questions_prefetch_v1'
@@ -240,6 +268,8 @@ function findPrefetchedQuestions(
 }
 
 const inflightQuestionsByKey = new Map<string, Promise<InterviewQuestion[]>>()
+/** 后台拉 Q2～Q6 的 in-flight；与首题快出分离，供 wait 轮询 */
+const inflightQuestionsRestByKey = new Map<string, Promise<InterviewQuestion[]>>()
 /** 预取成功但 Storage 写入失败时仍可供面试页消费，避免再次打大模型 */
 const resolvedQuestionsMemory = new Map<string, InterviewQuestion[]>()
 /** 预取已完成、in-flight 已清理时，避免面试页重复请求大模型 */
@@ -289,6 +319,87 @@ function readPrefetchedQuestions(key: string, consume: boolean): InterviewQuesti
   return mem
 }
 
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+export function countMainInterviewQuestions(list: InterviewQuestion[]): number {
+  return list.filter((q) => q.type !== 'follow_up').length
+}
+
+/** 余题到达后并入当前列表，保留已插入的追问 */
+export function mergeRestIntoQuestionList(
+  current: InterviewQuestion[],
+  fullMain: InterviewQuestion[]
+): InterviewQuestion[] {
+  const followUps = current.filter((q) => q.type === 'follow_up')
+  const result: InterviewQuestion[] = []
+  for (const mq of fullMain) {
+    if (!String(mq.text || '').trim()) continue
+    result.push(mq)
+    for (const fu of followUps) {
+      if (fu.parentQuestionId === mq.id) result.push(fu)
+    }
+  }
+  return result.length ? result : fullMain
+}
+
+function startInterviewQuestionsRestFetch(
+  jobId: string,
+  candidateName: string | undefined,
+  firstQuestionText: string,
+  resumeScreeningId: number | undefined,
+  opts?: InterviewQuestionFetchOpts
+): Promise<InterviewQuestion[]> {
+  const key = buildInterviewQuestionsCacheKey(
+    jobId,
+    String(candidateName || ''),
+    resumeScreeningId,
+    opts?.inviteCode
+  )
+  const existing = inflightQuestionsRestByKey.get(key)
+  if (existing) return existing
+
+  const cached = readPrefetchedQuestions(key, false)
+  if (cached && countMainInterviewQuestions(cached) >= INTERVIEW_MAIN_QUESTION_TOTAL) {
+    return Promise.resolve(cached)
+  }
+
+  const firstText = String(firstQuestionText || cached?.[0]?.text || '').trim()
+  if (!firstText) return Promise.resolve(cached || [])
+
+  const p = (async () => {
+    const base = cached?.length ? cached.slice(0, 1) : [{ id: 'Q1', text: firstText }]
+    const q23 = await fetchInterviewQuestionsRest(
+      jobId,
+      candidateName,
+      firstText,
+      resumeScreeningId,
+      opts,
+      'q23'
+    )
+    let merged = mergeMainQuestionSlices(firstText, base, q23)
+    if (merged.length) persistPrefetchedQuestions(key, merged)
+
+    const q456 = await fetchInterviewQuestionsRest(
+      jobId,
+      candidateName,
+      firstText,
+      resumeScreeningId,
+      opts,
+      'q456'
+    )
+    merged = mergeMainQuestionSlices(firstText, base, q23, q456)
+    if (merged.length) persistPrefetchedQuestions(key, merged)
+    return merged
+  })().finally(() => {
+    inflightQuestionsRestByKey.delete(key)
+  })
+
+  inflightQuestionsRestByKey.set(key, p)
+  return p
+}
+
 async function fetchInterviewQuestionsPhased(
   jobId: string,
   candidateName?: string,
@@ -313,15 +424,9 @@ async function fetchInterviewQuestionsPhased(
   const firstText = String(first[0]?.text || '').trim()
   if (!firstText) return first
 
-  void fetchInterviewQuestionsRest(jobId, candidateName, firstText, resumeScreeningId, opts)
-    .then((rest) => {
-      const merged = [...first, ...rest].filter((q) => q && String(q.text || '').trim())
-      if (merged.length) persistPrefetchedQuestions(key, merged)
-      return merged
-    })
-    .catch(() => {
-      /* 后续题失败时面试页可再拉 */
-    })
+  void startInterviewQuestionsRestFetch(jobId, candidateName, firstText, resumeScreeningId, opts).catch(() => {
+    /* 后续题失败时面试页可再拉 */
+  })
 
   return first
 }
@@ -337,23 +442,76 @@ export function ensureInterviewQuestionsRest(
 ): void {
   const key = buildInterviewQuestionsCacheKey(jobId, candidateName, resumeScreeningId, opts?.inviteCode)
   const cached = readPrefetchedQuestions(key, false)
-  if (cached && cached.length >= 6) {
+  if (cached && countMainInterviewQuestions(cached) >= INTERVIEW_MAIN_QUESTION_TOTAL) {
     onMerged(cached)
     return
   }
 
-  void fetchInterviewQuestionsRest(jobId, candidateName, firstQuestionText, resumeScreeningId, opts)
-    .then((rest) => {
-      const base = cached?.length ? cached : [{ id: 'Q1', text: firstQuestionText }]
-      const merged = [...base.slice(0, 1), ...rest].filter((q) => q && String(q.text || '').trim())
-      if (merged.length) {
-        persistPrefetchedQuestions(key, merged)
-        onMerged(merged)
-      }
+  void startInterviewQuestionsRestFetch(jobId, candidateName, firstQuestionText, resumeScreeningId, opts)
+    .then((merged) => {
+      if (merged.length) onMerged(merged)
     })
     .catch(() => {
       /* ignore */
     })
+}
+
+/** 等待余题就绪；minMainQuestions 允许 Q2～Q3 先出即可进下一题 */
+export async function waitForInterviewQuestionsRest(
+  jobId: string,
+  candidateName: string | undefined,
+  firstQuestionText: string,
+  resumeScreeningId: number | undefined,
+  opts?: InterviewQuestionFetchOpts & { timeoutMs?: number; minMainQuestions?: number }
+): Promise<InterviewQuestion[]> {
+  const timeoutMs = opts?.timeoutMs ?? 90_000
+  const minMain = Math.min(
+    INTERVIEW_MAIN_QUESTION_TOTAL,
+    Math.max(1, opts?.minMainQuestions ?? INTERVIEW_MAIN_QUESTION_TOTAL)
+  )
+  const key = buildInterviewQuestionsCacheKey(
+    jobId,
+    String(candidateName || ''),
+    resumeScreeningId,
+    opts?.inviteCode
+  )
+  const readHit = (): InterviewQuestion[] | null =>
+    findPrefetchedQuestions(jobId, String(candidateName || ''), resumeScreeningId, opts?.inviteCode, false)
+
+  const cached = readHit()
+  if (cached && countMainInterviewQuestions(cached) >= minMain) {
+    return cached
+  }
+
+  const firstText = String(firstQuestionText || cached?.[0]?.text || '').trim()
+  if (!firstText) return cached || []
+
+  if (!inflightQuestionsRestByKey.has(key)) {
+    void startInterviewQuestionsRestFetch(jobId, candidateName, firstText, resumeScreeningId, opts).catch(() => {
+      /* ignore */
+    })
+  }
+
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const hit = readHit()
+    if (hit && countMainInterviewQuestions(hit) >= minMain) return hit
+    await sleepMs(400)
+  }
+
+  const inflight = inflightQuestionsRestByKey.get(key)
+  if (inflight) {
+    try {
+      const merged = await inflight
+      if (countMainInterviewQuestions(merged) >= minMain) return merged
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const hit = readHit()
+  if (hit && countMainInterviewQuestions(hit) >= minMain) return hit
+  throw new Error('rest_timeout')
 }
 
 /**
@@ -407,37 +565,80 @@ export async function waitForInterviewQuestionsPrefetch(
   opts?: { timeoutMs?: number; inviteCode?: string; sessionId?: string }
 ): Promise<InterviewQuestion[]> {
   const timeoutMs = opts?.timeoutMs ?? 120_000
-  const key = buildInterviewQuestionsCacheKey(
-    jobId,
-    String(candidateName || ''),
-    resumeScreeningId,
-    opts?.inviteCode
-  )
-  const hit = findPrefetchedQuestions(
+  const deadline = Date.now() + timeoutMs
+  const fetchOpts: InterviewQuestionFetchOpts = {
+    inviteCode: opts?.inviteCode,
+    sessionId: opts?.sessionId
+  }
+
+  const readFull = (): InterviewQuestion[] | null => {
+    const hit = findPrefetchedQuestions(
+      jobId,
+      String(candidateName || ''),
+      resumeScreeningId,
+      opts?.inviteCode,
+      false
+    )
+    if (hit && countMainInterviewQuestions(hit) >= INTERVIEW_MAIN_QUESTION_TOTAL) return hit
+    return null
+  }
+
+  let full = readFull()
+  if (full) return full
+
+  let cached = findPrefetchedQuestions(
     jobId,
     String(candidateName || ''),
     resumeScreeningId,
     opts?.inviteCode,
     false
   )
-  if (hit?.length) return hit
-
-  let p = inflightQuestionsByKey.get(key)
-  if (!p) {
-    p = prefetchInterviewQuestions(jobId, candidateName, resumeScreeningId, opts)
+  if (!cached?.length) {
+    try {
+      cached = await prefetchInterviewQuestions(jobId, candidateName, resumeScreeningId, fetchOpts)
+    } catch {
+      /* 首题失败时继续轮询缓存 */
+    }
   }
 
-  let timer: ReturnType<typeof setTimeout> | null = null
-  try {
-    return await Promise.race([
-      p,
-      new Promise<InterviewQuestion[]>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('prefetch_timeout')), timeoutMs)
+  const firstText = String(cached?.[0]?.text || '').trim()
+  if (firstText) {
+    void startInterviewQuestionsRestFetch(jobId, candidateName, firstText, resumeScreeningId, fetchOpts).catch(() => {
+      /* 余题失败由轮询超时处理 */
+    })
+  }
+
+  while (Date.now() < deadline) {
+    full = readFull()
+    if (full) return full
+
+    const key = buildInterviewQuestionsCacheKey(
+      jobId,
+      String(candidateName || ''),
+      resumeScreeningId,
+      opts?.inviteCode
+    )
+    const restInflight = inflightQuestionsRestByKey.get(key)
+    if (restInflight) {
+      try {
+        const merged = await Promise.race([
+          restInflight,
+          sleepMs(Math.min(500, Math.max(0, deadline - Date.now()))).then(() => null as InterviewQuestion[] | null)
+        ])
+        if (merged && countMainInterviewQuestions(merged) >= INTERVIEW_MAIN_QUESTION_TOTAL) return merged
+      } catch {
+        /* 余题请求失败，继续轮询 */
+      }
+    } else if (firstText) {
+      void startInterviewQuestionsRestFetch(jobId, candidateName, firstText, resumeScreeningId, fetchOpts).catch(() => {
+        /* ignore */
       })
-    ])
-  } finally {
-    if (timer) clearTimeout(timer)
+    }
+
+    await sleepMs(400)
   }
+
+  throw new Error('prefetch_timeout')
 }
 
 /** 优先使用等候页预取 / 进行中的预取（含首题快出），再回落到实时分段请求 */

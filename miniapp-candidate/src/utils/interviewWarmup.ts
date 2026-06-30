@@ -2,6 +2,7 @@ import Taro from '@tarojs/taro'
 
 import {
   buildInterviewQuestionsCacheKey,
+  ensureInterviewQuestionsRest,
   prefetchInterviewQuestions,
   type InterviewQuestionFetchOpts
 } from '../services/interviewApi'
@@ -49,6 +50,16 @@ export function prefetchInterviewWarmup(params: {
     .then((questions) => {
       const q0 = String(questions?.[0]?.text || '').trim()
       if (!q0) return
+      ensureInterviewQuestionsRest(
+        params.jobId,
+        params.candidateName,
+        q0,
+        params.resumeScreeningId,
+        fetchOpts,
+        () => {
+          flowLogInfo('面试预热', '后续题目已在后台拉取')
+        }
+      )
       prefetchInterviewQuestionTtsPath(q0, requirePlugin, (path) => {
         if (!path) return
         try {

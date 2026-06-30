@@ -20,13 +20,15 @@ import {
   ensureInterviewQuestionsRest,
   fetchInterviewFollowUpConfig,
   fetchInterviewQuestionsOrPrefetched,
+  fetchInterviewSubmitStatus,
   fetchPreparedFollowUp,
   fetchTrtcCredential,
-  fetchInterviewSubmitStatus,
+  mergeRestIntoQuestionList,
   startLiveSession,
   submitInterview,
   syncLiveQa,
   waitForInterviewQuestionsPrefetch,
+  waitForInterviewQuestionsRest,
   syncLiveTranscript,
   syncTrtcRoomSignal,
   type InterviewFollowUpConfig,
@@ -1059,9 +1061,10 @@ export default function InterviewPage() {
               questionFetchOpts,
               (merged) => {
                 if (!visibleRef.current) return
-                const next = merged.filter((q) => q && String(q.text || '').trim())
+                const next = mergeRestIntoQuestionList(questionListRef.current, merged)
                 if (next.length > questionCountRef.current) {
                   setQuestions(next)
+                  questionListRef.current = next
                   flowLogInfo('面试页', `后续题目已就绪，共 ${next.length} 题`)
                 }
               }
@@ -1276,21 +1279,40 @@ export default function InterviewPage() {
     let activeQuestions = questionListRef.current
     let mainTotal = countMainQuestions(activeQuestions)
 
-    if (mainTotal < INTERVIEW_MAIN_QUESTION_TOTAL) {
+    const mainAnswered = activeQuestions
+      .slice(0, questionIndexRef.current + 1)
+      .filter((q) => q.type !== 'follow_up').length
+    const minMainNeeded = Math.min(INTERVIEW_MAIN_QUESTION_TOTAL, mainAnswered + 1)
+
+    if (mainTotal < minMainNeeded) {
+      const firstMain = activeQuestions.find((q) => q.type !== 'follow_up')
       setCallStatusLine('正在加载剩余面试题，请稍候…')
       try {
-        const merged = await waitForInterviewQuestionsPrefetch(job.id, profile.name, profile.resumeScreeningId, {
-          timeoutMs: 45_000,
-          inviteCode: profile.inviteCode,
-          sessionId
-        })
+        const merged = firstMain?.text
+          ? await waitForInterviewQuestionsRest(
+              job.id,
+              profile.name,
+              firstMain.text,
+              profile.resumeScreeningId,
+              {
+                timeoutMs: 90_000,
+                minMainQuestions: minMainNeeded,
+                inviteCode: profile.inviteCode,
+                sessionId
+              }
+            )
+          : await waitForInterviewQuestionsPrefetch(job.id, profile.name, profile.resumeScreeningId, {
+              timeoutMs: 90_000,
+              inviteCode: profile.inviteCode,
+              sessionId
+            })
         const cleaned = merged.filter((q) => q && String(q.text || '').trim())
         if (cleaned.length) {
-          activeQuestions = cleaned
-          mainTotal = countMainQuestions(cleaned)
-          if (cleaned.length > questionListRef.current.length) {
-            setQuestions(cleaned)
-            questionListRef.current = cleaned
+          activeQuestions = mergeRestIntoQuestionList(questionListRef.current, cleaned)
+          mainTotal = countMainQuestions(activeQuestions)
+          if (activeQuestions.length > questionListRef.current.length) {
+            setQuestions(activeQuestions)
+            questionListRef.current = activeQuestions
           }
         }
       } catch {
@@ -1320,7 +1342,7 @@ export default function InterviewPage() {
         return
       } else {
         Taro.showToast({ title: '题目尚未全部加载，请稍后再试', icon: 'none' })
-        setCallStatusLine('题目加载未完成，请稍候再提交')
+        setCallStatusLine('题目加载未完成，请稍候再点下一题')
         setLoading(false)
         return
       }

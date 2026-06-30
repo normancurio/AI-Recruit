@@ -798,7 +798,7 @@ async function sleepMs(ms: number): Promise<void> {
 
 async function dashScopeChatCompletions(
   body: Record<string, unknown>,
-  opts?: { timeoutMs?: number }
+  opts?: { timeoutMs?: number; enableThinking?: boolean }
 ) {
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
   if (!apiKey) throw new Error('DASHSCOPE_API_KEY missing')
@@ -809,6 +809,12 @@ async function dashScopeChatCompletions(
   if (controller && timeoutMs > 0) {
     timeoutId = setTimeout(() => controller.abort(), timeoutMs)
   }
+  const payload: Record<string, unknown> = { ...body }
+  if (!('enable_thinking' in payload)) {
+    const envThinking = String(process.env.QWEN_ENABLE_THINKING ?? '').trim().toLowerCase()
+    const envOn = envThinking === '1' || envThinking === 'true' || envThinking === 'on'
+    payload.enable_thinking = opts?.enableThinking ?? envOn
+  }
   let resp: Response
   try {
     resp = await fetch(`${base}/chat/completions`, {
@@ -817,7 +823,7 @@ async function dashScopeChatCompletions(
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(payload),
       signal: controller?.signal
     })
   } catch (netErr) {
@@ -1629,7 +1635,7 @@ async function generateFollowUpViaModel(
   answer: string,
   opts?: { force?: boolean }
 ): Promise<string> {
-  const model = config.model || process.env.QWEN_FOLLOWUP_MODEL?.trim() || 'qwen3.5-plus-2026-04-20'
+  const model = config.model || process.env.QWEN_FOLLOWUP_MODEL?.trim() || 'qwen3.7-plus-2026-05-26'
   const userContent = opts?.force
     ? `当前题目：${question}\n候选人回答：${answer}\n你必须生成一个锚定回答细节的追问。只返回 JSON，且 should_follow_up 必须为 true。`
     : `当前题目：${question}\n候选人回答：${answer}\n请基于回答中的具体点生成一个追问。`
@@ -3731,7 +3737,7 @@ async function runResumeScreeningWithAi(params: {
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
   if (!apiKey) return null
   /** 与面试题模型分离：未单独配置时固定用较快模型，避免 QWEN_QUESTION_MODEL 用 plus 时上传简历与出题同等延迟 */
-  const model = process.env.QWEN_RESUME_MODEL?.trim() || 'qwen3.5-plus-2026-04-20'
+  const model = process.env.QWEN_RESUME_MODEL?.trim() || 'qwen3.7-plus-2026-05-26'
   const { userPrompt, systemPrompt } = buildResumeEvalPromptForServer(params)
   const maxAttempts =
     params.maxAttempts != null && Number.isFinite(params.maxAttempts) && params.maxAttempts >= 1
@@ -4591,7 +4597,7 @@ async function runShenpuResumeWithAi(params: {
     evaluationJson: parsedEval
   })
   if (!process.env.DASHSCOPE_API_KEY?.trim()) return fallback
-  const model = process.env.QWEN_RESUME_MODEL?.trim() || process.env.QWEN_QUESTION_MODEL?.trim() || 'qwen3.5-plus-2026-04-20'
+  const model = process.env.QWEN_RESUME_MODEL?.trim() || process.env.QWEN_QUESTION_MODEL?.trim() || 'qwen3.7-plus-2026-05-26'
   const data = await dashScopeChatCompletions({
     model,
     temperature: 0.1,
@@ -4682,7 +4688,7 @@ async function aiFormatSectionsForTemplate(params: {
   )
   if (!keys.length) return undefined
   if (!process.env.DASHSCOPE_API_KEY?.trim()) return undefined
-  const model = process.env.QWEN_RESUME_MODEL?.trim() || process.env.QWEN_QUESTION_MODEL?.trim() || 'qwen3.5-plus-2026-04-20'
+  const model = process.env.QWEN_RESUME_MODEL?.trim() || process.env.QWEN_QUESTION_MODEL?.trim() || 'qwen3.7-plus-2026-05-26'
   const candidateSection = {
     education: params.doc.educationExperiences,
     skills: params.doc.coreSkills,

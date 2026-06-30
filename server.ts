@@ -282,7 +282,7 @@ async function generateJobJdDashScope(payload: GenerateJdPayload): Promise<strin
   const base = (
     process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1'
   ).replace(/\/$/, '');
-  const model = (process.env.QWEN_QUESTION_MODEL || 'qwen-turbo').trim();
+  const model = (process.env.QWEN_QUESTION_MODEL || 'qwen3.7-plus-2026-05-26').trim();
   const loc = String(payload.location || '').trim();
   const sal = String(payload.salary || '').trim();
   const userMsg = [

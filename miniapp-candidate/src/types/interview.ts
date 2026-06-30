@@ -1,4 +1,4 @@
-/** 与 server PERSONALIZED_INTERVIEW_TOTAL 一致 */
+/** 主面试题数量（不含追问）；与分段出题 Q1 + Q2～Q6 一致 */
 export const INTERVIEW_MAIN_QUESTION_TOTAL = 6
 
 export interface CandidateProfile {
