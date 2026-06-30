@@ -25,7 +25,7 @@ export default defineAppConfig({
   },
   plugins: {
         WechatSI: {
-          version: '0.3.6', // 建议使用较新版本，如 0.3.6 或 0.0.7
+          version: '0.3.7',
           provider: 'wx069ba97219f66d99',
         },
   }
