@@ -1597,7 +1597,7 @@ async function generateFollowUpViaModel(
   answer: string,
   opts?: { force?: boolean }
 ): Promise<string> {
-  const model = config.model || process.env.QWEN_FOLLOWUP_MODEL?.trim() || 'qwen-turbo'
+  const model = config.model || process.env.QWEN_FOLLOWUP_MODEL?.trim() || 'qwen3.5-plus-2026-04-20'
   const userContent = opts?.force
     ? `当前题目：${question}\n候选人回答：${answer}\n你必须生成一个锚定回答细节的追问。只返回 JSON，且 should_follow_up 必须为 true。`
     : `当前题目：${question}\n候选人回答：${answer}\n请基于回答中的具体点生成一个追问。`
@@ -3121,7 +3121,7 @@ function resumeOcrEnabled(): boolean {
 }
 
 function resumeOcrModel(): string {
-  return process.env.QWEN_RESUME_OCR_MODEL?.trim() || 'qwen-vl-ocr-latest'
+  return process.env.QWEN_RESUME_OCR_MODEL?.trim() || 'qwen3.5-ocr'
 }
 
 function resumeOcrTimeoutMs(): number {
@@ -3693,13 +3693,18 @@ async function runResumeScreeningWithAi(params: {
   jobTitle: string
   department: string
   jdText: string
+  /** 重新评估等场景可少重试：失败会走关键词 fallback，避免请求总时长超过 Nginx/浏览器超时 */
+  maxAttempts?: number
 }): Promise<ResumeScreeningAiResult | null> {
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
   if (!apiKey) return null
   /** 与面试题模型分离：未单独配置时固定用较快模型，避免 QWEN_QUESTION_MODEL 用 plus 时上传简历与出题同等延迟 */
-  const model = process.env.QWEN_RESUME_MODEL?.trim() || 'qwen-turbo'
+  const model = process.env.QWEN_RESUME_MODEL?.trim() || 'qwen3.5-plus-2026-04-20'
   const { userPrompt, systemPrompt } = buildResumeEvalPromptForServer(params)
-  const maxAttempts = resumeAiMaxAttempts()
+  const maxAttempts =
+    params.maxAttempts != null && Number.isFinite(params.maxAttempts) && params.maxAttempts >= 1
+      ? Math.min(5, Math.floor(params.maxAttempts))
+      : resumeAiMaxAttempts()
   const reqBody: Record<string, unknown> = {
     model,
     temperature: 0.2,
@@ -3976,7 +3981,13 @@ async function reEvaluateResumeScreeningById(screeningId: number): Promise<Resum
   const jdText = String(row.jd_text || '').trim()
   let result: ResumeScreeningAiResult
   try {
-    const ai = await runResumeScreeningWithAi({ resumeText, jobTitle, department, jdText })
+    const ai = await runResumeScreeningWithAi({
+      resumeText,
+      jobTitle,
+      department,
+      jdText,
+      maxAttempts: 1
+    })
     result = ai || fallbackResumeScreening(resumeText, jdText, jobTitle)
   } catch (aiErr) {
     const msg = aiErr instanceof Error ? aiErr.message : String(aiErr)
@@ -4548,7 +4559,7 @@ async function runShenpuResumeWithAi(params: {
     evaluationJson: parsedEval
   })
   if (!process.env.DASHSCOPE_API_KEY?.trim()) return fallback
-  const model = process.env.QWEN_RESUME_MODEL?.trim() || process.env.QWEN_QUESTION_MODEL?.trim() || 'qwen-turbo'
+  const model = process.env.QWEN_RESUME_MODEL?.trim() || process.env.QWEN_QUESTION_MODEL?.trim() || 'qwen3.5-plus-2026-04-20'
   const data = await dashScopeChatCompletions({
     model,
     temperature: 0.1,
@@ -4639,7 +4650,7 @@ async function aiFormatSectionsForTemplate(params: {
   )
   if (!keys.length) return undefined
   if (!process.env.DASHSCOPE_API_KEY?.trim()) return undefined
-  const model = process.env.QWEN_RESUME_MODEL?.trim() || process.env.QWEN_QUESTION_MODEL?.trim() || 'qwen-turbo'
+  const model = process.env.QWEN_RESUME_MODEL?.trim() || process.env.QWEN_QUESTION_MODEL?.trim() || 'qwen3.5-plus-2026-04-20'
   const candidateSection = {
     education: params.doc.educationExperiences,
     skills: params.doc.coreSkills,
@@ -6659,16 +6670,22 @@ async function generatePersonalizedInterviewFirst(params: {
 }
 
 /** Q2～Q6：在首题已展示后生成，题干勿与首题重复 */
-async function generatePersonalizedInterviewRest(params: {
-  title: string
-  department?: string
-  jdText: string
-  resumeText: string
-  candidateName: string
-  firstQuestionText: string
-  promptTemplateId?: number | null
-}) {
-  const { model } = assertDashScopeForInterview()
+type InterviewRestSlice = 'all' | 'q23' | 'q456'
+
+async function generatePersonalizedInterviewRest(
+  params: {
+    title: string
+    department?: string
+    jdText: string
+    resumeText: string
+    candidateName: string
+    firstQuestionText: string
+    promptTemplateId?: number | null
+  },
+  restSlice: InterviewRestSlice = 'all'
+) {
+  assertDashScopeForInterview()
+  const model = resolveQwenInterviewQuestionsRestModel()
   const promptTemplate = await loadInterviewPromptTemplateById(params.promptTemplateId ?? null)
   const builtinTemplate = isBuiltinInterviewPromptTemplate(promptTemplate)
   const systemPromptTemplate = promptTemplate?.systemPrompt || DEFAULT_INTERVIEW_QUESTION_SYSTEM_PROMPT_TEMPLATE
@@ -6678,16 +6695,39 @@ async function generatePersonalizedInterviewRest(params: {
     hasResume: Boolean(String(params.resumeText || '').trim()) ? 'true' : 'false'
   })
   const total = builtinTemplate ? PERSONALIZED_INTERVIEW_TOTAL : extractInterviewQuestionCountFromPrompt(systemPrompt)
-  const restCount = Math.max(0, total - 1)
-  if (restCount === 0) return []
+  const fullRestCount = Math.max(0, total - 1)
+  if (fullRestCount === 0) return []
+  const startQ =
+    restSlice === 'q456' ? 4 : 2
+  const restCount =
+    restSlice === 'q23' ? Math.min(2, fullRestCount) : restSlice === 'q456' ? Math.min(3, Math.max(0, total - 3)) : fullRestCount
+  if (restCount <= 0) return []
+  const endQ = startQ + restCount - 1
   const generationSystemPrompt = builtinTemplate ? systemPrompt : buildInterviewSystemPromptForGeneration(systemPrompt, total)
   const { userPrompt } = buildPersonalizedInterviewUserPromptBlock(params, DEFAULT_INTERVIEW_QUESTION_USER_PROMPT_TEMPLATE, {
     templatePriority: !builtinTemplate
   })
   const firstT = String(params.firstQuestionText || '').trim().slice(0, 2000)
-  const userWithFirst = [userPrompt, `首题已向候选人展示，请勿重复首题内容，并自然衔接深度考察：\n${firstT || '（首题文本缺失，仍请输出 Q2～Q6）'}`].join(
-    '\n\n'
-  )
+  const sliceHint =
+    restSlice === 'q23'
+      ? '当前仅需优先生成 Q2、Q3（简历/项目深挖），Q4～Q6 稍后另批生成，勿输出 Q4 及以后。'
+      : restSlice === 'q456'
+        ? '当前仅需生成 Q4、Q5、Q6（JD 相关纯技术题），勿重复 Q2、Q3。'
+        : ''
+  const userWithFirst = [
+    userPrompt,
+    `首题已向候选人展示，请勿重复首题内容，并自然衔接深度考察：\n${firstT || '（首题文本缺失，仍请输出后续题）'}`,
+    sliceHint
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+  const builtinRestRules =
+    restSlice === 'q23'
+      ? '1) Q2、Q3：必须围绕简历中的具体项目、实习或工作经历追问（技术细节、职责边界、难点与结果）；若用户消息中说明无简历则结合 JD 设计两道「项目/交付」情景深挖题。'
+      : restSlice === 'q456'
+        ? '1) Q4、Q5、Q6：与岗位 JD 强相关的纯技术题（可含原理、方案对比、排错、性能、安全等），不要行为面或空泛的「你怎么看」。'
+        : '1) Q2、Q3：必须围绕简历中的具体项目、实习或工作经历追问（技术细节、职责边界、难点与结果）；若用户消息中说明无简历则结合 JD 设计两道「项目/交付」情景深挖题。\n' +
+          '2) Q4、Q5、Q6：与岗位 JD 强相关的纯技术题（可含原理、方案对比、排错、性能、安全等），不要行为面或空泛的「你怎么看」。'
   try {
     const data = await dashScopeChatCompletions({
       model,
@@ -6696,19 +6736,19 @@ async function generatePersonalizedInterviewRest(params: {
           role: 'system',
           content: builtinTemplate
             ? `${generationSystemPrompt}\n\n` +
-              `当前为分段生成的后续题阶段。请严格输出恰好 ${restCount} 道中文面试题，放在一个 JSON 对象里，格式：{"questions":[{"id":"Q2","text":"题干"},…]}。\n` +
+              `当前为分段生成的后续题阶段。请严格输出恰好 ${restCount} 道中文面试题，放在一个 JSON 对象里，格式：{"questions":[{"id":"Q${startQ}","text":"题干"},…]}。\n` +
               '要求：\n' +
-              '1) Q2、Q3：必须围绕简历中的具体项目、实习或工作经历追问（技术细节、职责边界、难点与结果）；若用户消息中说明无简历则结合 JD 设计两道「项目/交付」情景深挖题。\n' +
-              '2) Q4、Q5、Q6：与岗位 JD 强相关的纯技术题（可含原理、方案对比、排错、性能、安全等），不要行为面或空泛的「你怎么看」。\n' +
-              `id 必须为 Q2 到 Q${total} 递增；不要 markdown 代码块，不要其它说明文字。`
+              `${builtinRestRules}\n` +
+              `id 必须为 Q${startQ} 到 Q${endQ} 递增；不要 markdown 代码块，不要其它说明文字。`
             : `${generationSystemPrompt}\n\n` +
-              `当前为分段生成的后续题阶段。请严格输出恰好 ${restCount} 道中文面试题，放在一个 JSON 对象里，格式：{"questions":[{"id":"Q2","text":"题干"},…]}。\n` +
-              `题目内容必须继续服从 AI 面试官模板；id 必须为 Q2 到 Q${total} 递增；不要 markdown 代码块，不要其它说明文字。`
+              `当前为分段生成的后续题阶段。请严格输出恰好 ${restCount} 道中文面试题，放在一个 JSON 对象里，格式：{"questions":[{"id":"Q${startQ}","text":"题干"},…]}。\n` +
+              `题目内容必须继续服从 AI 面试官模板；id 必须为 Q${startQ} 到 Q${endQ} 递增；不要 markdown 代码块，不要其它说明文字。`
         },
         { role: 'user', content: userWithFirst }
       ],
-      temperature: 0.45
-    })
+      temperature: 0.45,
+      max_tokens: interviewQuestionsRestMaxTokens()
+    }, { timeoutMs: Math.max(30_000, Number(process.env.QWEN_INTERVIEW_QUESTIONS_TIMEOUT_MS) || 120_000) })
     const raw = data?.choices?.[0]?.message?.content
     const text = typeof raw === 'string' ? raw : ''
     if (!text.trim()) {
@@ -6722,7 +6762,7 @@ async function generatePersonalizedInterviewRest(params: {
       const out = parsed
         .slice(0, restCount)
         .map((q, idx) => ({
-          id: `Q${idx + 2}`,
+          id: `Q${startQ + idx}`,
           text: String(q?.text || '').trim()
         }))
         .filter((q) => q.text)
@@ -6993,13 +7033,25 @@ async function bindUserPhoneAndRole(params: { appid: string; openid: string; pho
   return { role: nextRole, phone }
 }
 
+const DEFAULT_QWEN_PLUS_MODEL = 'qwen3.5-plus-2026-04-20'
+
 function resolveQwenQuestionModel(): string {
-  return process.env.QWEN_QUESTION_MODEL?.trim() || 'qwen-turbo'
+  return process.env.QWEN_QUESTION_MODEL?.trim() || DEFAULT_QWEN_PLUS_MODEL
 }
 
-/** 面试提交评分专用；与出题模型分离，默认较快模型避免提交超时 */
+/** Q2～Q6 分段生成专用；默认同 plus */
+function resolveQwenInterviewQuestionsRestModel(): string {
+  return process.env.QWEN_INTERVIEW_QUESTIONS_REST_MODEL?.trim() || DEFAULT_QWEN_PLUS_MODEL
+}
+
+/** 面试提交评分专用；与出题模型分离 */
 function resolveQwenSubmitInterviewModel(): string {
-  return process.env.QWEN_SUBMIT_INTERVIEW_MODEL?.trim() || 'qwen-turbo'
+  return process.env.QWEN_SUBMIT_INTERVIEW_MODEL?.trim() || DEFAULT_QWEN_PLUS_MODEL
+}
+
+function interviewQuestionsRestMaxTokens(): number {
+  const n = Number(process.env.QWEN_INTERVIEW_QUESTIONS_REST_MAX_TOKENS)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 2200
 }
 
 function interviewSubmitAiTimeoutMs(): number {
@@ -12193,6 +12245,9 @@ app.post('/api/candidate/interview-questions-rest', async (req, res) => {
   const inviteCodeRaw = String(req.body?.inviteCode || '').trim()
   const sessionIdRaw = String(req.body?.sessionId || '').trim()
   const firstQuestionText = String(req.body?.firstQuestionText || '').trim()
+  const restSliceRaw = String(req.body?.restSlice || 'all').trim().toLowerCase()
+  const restSlice: InterviewRestSlice =
+    restSliceRaw === 'q23' || restSliceRaw === 'q456' ? restSliceRaw : 'all'
   if (!jobId) return res.status(400).json({ message: '请提供岗位 ID（jobId）' })
   if (!firstQuestionText) return res.status(400).json({ message: '请填写首题题干（firstQuestionText）' })
   try {
@@ -12211,7 +12266,8 @@ app.post('/api/candidate/interview-questions-rest', async (req, res) => {
     if (flowLogEnabled) {
       flowLog('interview-questions-rest 模板', true, `promptTemplateId=${ctx.promptTemplateId ?? 'default'} session=${sessionIdRaw || '—'} invite=${inviteCodeRaw || '—'}`)
     }
-    const rest = await generatePersonalizedInterviewRest({
+    const rest = await generatePersonalizedInterviewRest(
+      {
       title: ctx.title,
       department: ctx.department,
       jdText: ctx.jdText,
@@ -12219,16 +12275,18 @@ app.post('/api/candidate/interview-questions-rest', async (req, res) => {
       candidateName: ctx.effectiveCandidateName || '候选人',
       firstQuestionText,
       promptTemplateId: ctx.promptTemplateId
-    })
+    },
+      restSlice
+    )
     flowLog(
       'interview-questions-rest 成功',
       true,
-      `count=${rest.length} resume=${ctx.resumeText ? 'yes' : 'no'} resumeBind=${ctx.resumeBoundByScreeningId}`
+      `slice=${restSlice} count=${rest.length} resume=${ctx.resumeText ? 'yes' : 'no'} resumeBind=${ctx.resumeBoundByScreeningId}`
     )
     res.json({
       data: {
         questions: rest,
-        partial: false,
+        partial: restSlice !== 'all' || rest.length < PERSONALIZED_INTERVIEW_TOTAL - 1,
         expectedTotal: PERSONALIZED_INTERVIEW_TOTAL
       }
     })
@@ -13055,6 +13113,45 @@ app.post('/api/candidate/submit-interview', async (req, res) => {
       flowLog('submit-interview 异常后落库失败', false, persistErr instanceof Error ? persistErr.message : 'unknown')
     }
     return res.json({ data: fallback })
+  }
+})
+
+app.get('/api/candidate/interview-submit-status', async (req, res) => {
+  const sessionId = String(req.query.sessionId || '').trim().slice(0, 128)
+  if (!sessionId) return res.status(400).json({ message: '请提供 sessionId' })
+  try {
+    const [rows] = await mysqlPool.query<any[]>(
+      `SELECT overall_score, passed, overall_feedback, dimension_scores, suggestions, risk_points
+       FROM interview_reports
+       WHERE session_id=?
+       LIMIT 1`,
+      [sessionId]
+    )
+    if (!rows.length) return res.json({ data: { submitted: false } })
+    const r = rows[0]
+    const parseJsonField = (v: unknown) => {
+      try {
+        return v && String(v).trim() ? JSON.parse(String(v)) : undefined
+      } catch {
+        return undefined
+      }
+    }
+    return res.json({
+      data: {
+        submitted: true,
+        result: {
+          score: Number(r.overall_score) || 0,
+          passed: Boolean(r.passed),
+          overallFeedback: String(r.overall_feedback || ''),
+          dimensionScores: (parseJsonField(r.dimension_scores) as Record<string, number>) || {},
+          suggestions: (parseJsonField(r.suggestions) as string[]) || [],
+          riskPoints: (parseJsonField(r.risk_points) as string[]) || []
+        }
+      }
+    })
+  } catch (e) {
+    flowLog('interview-submit-status', false, e instanceof Error ? e.message : 'unknown')
+    return res.status(500).json({ message: '查询提交状态失败' })
   }
 })
 
