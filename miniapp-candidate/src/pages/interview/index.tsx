@@ -65,14 +65,15 @@ export default function InterviewPage() {
   /** 通话场景顶部状态：读题 / 作答 */
   const [callStatusLine, setCallStatusLine] = useState('正在连接…')
   const [initError, setInitError] = useState('')
-  const firstListenGateRef = useRef({ sid: '', text: '' })
+  /** 任意题读题失败后，点击页面重试 TTS 用 */
+  const questionListenGateRef = useRef({ sid: '', text: '' })
   /** 首题 textToSpeech 预拉路径；用户点击里同步 play，规避微信对异步回调内 play 的限制 */
   const firstQuestionPrefetchedFileRef = useRef('')
   const pendingUsePrefetchedFirstTtsRef = useRef(false)
   const firstQuestionPrefetchUiTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const firstQuestionTtsPrefetchingRef = useRef(false)
-  /** 首题自动播放失败后，等待用户任意点击重试一次 */
-  const firstQuestionNeedsTapRetryRef = useRef(false)
+  /** 自动读题失败后，等待用户任意点击重试一次（不限首题） */
+  const questionNeedsTapRetryRef = useRef(false)
   const [cameraError, setCameraError] = useState('')
   /** 已用 TRTC live-pusher 进房（未配置或服务端 503 时为 false，使用原生 Camera） */
   const [trtcActive, setTrtcActive] = useState(false)
@@ -289,6 +290,9 @@ export default function InterviewPage() {
   const dropNextOnStopResultRef = useRef(false)
   /** 切题或首题：转写 stop 完成后先播题目 TTS 再 openRecognition */
   const pendingTtsAfterStopRef = useRef<string | null>(null)
+  /** 识别忙等错误后，仅重启转写（不播 TTS），可保留已转写内容 */
+  const pendingRecognitionResumeRef = useRef<{ preserve: boolean } | null>(null)
+  const recognitionBusyRetryCountRef = useRef(0)
   /** 读题播报进行中时，强制忽略转写结果 */
   const questionTtsPlayingRef = useRef(false)
   /** 读题结束后的短窗口，忽略可能被拾取到的播报残音 */
@@ -516,7 +520,7 @@ export default function InterviewPage() {
     firstQuestionTtsPrefetchingRef.current = false
     firstQuestionPrefetchedFileRef.current = ''
     pendingUsePrefetchedFirstTtsRef.current = false
-    firstQuestionNeedsTapRetryRef.current = false
+    questionNeedsTapRetryRef.current = false
     if (firstQuestionPrefetchUiTimerRef.current) {
       clearTimeout(firstQuestionPrefetchUiTimerRef.current)
       firstQuestionPrefetchUiTimerRef.current = null
@@ -596,6 +600,43 @@ export default function InterviewPage() {
       }
     }
 
+    const mergeLiveTranscriptIntoFinalized = () => {
+      const live = latestLiveTranscriptSyncRef.current.trim()
+      if (!live) return transcriptFinalizedRef.current.length > 0
+      transcriptFinalizedRef.current = [live]
+      setTranscriptFinalized([live])
+      latestLiveTranscriptSyncRef.current = live
+      return true
+    }
+
+    const scheduleRecognitionBusyRetry = (sidInner: string) => {
+      if (recognitionBusyRetryCountRef.current >= 4) {
+        flowLogInfo('WechatSI', '识别忙重试次数已达上限')
+        setCallStatusLine('转写暂时不可用，请稍候再答或切后台重进')
+        return
+      }
+      recognitionBusyRetryCountRef.current += 1
+      const queuedTts = pendingTtsAfterStopRef.current
+      flowLogInfo(
+        'WechatSI',
+        `识别忙，自动重试 (${recognitionBusyRetryCountRef.current}/4)${queuedTts ? '，含读题' : ''}`
+      )
+      setCallStatusLine(queuedTts ? '读题重启中，请稍候…' : '转写重启中，请稍候…')
+      setTimeout(() => {
+        if (!visibleRef.current || loadingRef.current || questionCountRef.current <= 0) return
+        if (queuedTts && String(queuedTts).trim()) {
+          pendingRecognitionResumeRef.current = null
+          pendingTtsAfterStopRef.current = String(queuedTts)
+          startWechatSiTranscribe(sidInner, true)
+          return
+        }
+        const keepAccumulated = mergeLiveTranscriptIntoFinalized()
+        pendingRecognitionResumeRef.current = { preserve: keepAccumulated }
+        pendingTtsAfterStopRef.current = null
+        startWechatSiTranscribe(sidInner, true)
+      }, 650)
+    }
+
     /**
      * WechatSI 单次 start 最长 duration（默认 60s）到点会 onStop。
      * 同题续录时必须 preserveAccumulated，否则门控里清空 finalized 会导致「答到一分钟字全没了」。
@@ -629,9 +670,19 @@ export default function InterviewPage() {
       const shouldDropQuestionEcho = (raw: string) => {
         const t = normalizeText(raw)
         if (!t || t.length < 6) return false
-        const q = normalizeText(String(questionListRef.current[questionIndexRef.current]?.text || ''))
+        const currentQ = questionListRef.current[questionIndexRef.current]
+        const q = normalizeText(String(currentQ?.text || ''))
         if (!q || q.length < 6) return false
         const sinceOpen = Date.now() - answerRecognitionOpenedAtRef.current
+        /** 追问会锚定上一答，题干常含候选人刚说过的词；全量 q.includes(t) 会把正常复述误杀成「有声无字」 */
+        if (currentQ?.type === 'follow_up') {
+          if (sinceOpen >= 0 && sinceOpen < 2200) {
+            const common = longestCommonSubstringLen(t, q)
+            const coverage = common / Math.max(1, Math.min(t.length, q.length))
+            if (common >= 12 && coverage >= 0.78) return true
+          }
+          return false
+        }
         if (sinceOpen >= 0 && sinceOpen < 1800) {
           const common = longestCommonSubstringLen(t, q)
           const coverage = common / Math.max(1, Math.min(t.length, q.length))
@@ -675,6 +726,7 @@ export default function InterviewPage() {
             answerPhaseGateTimerRef.current = null
           }
           answerTranscriptOpenRef.current = false
+          setShowAnswerTranscript(true)
         } else if (resumeAfterTts) {
           if (answerPhaseGateTimerRef.current) {
             clearTimeout(answerPhaseGateTimerRef.current)
@@ -788,6 +840,7 @@ export default function InterviewPage() {
             clearTimeout(answerPhaseGateTimerRef.current)
             answerPhaseGateTimerRef.current = null
           }
+          mergeLiveTranscriptIntoFinalized()
           answerTranscriptOpenRef.current = false
           recordManagerRef.current = null
           setTranscribing(false)
@@ -800,15 +853,25 @@ export default function InterviewPage() {
             }
           })()
           flowLog('WechatSI onError', false, msg || 'unknown')
-          const friendly =
+          const recognitionBusy =
             /please wait recognition finished/i.test(msg) || /recognition finished/i.test(msg)
+          if (
+            recognitionBusy &&
+            visibleRef.current &&
+            !loadingRef.current &&
+            questionCountRef.current > 0
+          ) {
+            scheduleRecognitionBusyRetry(sidInner)
+            return
+          }
+          const friendly = recognitionBusy
             ? '上一段识别尚未结束，请稍候再试；若刚切换题目，请稍等一秒。'
             : '转写不可用：请检查麦克风权限、插件配置，或改手动输入'
           flowLogInfo('WechatSI', friendly)
         }
         const startOpts = { lang: 'zh_CN', duration: 60000 }
         manager.start(startOpts)
-        const gateDelayMs = resumeAfterTts ? 80 : 220
+        const gateDelayMs = resumeAfterTts || preserveAccumulated ? 80 : 220
         answerTranscriptOpenRef.current = false
         answerPhaseGateTimerRef.current = setTimeout(() => {
           answerPhaseGateTimerRef.current = null
@@ -822,6 +885,7 @@ export default function InterviewPage() {
           setTranscriptStreaming('')
           answerRecognitionOpenedAtRef.current = Date.now()
           answerTranscriptOpenRef.current = true
+          recognitionBusyRetryCountRef.current = 0
           setShowAnswerTranscript(true)
         }, gateDelayMs)
         setTranscribing(true)
@@ -878,14 +942,16 @@ export default function InterviewPage() {
       }
       recordManagerRef.current = null
       setTranscribing(false)
+      const ttsText = String(ttsRaw || '').trim()
       questionTtsPlayingRef.current = true
-      setCallStatusLine('AI 正在读题...')
+      const isFollowUpQ = questionListRef.current[questionIndexRef.current]?.type === 'follow_up'
+      setCallStatusLine(isFollowUpQ ? 'AI 正在读追问…' : 'AI 正在读题...')
+      questionListenGateRef.current = { sid: sidInner, text: ttsText }
       closeAnswerTranscriptDisplay()
       transcriptFinalizedRef.current = []
       setTranscriptFinalized([])
       setTranscriptStreaming('')
       latestLiveTranscriptSyncRef.current = ''
-      const ttsText = String(ttsRaw || '').trim()
       let prebuilt: string | undefined
       if (pendingUsePrefetchedFirstTtsRef.current && questionIndexRef.current === 0) {
         pendingUsePrefetchedFirstTtsRef.current = false
@@ -899,7 +965,7 @@ export default function InterviewPage() {
           audioRef: questionInnerAudioRef,
           onStatus: setCallStatusLine,
           onPlayStart: () => {
-            firstQuestionNeedsTapRetryRef.current = false
+            questionNeedsTapRetryRef.current = false
             setDigitalHumanMode('speaking')
           },
           prebuiltFilename: prebuilt
@@ -911,8 +977,8 @@ export default function InterviewPage() {
           ignoreRecognizeBeforeTsRef.current = Date.now() + 250
           setTranscriptStreaming('')
           resumeAnswerAfterQuestionTts(sidInner)
-          if (questionIndexRef.current === 0 && !result.heardAudio) {
-            firstQuestionNeedsTapRetryRef.current = true
+          if (!result.heardAudio) {
+            questionNeedsTapRetryRef.current = true
             setCallStatusLine('自动读题失败，请点击页面任意位置后重试')
           }
         }
@@ -920,6 +986,12 @@ export default function InterviewPage() {
     }
 
     const resumeAfterStop = (sidInner: string) => {
+      const pendingRec = pendingRecognitionResumeRef.current
+      if (pendingRec) {
+        pendingRecognitionResumeRef.current = null
+        openRecognition(sidInner, { preserveAccumulated: pendingRec.preserve })
+        return
+      }
       const t = pendingTtsAfterStopRef.current
       pendingTtsAfterStopRef.current = null
       if (t != null && String(t).trim().length > 0) {
@@ -972,19 +1044,18 @@ export default function InterviewPage() {
     closeAnswerTranscriptDisplay
   ])
 
-  const handleAnyTapRetryFirstQuestion = useCallback(() => {
-    if (!firstQuestionNeedsTapRetryRef.current) return
-    if (questionIndexRef.current !== 0) {
-      firstQuestionNeedsTapRetryRef.current = false
-      return
-    }
-    const { sid, text } = firstListenGateRef.current
-    if (!sid || !String(text).trim()) return
-    firstQuestionNeedsTapRetryRef.current = false
-    pendingTtsAfterStopRef.current = text
-    pendingUsePrefetchedFirstTtsRef.current = Boolean(firstQuestionPrefetchedFileRef.current)
+  const handleAnyTapRetryQuestion = useCallback(() => {
+    if (!questionNeedsTapRetryRef.current) return
+    const { sid, text } = questionListenGateRef.current
+    const retryText = String(pendingTtsAfterStopRef.current || text || '').trim()
+    if (!sid || !retryText) return
+    questionNeedsTapRetryRef.current = false
+    pendingRecognitionResumeRef.current = null
+    pendingTtsAfterStopRef.current = retryText
+    pendingUsePrefetchedFirstTtsRef.current =
+      questionIndexRef.current === 0 && Boolean(firstQuestionPrefetchedFileRef.current)
     setCallStatusLine('已检测到点击，准备重试语音读题…')
-    void startWechatSiTranscribe(sid, false)
+    void startWechatSiTranscribe(sid, true)
   }, [startWechatSiTranscribe])
 
   useDidShow(() => {
@@ -1095,8 +1166,8 @@ export default function InterviewPage() {
             flowLogInfo('面试页', '首题：需在本页点击后播放读题（微信音频策略）')
             const q0 = cleaned[0]?.text ?? ''
             pendingTtsAfterStopRef.current = q0
-            firstListenGateRef.current = { sid, text: q0 }
-            firstQuestionNeedsTapRetryRef.current = false
+            questionListenGateRef.current = { sid, text: q0 }
+            questionNeedsTapRetryRef.current = false
             setCallStatusLine('题目已就绪，准备自动语音读题…')
             const warmedTts = consumePrefetchedFirstQuestionTts(questionsCacheKey)
             firstQuestionPrefetchedFileRef.current = warmedTts
@@ -1259,6 +1330,7 @@ export default function InterviewPage() {
       ummAvatarActivatedRef.current = false
       setDigitalHumanMode('idle')
       pendingTtsAfterStopRef.current = followUp.text
+      questionListenGateRef.current = { sid: sessionId, text: followUp.text }
       setCallStatusLine('面试官有一则追问，请听题后补充作答')
       setIndex(nextIdx)
       // 同步 ref：否则 force 重启转写/读题时 questionIndex 仍指上一题，回声过滤会拿错题干
@@ -1333,6 +1405,10 @@ export default function InterviewPage() {
         ummAvatarActivatedRef.current = false
         setDigitalHumanMode('idle')
         pendingTtsAfterStopRef.current = activeQuestions[nextIdx]?.text ?? ''
+        questionListenGateRef.current = {
+          sid: sessionId,
+          text: activeQuestions[nextIdx]?.text ?? ''
+        }
         setCallStatusLine('请听下一题')
         setIndex(nextIdx)
         questionListRef.current = activeQuestions
@@ -1354,6 +1430,10 @@ export default function InterviewPage() {
       ummAvatarActivatedRef.current = false
       setDigitalHumanMode('idle')
       pendingTtsAfterStopRef.current = activeQuestions[nextIdx]?.text ?? questions[nextIdx]?.text ?? ''
+      questionListenGateRef.current = {
+        sid: sessionId,
+        text: activeQuestions[nextIdx]?.text ?? questions[nextIdx]?.text ?? ''
+      }
       setIndex(nextIdx)
       questionListRef.current = activeQuestions
       questionIndexRef.current = nextIdx
@@ -1403,7 +1483,7 @@ export default function InterviewPage() {
     (dhMode === 'listening' && (!ummVideoReady || ummVideoBuffering))
 
   return (
-    <View className='safe-container interview-page' onClick={handleAnyTapRetryFirstQuestion}>
+    <View className='safe-container interview-page' onClick={handleAnyTapRetryQuestion}>
       <View className='interview-hero'>
         <View className='interviewer-stage'>
           <View className='interviewer-bg' />
@@ -1601,7 +1681,11 @@ export default function InterviewPage() {
           <View className='answer-box'>
             <Text className='answer-label'>实时转写回答</Text>
             <View className='transcript-composer'>
-              {!showAnswerTranscript ? <Text className='answer-placeholder'>读题中，转写内容暂不显示</Text> : null}
+              {!showAnswerTranscript ? (
+                <Text className='answer-placeholder'>
+                  {isFollowUp ? '正在读追问，转写内容暂不显示' : '读题中，转写内容暂不显示'}
+                </Text>
+              ) : null}
               {showAnswerTranscript && transcriptFinalized.length === 0 && !transcriptStreaming && !transcribing ? (
                 <Text className='answer-placeholder'>请直接口述作答，转写文本将显示在这里</Text>
               ) : null}

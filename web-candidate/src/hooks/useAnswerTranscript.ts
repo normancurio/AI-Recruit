@@ -159,7 +159,8 @@ export function useAnswerTranscript({
         shouldDropQuestionEcho({
           raw: t,
           questionText: q?.text || '',
-          answerOpenedAt: answerOpenedAtRef.current
+          answerOpenedAt: answerOpenedAtRef.current,
+          isFollowUp: q?.type === 'follow_up'
         })
       ) {
         return
@@ -240,6 +241,8 @@ export function useAnswerTranscript({
         finalizedRef.current = []
         setFinalized([])
         setStreaming('')
+      } else {
+        setShowAnswerTranscript(true)
       }
       gateTimerRef.current = setTimeout(() => {
         gateTimerRef.current = null
@@ -273,7 +276,8 @@ export function useAnswerTranscript({
           shouldDropQuestionEcho({
             raw: t,
             questionText: q?.text || '',
-            answerOpenedAt: answerOpenedAtRef.current
+            answerOpenedAt: answerOpenedAtRef.current,
+            isFollowUp: q?.type === 'follow_up'
           })
         ) {
           return
@@ -444,7 +448,8 @@ export function useAnswerTranscript({
       questionTtsPlayingRef.current = true
       setNeedsTapToSpeak(false)
       pendingTapTtsRef.current = null
-      onStatus?.('AI 正在读题…')
+      const isFollowUpQ = getCurrentQuestion()?.type === 'follow_up'
+      onStatus?.(isFollowUpQ ? 'AI 正在读追问…' : 'AI 正在读题…')
       closeAnswerDisplay()
       finalizedRef.current = []
       setFinalized([])
@@ -486,7 +491,7 @@ export function useAnswerTranscript({
         }
       )
     },
-    [closeAnswerDisplay, onStatus, startAnswerRecognition, stopAsr]
+    [closeAnswerDisplay, getCurrentQuestion, onStatus, startAnswerRecognition, stopAsr]
   )
 
   const retrySpeakAfterTap = useCallback(() => {

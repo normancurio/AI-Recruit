@@ -95,6 +95,7 @@ export default function InterviewPage() {
   }, [needsTapToSpeak, retrySpeakAfterTap])
 
   const current = questions[index]
+  const isFollowUp = current?.type === 'follow_up'
   const isLast = questions.length > 0 && index === questions.length - 1
   const composedAnswer = useMemo(() => {
     const manual = manualText.trim()
@@ -340,7 +341,9 @@ export default function InterviewPage() {
         </p>
         <div className="transcript-box">
           {!showAnswerTranscript ? (
-            <p style={{ margin: 0, color: '#94a3b8', fontSize: 14 }}>读题中，转写内容暂不显示</p>
+            <p style={{ margin: 0, color: '#94a3b8', fontSize: 14 }}>
+              {isFollowUp ? '正在读追问，转写内容暂不显示' : '读题中，转写内容暂不显示'}
+            </p>
           ) : null}
           {showAnswerTranscript && spokenText ? (
             <p style={{ margin: 0, fontSize: 15, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>

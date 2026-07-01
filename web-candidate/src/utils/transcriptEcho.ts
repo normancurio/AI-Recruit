@@ -29,12 +29,22 @@ export function shouldDropQuestionEcho(params: {
   raw: string
   questionText: string
   answerOpenedAt: number
+  /** 追问题干会复述候选人刚答内容，不宜对全句做子串过滤 */
+  isFollowUp?: boolean
 }): boolean {
   const t = normalizeText(params.raw)
   if (!t || t.length < 6) return false
   const q = normalizeText(params.questionText)
   if (!q || q.length < 6) return false
   const sinceOpen = Date.now() - params.answerOpenedAt
+  if (params.isFollowUp) {
+    if (sinceOpen >= 0 && sinceOpen < 2200) {
+      const common = longestCommonSubstringLen(t, q)
+      const coverage = common / Math.max(1, Math.min(t.length, q.length))
+      if (common >= 12 && coverage >= 0.78) return true
+    }
+    return false
+  }
   if (sinceOpen >= 0 && sinceOpen < 1800) {
     const common = longestCommonSubstringLen(t, q)
     const coverage = common / Math.max(1, Math.min(t.length, q.length))
