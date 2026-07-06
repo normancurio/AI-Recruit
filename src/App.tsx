@@ -6311,6 +6311,101 @@ function resumeDimensionEvidenceText(
   return lines.slice(0, 2).join('；')
 }
 
+function htmlEscapeForWordExport(s: string): string {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+/** 简历筛查报告 → Word（HTML .doc，与初面管理面试报告导出方式一致） */
+function downloadResumeScreeningReportWord(resume: Resume): void {
+  const esc = htmlEscapeForWordExport
+  const jobTitle = String(resume.job || '').trim()
+  const dimEntries = resumeDimensionOrderedEntries(resume.resumeDimensionScores || {})
+  const dimsHtml =
+    dimEntries.length > 0
+      ? dimEntries
+          .map(([k, v]) => {
+            const evidence = resumeDimensionEvidenceText(resume.evaluationJson, k, jobTitle)
+            return `<div style="margin: 0 0 10px 0; padding: 8px 10px; border: 1px solid #e5e7eb; border-radius: 6px;">
+              <p style="margin: 0 0 4px 0;"><strong>${esc(resumeEvalDimensionLabelCn(k))}</strong> · ${Number(v) || 0}</p>
+              <p style="margin: 0; font-size: 13px; color: #4b5563;">${esc(evidence)}</p>
+            </div>`
+          })
+          .join('')
+      : `<ul style="margin: 0 0 8px 18px; padding: 0;">
+          <li>技能：${resume.skillScore ?? '—'}</li>
+          <li>经验：${resume.experienceScore ?? '—'}</li>
+          <li>学历：${resume.educationScore ?? '—'}</li>
+          <li>稳定：${resume.stabilityScore ?? '—'}</li>
+        </ul>`
+  const summary = reportHasStructuredSections(resume)
+    ? reportSummaryBodyText(resume) || '暂无评估摘要。'
+    : resume.reportSummary?.trim() || '暂无报告正文。'
+  const strengths =
+    reportHasStructuredSections(resume) && Array.isArray(resume.evaluationJson?.strengths) && resume.evaluationJson.strengths.length
+      ? resume.evaluationJson.strengths
+          .slice(0, 5)
+          .map((x) => `<li>${esc(String(x || ''))}</li>`)
+          .join('')
+      : ''
+  const risks =
+    reportHasStructuredSections(resume) && Array.isArray(resume.evaluationJson?.risks) && resume.evaluationJson.risks.length
+      ? resume.evaluationJson.risks.slice(0, 5).map((r, idx) => {
+          const riskText =
+            typeof r === 'string'
+              ? String(r || '未描述风险')
+              : String(r?.risk || r?.interview_question || '未描述风险')
+          const verify =
+            typeof r === 'object' && r?.interview_question
+              ? `（面试核验：${esc(String(r.interview_question))}）`
+              : ''
+          return `<li>${esc(riskText)}${verify}</li>`
+        }).join('')
+      : ''
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>简历筛查报告</title>
+</head>
+<body style="font-family: 'Microsoft YaHei', Arial, sans-serif; color: #111827; line-height: 1.6;">
+  <h2 style="margin: 0 0 12px 0;">AI-Recruit 简历筛查报告</h2>
+  <p style="margin: 0 0 4px 0;"><strong>候选人：</strong>${esc(resume.name || '—')}</p>
+  <p style="margin: 0 0 4px 0;"><strong>岗位：</strong>${esc(jobTitle || '—')}</p>
+  <p style="margin: 0 0 4px 0;"><strong>上传时间：</strong>${esc(resume.uploadTime || '—')}</p>
+  ${resume.phone ? `<p style="margin: 0 0 12px 0;"><strong>手机：</strong>${esc(maskPhoneMiddleFour(resume.phone))}</p>` : '<p style="margin: 0 0 12px 0;"></p>'}
+  ${resume.flowStage ? `<p style="margin: 0 0 8px 0;"><strong>流程阶段：</strong>${esc(resume.flowStage)}</p>` : ''}
+  <p style="margin: 0 0 4px 0;"><strong>简历匹配分：</strong>${Number(resume.matchScore) || 0}</p>
+  <p style="margin: 0 0 8px 0;"><strong>AI 结论：</strong>${esc(resume.status || '—')}</p>
+  ${resume.evaluationJson?.decision ? `<p style="margin: 0 0 12px 0;"><strong>结构化结论：</strong>${esc(String(resume.evaluationJson.decision))}</p>` : ''}
+
+  <h3 style="margin: 14px 0 8px 0;">维度评分</h3>
+  ${dimsHtml}
+
+  <h3 style="margin: 14px 0 8px 0;">评估摘要</h3>
+  <p style="margin: 0; white-space: pre-wrap;">${esc(summary)}</p>
+
+  ${strengths ? `<h3 style="margin: 14px 0 8px 0;">结构化优势</h3><ul style="margin: 0 0 8px 18px; padding: 0;">${strengths}</ul>` : ''}
+  ${risks ? `<h3 style="margin: 14px 0 8px 0;">结构化风险与核验问题</h3><ul style="margin: 0 0 8px 18px; padding: 0;">${risks}</ul>` : ''}
+</body>
+</html>`
+  const safeName = `${resume.name || '候选人'}-${jobTitle || '岗位'}-筛查报告`
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .slice(0, 120)
+  const blob = new Blob(['\uFEFF', html], { type: 'application/msword;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${safeName}.doc`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 /** 大模型未走通时的入库记录（含历史「关键词估算」文案） */
 function isResumeScreeningFallbackRow(
   evalJson: Resume['evaluationJson'] | undefined,
@@ -10841,6 +10936,14 @@ function ResumeScreeningView({
                 >
                   {reportReEvalBusy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}
                   重新 AI 评估
+                </button>
+                <button
+                  type="button"
+                  onClick={() => reportResume && downloadResumeScreeningReportWord(reportResume)}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
+                >
+                  <Download className="h-4 w-4" aria-hidden />
+                  下载报告
                 </button>
                 <button
                   type="button"
