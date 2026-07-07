@@ -4776,7 +4776,7 @@ function JobEditorModal({
                         )
                       }
                       className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm"
-                      placeholder="默认 qwen3.7-plus-2026-05-26"
+                      placeholder="默认 qwen3.7-plus"
                     />
                   </div>
                   <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 self-end pb-2">
@@ -14055,7 +14055,7 @@ function SystemAiInterviewSettingsView() {
                       disabled={saving}
                       onChange={(e) => updateConfig({ model: e.target.value })}
                       className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
-                      placeholder="默认 qwen3.7-plus-2026-05-26"
+                      placeholder="默认 qwen3.7-plus"
                     />
                   </div>
                   <label className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm font-medium text-slate-700">

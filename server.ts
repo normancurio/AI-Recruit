@@ -17,6 +17,11 @@ import {
   jobTitleValidationMessage
 } from './shared/jobTaxonomy';
 import { createResilientMysqlPool } from './shared/mysqlResilientPool';
+import {
+  defaultQwenPlusModel,
+  isQwenPlusModelQuotaExhausted,
+  qwenPlusModelFallbackFor
+} from './shared/qwenModelConfig';
 
 const envLocalPath = path.resolve(process.cwd(), '.env.local');
 if (fs.existsSync(envLocalPath)) {
@@ -282,7 +287,7 @@ async function generateJobJdDashScope(payload: GenerateJdPayload): Promise<strin
   const base = (
     process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1'
   ).replace(/\/$/, '');
-  const model = (process.env.QWEN_QUESTION_MODEL || 'qwen3.7-plus-2026-05-26').trim();
+  const model = (process.env.QWEN_QUESTION_MODEL || defaultQwenPlusModel()).trim();
   const loc = String(payload.location || '').trim();
   const sal = String(payload.salary || '').trim();
   const userMsg = [
@@ -316,37 +321,54 @@ async function generateJobJdDashScope(payload: GenerateJdPayload): Promise<strin
     ].join('\n');
   }
 
-  const resp = await fetch(`${base}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.65,
-      messages: [
-        {
-          role: 'system',
-          content:
-            '你是资深招聘与用人经理，只输出可直接粘贴到招聘系统的岗位 JD 正文，使用中文，适当用序号分条，不要输出 JSON，不要用 markdown 代码块围栏。'
-        },
-        { role: 'user', content: userMsg }
-      ]
-    })
-  });
-  const data = (await resp.json()) as {
-    choices?: { message?: { content?: string } }[];
-    error?: { message?: string };
-    message?: string;
+  const reqBody = {
+    model,
+    temperature: 0.65,
+    messages: [
+      {
+        role: 'system',
+        content:
+          '你是资深招聘与用人经理，只输出可直接粘贴到招聘系统的岗位 JD 正文，使用中文，适当用序号分条，不要输出 JSON，不要用 markdown 代码块围栏。'
+      },
+      { role: 'user', content: userMsg }
+    ]
   };
-  if (!resp.ok) {
-    const msg = data?.error?.message || data?.message || JSON.stringify(data);
-    throw new Error(msg || '大模型调用失败');
+
+  const callJdModel = async (body: typeof reqBody) => {
+    const resp = await fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+    const data = (await resp.json()) as {
+      choices?: { message?: { content?: string } }[];
+      error?: { message?: string };
+      message?: string;
+    };
+    if (!resp.ok) {
+      const msg = data?.error?.message || data?.message || JSON.stringify(data);
+      const e = new Error(msg || '大模型调用失败') as Error & { httpStatus?: number };
+      e.httpStatus = resp.status;
+      throw e;
+    }
+    const text = String(data?.choices?.[0]?.message?.content || '').trim();
+    if (!text) throw new Error('大模型未返回内容');
+    return text;
+  };
+
+  try {
+    return await callJdModel(reqBody);
+  } catch (e) {
+    const fallback = qwenPlusModelFallbackFor(model);
+    if (fallback && isQwenPlusModelQuotaExhausted(e)) {
+      console.warn(`[generateJobJd] 模型 ${model} 配额/不可用，降级 ${fallback}`);
+      return await callJdModel({ ...reqBody, model: fallback });
+    }
+    throw e;
   }
-  const text = String(data?.choices?.[0]?.message?.content || '').trim();
-  if (!text) throw new Error('大模型未返回内容');
-  return text;
 }
 
 /** 业务库 projects 是否已执行 migration_projects_ui_fields.sql */
